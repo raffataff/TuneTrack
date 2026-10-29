@@ -1,9 +1,11 @@
+import json
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from tunetrack import api, engine, generators, notation, theory
+from tunetrack import api, engine, generators, notation, plugins, theory
 
 
 # ---- notation ---------------------------------------------------------------------------------------------
@@ -209,6 +211,41 @@ def test_wav_loop_chunk(tmp_path):
     i = raw.index(b"smpl")
     start, end = struct.unpack("<II", raw[i + 8 + 36 + 8: i + 8 + 36 + 16])
     assert (start, end) == (100, 4799)
+
+
+# ---- patches (worker stubbed) -------------------------------------------------------------------------------
+
+def test_capture_and_import_do_not_send_registry_param_count(monkeypatch):
+    entry = {"name": "Fake Synth", "path": "C:/fake.vst3", "kind": "instrument", "host": "dawdreamer", "params": 42}
+    monkeypatch.setattr(plugins, "load_registry", lambda: {"plugins": [entry]})
+    specs = []
+
+    def fake_worker(cmd, arg, timeout=300):
+        specs.append(json.loads(Path(arg).read_text(encoding="utf-8")))
+        return {"ok": True, "params": 42}
+
+    monkeypatch.setattr(plugins, "run_worker", fake_worker)
+    meta = plugins.capture("Fake Synth", "Test Sound")
+    plugins.import_preset("Fake Synth", "C:/fake.vstpreset", "Test Preset")
+    assert [("params" in s["plugin"]) for s in specs] == [False, False]
+    assert meta["param_count"] == 42
+
+
+def test_patch_channel_reaches_the_rendered_midi(monkeypatch, proj, tmp_path):
+    import mido
+    entry = {"name": "Fake Multi", "path": "C:/fake.vst3", "kind": "instrument", "host": "dawdreamer", "params": 9}
+    monkeypatch.setattr(plugins, "load_registry", lambda: {"plugins": [entry]})
+    plugins.save_patch({"id": "fake-multi-cello", "name": "Cello", "plugin": "Fake Multi", "kind": "instrument",
+                        "tags": [], "state": "fake-multi.state", "channel": 6})
+    with pytest.raises(ValueError):
+        api.patch_update("fake-multi-cello", channel=17)
+    dev = api.parse_device("patch:fake-multi-cello")
+    spec = engine.resolve_device(dev, api.load(), True)
+    assert spec["channel"] == 6
+    api.write("Lead", "C4:q D4 E4 F4")
+    engine.write_midi(api.load(), api.load().track("Lead"), tmp_path / "t.mid", spec["channel"] - 1)
+    chans = {m.channel for m in mido.MidiFile(str(tmp_path / "t.mid")) if m.type == "note_on"}
+    assert chans == {5}
 
 
 # ---- import / export / render (spawns worker processes) ---------------------------------------------------

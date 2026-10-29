@@ -14,7 +14,7 @@ REGISTRY_FILE = HOME / "plugins.json"
 CONFIG_FILE = HOME / "config.json"
 PROJECTS_DIR = Path(os.environ.get("TUNETRACK_PROJECTS", ROOT / "projects"))
 
-ENGINE_VERSION = "1"  # bump to invalidate every render cache
+ENGINE_VERSION = "2"  # bump to invalidate every render cache
 
 DEFAULT_CONFIG = {
     "vst3_dirs": [

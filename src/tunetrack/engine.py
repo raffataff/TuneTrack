@@ -41,16 +41,19 @@ def resolve_device(dev: Device, p: Project, instrument: bool) -> dict | None:
     if dev.type == "vst3":
         state = None
         name = dev.name
+        extra = {}
         if dev.patch:
             meta = plugins.get_patch(dev.patch)
             name = meta["plugin"]
             sfile = plugins.state_file(meta)
             state = str(sfile) if sfile and sfile.exists() else None
+            if meta.get("channel"):  # a slot of a multitimbral plugin (HALion: slot N listens on channel N)
+                extra["channel"] = int(meta["channel"])
         entry = plugins.resolve(name)
         if instrument and entry["kind"] != "instrument":
             raise ValueError(f"{entry['name']} is an effect, not an instrument")
         return {"type": "vst3", "path": entry["path"], "host": entry["host"], "shell": entry.get("shell"),
-                "state": state, "params": dev.params, "name": entry["name"]}
+                "state": state, "params": dev.params, "name": entry["name"], **extra}
     raise ValueError(f"Unknown device type {dev.type!r}")
 
 
@@ -119,11 +122,11 @@ def _to_track(events: list, head: list | None = None):
     return tr
 
 
-def write_midi(p: Project, t: Track, path: Path) -> int:
+def write_midi(p: Project, t: Track, path: Path, channel: int = 0) -> int:
     """Write a track's clips to a type-0 MIDI file with the project's tempo map. Returns the note count."""
     import mido
     tpb = 960
-    events, count = _track_events(p, t, tpb)
+    events, count = _track_events(p, t, tpb, channel)
     mf = mido.MidiFile(ticks_per_beat=tpb)
     mf.tracks.append(_to_track(_tempo_events(p, tpb) + events))
     mf.save(str(path))
@@ -305,7 +308,7 @@ class Renderer:
             job["out"] = str(out)
             if t.kind == "midi":
                 midi = self.cache / f"{key}.mid"
-                write_midi(self.p, t, midi)
+                write_midi(self.p, t, midi, (spec.get("instrument") or {}).get("channel", 1) - 1)
                 job["midi"] = str(midi)
             else:
                 inp = self.cache / f"{key}.in.wav"

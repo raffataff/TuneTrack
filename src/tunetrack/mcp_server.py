@@ -370,9 +370,10 @@ def patch_import(plugin: str, preset_file: str, name: str, tags: list[str] | Non
 @tool
 def patch_update(patch_id: str, name: str | None = None, tags: list[str] | None = None,
                  description: str | None = None, role: str | None = None, dynamics_cc: int | None = None,
-                 drum_map: dict | None = None, range: list | None = None) -> dict:
-    """Edit a patch's metadata."""
-    return api.patch_update(patch_id, name, tags, description, role, dynamics_cc, drum_map, range)
+                 drum_map: dict | None = None, range: list | None = None, channel: int | None = None) -> dict:
+    """Edit a patch's metadata. channel (1-16): MIDI channel the track's notes go out on, for patches that are one
+    slot of a multitimbral plugin state (HALion slot N listens on channel N by default)."""
+    return api.patch_update(patch_id, name, tags, description, role, dynamics_cc, drum_map, range, channel)
 
 
 @tool

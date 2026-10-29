@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-cello",
+ "name": "Cello",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "cello",
+  "strings",
+  "solo",
+  "gm",
+  "halion-gm-multi"
+ ],
+ "role": "cello",
+ "channel": 6,
+ "description": "[GM 043] Cello (HALion Sonic SE factory), slot 6 of a 7-slot multi shared with the other halion-gm-multi patches",
+ "state": "halion-sonic-gm-multi.state",
+ "created": "2026-10-29 15:35",
+ "param_count": 3537
+}

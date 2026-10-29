@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-orchestra-hit",
+ "name": "Orchestra Hit",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "orchestra hit",
+  "stab",
+  "fx",
+  "orchestral",
+  "gm",
+  "halion-orchestral-multi"
+ ],
+ "channel": 4,
+ "state": "halion-sonic-orchestral-multi.multi.state",
+ "created": "2026-10-29 15:48",
+ "param_count": 3537,
+ "description": "[GM 056] Orchestra Hit (HALion Sonic SE factory), slot 4 of multi halion-sonic-orchestral-multi"
+}

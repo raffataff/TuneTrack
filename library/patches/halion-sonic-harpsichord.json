@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-harpsichord",
+ "name": "Harpsichord",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "harpsichord",
+  "keys",
+  "baroque",
+  "plucked",
+  "gm",
+  "halion-orchestral-multi"
+ ],
+ "channel": 1,
+ "state": "halion-sonic-orchestral-multi.multi.state",
+ "created": "2026-10-29 15:48",
+ "param_count": 3537,
+ "description": "[GM 007] Harpsichord (HALion Sonic SE factory), slot 1 of multi halion-sonic-orchestral-multi",
+ "role": "piano"
+}

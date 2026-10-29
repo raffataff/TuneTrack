@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-finger-bass",
+ "name": "Electric Bass (Finger)",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "bass",
+  "electric bass",
+  "fingered",
+  "gm",
+  "halion-gm-multi"
+ ],
+ "role": "bass guitar",
+ "channel": 4,
+ "description": "[GM 034] Electric Bass (Finger) (HALion Sonic SE factory), slot 4 of a 7-slot multi shared with the other halion-gm-multi patches",
+ "state": "halion-sonic-gm-multi.state",
+ "created": "2026-10-29 15:35",
+ "param_count": 3537
+}

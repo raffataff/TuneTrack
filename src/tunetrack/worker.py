@@ -8,10 +8,16 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 import traceback
 from pathlib import Path
 
 import numpy as np
+
+# Seconds to pump the message thread after a plugin loads a saved state or preset. HALion finishes loading programs
+# from message-thread callbacks: without pumping it renders pure silence however long you wait (0.1 s of pumping
+# was still silent, 0.25 s played with a warm disk cache; the margin is for cold starts and bigger multis).
+SETTLE_S = 2.0
 
 
 def _result(obj) -> None:
@@ -118,6 +124,22 @@ def _apply_pb_params(p, params: dict | None) -> None:
 
 # ---- plugin loading ---------------------------------------------------------------------------------
 
+def _settle(seconds: float) -> None:
+    """Dispatch the window messages JUCE posts for this (main) thread, so async plugin loading can complete."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    import ctypes.wintypes as wt
+    user32 = ctypes.windll.user32
+    msg = wt.MSG()
+    end = time.time() + seconds
+    while time.time() < end:
+        while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+        time.sleep(0.01)
+
+
 def _dd_plugin(eng, name: str, dev: dict):
     p = eng.make_plugin_processor(name, dev["path"])
     if p.get_num_input_channels() > 2:
@@ -132,6 +154,8 @@ def _dd_plugin(eng, name: str, dev: dict):
         ok = p.load_vst3_preset(dev["preset"]) if dev["preset"].lower().endswith(".vstpreset") else p.load_preset(dev["preset"])
         if not ok:
             raise RuntimeError(f"Plugin refused preset {dev['preset']}")
+    if dev.get("state") or dev.get("preset"):
+        _settle(SETTLE_S)
     _apply_dd_params(p, dev.get("params"))
     return p
 

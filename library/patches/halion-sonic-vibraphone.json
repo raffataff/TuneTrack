@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-vibraphone",
+ "name": "Vibraphone",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "vibraphone",
+  "mallets",
+  "tuned percussion",
+  "gm",
+  "halion-gm-multi"
+ ],
+ "role": "vibraphone",
+ "channel": 2,
+ "description": "[GM 012] Vibraphone (HALion Sonic SE factory), slot 2 of a 7-slot multi shared with the other halion-gm-multi patches",
+ "state": "halion-sonic-gm-multi.state",
+ "created": "2026-10-29 15:35",
+ "param_count": 3537
+}

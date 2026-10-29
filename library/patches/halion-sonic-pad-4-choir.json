@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-pad-4-choir",
+ "name": "Choir Pad",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "choir",
+  "pad",
+  "vocal",
+  "aahs",
+  "gm",
+  "halion-orchestral-multi"
+ ],
+ "channel": 7,
+ "state": "halion-sonic-orchestral-multi.multi.state",
+ "created": "2026-10-29 15:48",
+ "param_count": 3537,
+ "description": "[GM 092] Pad 4 (Choir) (HALion Sonic SE factory), slot 7 of multi halion-sonic-orchestral-multi",
+ "role": "choir"
+}

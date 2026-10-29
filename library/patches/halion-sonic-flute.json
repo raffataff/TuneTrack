@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-flute",
+ "name": "Flute",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "flute",
+  "woodwinds",
+  "orchestral",
+  "gm",
+  "halion-orchestral-multi"
+ ],
+ "channel": 6,
+ "state": "halion-sonic-orchestral-multi.multi.state",
+ "created": "2026-10-29 15:48",
+ "param_count": 3537,
+ "description": "[GM 074] Flute (HALion Sonic SE factory), slot 6 of multi halion-sonic-orchestral-multi",
+ "role": "flute"
+}

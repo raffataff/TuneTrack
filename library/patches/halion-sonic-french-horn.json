@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-french-horn",
+ "name": "French Horn",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "horn",
+  "french horn",
+  "brass",
+  "orchestral",
+  "gm",
+  "halion-orchestral-multi"
+ ],
+ "channel": 5,
+ "state": "halion-sonic-orchestral-multi.multi.state",
+ "created": "2026-10-29 15:48",
+ "param_count": 3537,
+ "description": "[GM 061] French Horn (HALion Sonic SE factory), slot 5 of multi halion-sonic-orchestral-multi",
+ "role": "horn"
+}

@@ -181,6 +181,11 @@ def state_file(meta: dict) -> Path | None:
     return config.PATCH_DIR / s if s else None
 
 
+def _device(entry: dict) -> dict:
+    """A registry entry as a worker device spec. The registry's "params" is a parameter count, not values to set."""
+    return {k: v for k, v in entry.items() if k != "params"}
+
+
 def capture(plugin: str, name: str, tags: list[str] | None = None, description: str = "", pid: str | None = None,
             base_patch: str | None = None, kind: str | None = None, extra: dict | None = None) -> dict:
     """Open the plugin's own editor window; whatever sound is loaded when the window closes is saved as a patch."""
@@ -191,7 +196,7 @@ def capture(plugin: str, name: str, tags: list[str] | None = None, description: 
         base_state = str(state_file(get_patch(base_patch)))
     config.PATCH_DIR.mkdir(parents=True, exist_ok=True)
     out = config.PATCH_DIR / f"{pid}.state"
-    spec = {"plugin": entry, "state_in": base_state, "state_out": str(out)}
+    spec = {"plugin": _device(entry), "state_in": base_state, "state_out": str(out)}
     spec_file = config.PATCH_DIR / f".{pid}.capture.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")
     try:
@@ -213,7 +218,8 @@ def import_preset(plugin: str, preset_file: str, name: str, tags: list[str] | No
     out = config.PATCH_DIR / f"{pid}.state"
     config.PATCH_DIR.mkdir(parents=True, exist_ok=True)
     spec_file = config.PATCH_DIR / f".{pid}.import.json"
-    spec_file.write_text(json.dumps({"plugin": entry, "preset": preset_file, "state_out": str(out)}), encoding="utf-8")
+    spec_file.write_text(json.dumps({"plugin": _device(entry), "preset": preset_file, "state_out": str(out)}),
+                         encoding="utf-8")
     try:
         run_worker("import_preset", str(spec_file), timeout=300)
     finally:

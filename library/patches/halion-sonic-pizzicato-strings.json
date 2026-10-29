@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-pizzicato-strings",
+ "name": "Pizzicato Strings",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "strings",
+  "pizzicato",
+  "orchestral",
+  "short",
+  "gm",
+  "halion-orchestral-multi"
+ ],
+ "channel": 3,
+ "state": "halion-sonic-orchestral-multi.multi.state",
+ "created": "2026-10-29 15:48",
+ "param_count": 3537,
+ "description": "[GM 046] Pizzicato Strings (HALion Sonic SE factory), slot 3 of multi halion-sonic-orchestral-multi",
+ "role": "strings"
+}

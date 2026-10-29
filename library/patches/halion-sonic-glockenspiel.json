@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-glockenspiel",
+ "name": "Glockenspiel",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "glockenspiel",
+  "mallets",
+  "bells",
+  "tuned percussion",
+  "gm",
+  "halion-orchestral-multi"
+ ],
+ "channel": 2,
+ "state": "halion-sonic-orchestral-multi.multi.state",
+ "created": "2026-10-29 15:48",
+ "param_count": 3537,
+ "description": "[GM 010] Glockenspiel (HALion Sonic SE factory), slot 2 of multi halion-sonic-orchestral-multi",
+ "role": "glockenspiel"
+}

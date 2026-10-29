@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-violin",
+ "name": "Violin",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "violin",
+  "strings",
+  "solo",
+  "gm",
+  "halion-gm-multi"
+ ],
+ "role": "violin",
+ "channel": 5,
+ "description": "[GM 041] Violin (HALion Sonic SE factory), slot 5 of a 7-slot multi shared with the other halion-gm-multi patches",
+ "state": "halion-sonic-gm-multi.state",
+ "created": "2026-10-29 15:35",
+ "param_count": 3537
+}

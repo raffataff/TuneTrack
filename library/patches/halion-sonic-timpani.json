@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-timpani",
+ "name": "Timpani",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "timpani",
+  "percussion",
+  "orchestral",
+  "gm",
+  "halion-orchestral-multi"
+ ],
+ "channel": 8,
+ "state": "halion-sonic-orchestral-multi.multi.state",
+ "created": "2026-10-29 15:48",
+ "param_count": 3537,
+ "description": "[GM 048] Timpani (HALion Sonic SE factory), slot 8 of multi halion-sonic-orchestral-multi",
+ "role": "timpani"
+}

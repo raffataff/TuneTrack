@@ -961,7 +961,7 @@ def plugin_params(device: str, query: str | None = None, limit: int = 120) -> di
 
 def patches_list(query: str | None = None, kind: str | None = None, plugin: str | None = None) -> dict:
     return {"patches": [{k: m.get(k) for k in ("id", "name", "plugin", "kind", "tags", "description", "range",
-                                                "dynamics_cc", "drum_map") if m.get(k) is not None}
+                                                "dynamics_cc", "drum_map", "channel") if m.get(k) is not None}
                         for m in plugins.list_patches(query, kind, plugin)]}
 
 
@@ -990,10 +990,12 @@ def patch_import(plugin: str, preset_file: str, name: str, tags: list | None = N
 
 def patch_update(patch_id: str, name: str | None = None, tags: list | None = None, description: str | None = None,
                  role: str | None = None, dynamics_cc: int | None = None, drum_map: dict | None = None,
-                 range: list | None = None) -> dict:
+                 range: list | None = None, channel: int | None = None) -> dict:
+    if channel is not None and not 1 <= channel <= 16:
+        raise ValueError("channel must be 1-16")
     meta = plugins.get_patch(patch_id)
     for k, v in (("name", name), ("tags", tags), ("description", description), ("role", role),
-                 ("dynamics_cc", dynamics_cc), ("drum_map", drum_map), ("range", range)):
+                 ("dynamics_cc", dynamics_cc), ("drum_map", drum_map), ("range", range), ("channel", channel)):
         if v is not None:
             meta[k] = v
     return plugins.save_patch(meta)

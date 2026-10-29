@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-nylon-guitar",
+ "name": "Nylon Guitar",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "guitar",
+  "nylon",
+  "acoustic",
+  "plucked",
+  "gm",
+  "halion-gm-multi"
+ ],
+ "role": "guitar",
+ "channel": 3,
+ "description": "[GM 025] Nylon Guitar (HALion Sonic SE factory), slot 3 of a 7-slot multi shared with the other halion-gm-multi patches",
+ "state": "halion-sonic-gm-multi.state",
+ "created": "2026-10-29 15:35",
+ "param_count": 3537
+}
