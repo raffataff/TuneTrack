@@ -1,0 +1,18 @@
+{
+ "id": "groove-agent-se-spring-drum-fx",
+ "name": "Spring Drum FX Kit",
+ "plugin": "Groove Agent SE",
+ "kind": "instrument",
+ "tags": [
+  "drums",
+  "fx",
+  "sci-fi",
+  "sound design",
+  "laser beams",
+  "beat agent"
+ ],
+ "description": "Spring Drum Kit 01 (Groove Agent SE Laser Beams): Beat Agent FX kit, not GM - deep/hit/xpress hit/zip/cry/flam/crash spring-drum sounds on pads from note 36 up",
+ "state": "groove-agent-se-spring-drum-fx.state",
+ "created": "2026-10-29 16:47",
+ "param_count": 4681
+}

@@ -1,0 +1,29 @@
+{
+ "id": "groove-agent-se-acoustic-kit",
+ "name": "Acoustic Kit (The Kit SE)",
+ "plugin": "Groove Agent SE",
+ "kind": "instrument",
+ "tags": [
+  "drums",
+  "kit",
+  "acoustic",
+  "gm",
+  "the kit se",
+  "acoustic agent"
+ ],
+ "description": "The Kit SE preset 'Highs And Lows Of Life' (Groove Agent SE Acoustic Agent), GM mapping. Note 35 is a short bright click, not a kick - use 36. Hats/cymbals sit ~20 dB under kick/snare at equal velocity; write them at high velocity (100-127) for a normal balance.",
+ "state": "groove-agent-se-acoustic-kit.state",
+ "created": "2026-10-29 16:52",
+ "param_count": 4681,
+ "role": "drums",
+ "audition": {
+  "instrument": "Groove Agent SE [groove-agent-se-acoustic-kit]",
+  "phrase": "drums",
+  "peak_dbfs": -2.9,
+  "rms_dbfs": -30.9,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 156,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\groove-agent-se-groove-agent-se-acoustic-kit.wav"
+ }
+}
