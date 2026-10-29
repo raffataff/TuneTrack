@@ -1,0 +1,141 @@
+# TuneTrack
+
+An AI-controllable multitrack music workstation for game soundtracks. An agent (Claude Code, or anything that speaks MCP or
+runs a shell) writes notes, chords, patterns and expression curves; TuneTrack plays them through real instruments (your VST3
+plugins, SFZ sample libraries, built-in synths), mixes them through your VST3 effects, masters, and renders loop-ready files
+with analysis the agent can act on. A browser editor gives you the usual arrangement / piano roll / mixer tools on the same
+project, live.
+
+```
+"Use TuneTrack to make main-menu music for this game"
+  -> agent reads the game, writes a brief, plans the form, composes, renders, reviews the report and piano roll,
+     fixes issues, delivers Audio/Music/menu_theme.ogg + menu_theme.loop.json
+```
+
+## Setup
+
+```bash
+uv sync
+```
+```bash
+uv run tunetrack setup
+```
+```bash
+uv run tunetrack install-claude
+```
+
+`setup` creates `library/` and scans every VST3 in `C:\Program Files\Common Files\VST3` (each plugin is probed in its own
+process; re-run `tunetrack scan` after installing plugins). `install-claude` copies the skill to `~/.claude/skills/tunetrack`
+and registers the MCP server with Claude Code at user scope, so every project can use it. Restart Claude Code afterwards.
+
+Then, in any project: *"use TuneTrack to generate some menu music for this project"*.
+
+## Sound sources
+
+| Source | Use | How the agent picks it |
+|---|---|---|
+| **Patches** | A VST3 plugin plus a saved sound (HALion program, BBC SO instrument, a Supermassive setting...) | `patch:<id>` |
+| **SFZ** | Sample libraries played by TuneTrack's own sampler, no GUI needed | `sfz:<path>` |
+| **Built-in synths** | 23 Faust synths: supersaw, pads, strings, brass, basses, Karplus-Strong plucks, FM keys/bells/mallets, chiptune channels, organ, GM drum machine | `synth:<name>` |
+| **VST3 directly** | Instruments that make sound with default settings (e.g. MODO DRUM) | `vst3:<name>` |
+
+**Capturing patches.** HALion Sonic, Groove Agent, BBC Symphony Orchestra, Spitfire LABS and most romplers load empty, so an
+agent can't use them until you've saved some sounds:
+
+```bash
+uv run tunetrack capture "HALion Sonic" "Warm Strings" --tags strings,legato,warm --role strings
+```
+
+The plugin's own window opens. Pick a program and tweak it, then close the window. The state is saved to `library/patches/`, auditioned, and
+from then on any agent can use `patch:halion-sonic-warm-strings`. In the editor, the same flow is on the Track tab ("Pick
+sound in plugin window..."). Tag patches well (`strings`, `brass`, `pad`, `drums`, `orchestral`, `synthwave`...), because agents search by tag.
+For CC-driven libraries (BBC SO, LABS, most orchestral), add `--dynamics-cc 1` so agents write mod-wheel curves.
+
+Effects work the same way: `vst3:TDR Nova`, `vst3:ValhallaSupermassive`, SSL, Waves (shell plugins are hosted through
+pedalboard) or 10 built-ins (`eq`, `compressor`, `reverb`, `delay`, `chorus`, `saturator`, `width`, `filter`, `bitcrush`,
+`gain`). Agents set VST3 parameters by name and display text: `{"Mix": "100 %", "LowCut": "200 Hz"}`.
+
+### Free instruments worth installing
+
+- **BBC Symphony Orchestra Discover** and **Spitfire LABS** (free, Spitfire account + app). Install them, run `tunetrack scan`, then capture
+  a patch per instrument/articulation you want agents to use.
+- **Surge XT** (free, open source, surge-synthesizer.github.io): a deep synth for electronic music. Capture patches from its preset browser.
+- **Dexed** (free FM synth): DX7 sounds.
+- Free **SFZ** libraries: drop them into `library/instruments/` and they're found automatically (`sfz_list`).
+  - VSCO 2 Community Edition (CC0 chamber orchestra, github.com/sgossner/VSCO-2-CE)
+  - Virtual Playing Orchestra (virtualplaying.com), Sonatina Symphonic Orchestra
+  - Salamander Grand Piano and the libraries at sfzinstruments.github.io
+  - Versilian Community Sample Library (CC0 percussion, keys and folk instruments)
+
+## The editor
+
+```bash
+uv run tunetrack ui
+```
+
+- **Arrangement**: drag clips to move (Alt-drag copies), drag the right edge to resize, double-click empty space for a new clip,
+  right-click for rename/duplicate/split/mute/delete. Click the ruler to move the playhead, shift-drag it (or drag its top
+  strip) to set the loop region, right-click it for markers. Ctrl+wheel zooms.
+- **Piano roll**: click to add, drag to move, drag the edge to resize, double-click to delete, shift/ctrl-drag to box-select,
+  arrows to nudge (shift = octave), Ctrl+D duplicates, Delete removes, velocity lane below.
+- **Mixer**: faders, pan, mute/solo, insert FX (click a name to bypass), sends to buses, master chain.
+- **Track**: instrument picker, built-in synth/FX parameters, VST3 parameter browser, patch capture, audition.
+- **Render report**: loudness, true peak, band balance, per-track levels, warnings, output files.
+- **Space** renders the changed tracks and plays (unchanged tracks come from cache). The Loop button loops the loop region.
+- Ctrl+Z / Ctrl+Y undo/redo (shared with the agent's edits).
+
+Everything goes through the same API the agent uses, and the editor polls the project file, so you can watch an agent work and
+take over at any point.
+
+## Rendering and delivery
+
+`render(out="C:/Game/Audio/Music/menu.ogg")` (or Export... in the editor):
+
+- **Loop region set**: tails after the loop end are folded into the loop start, so the file loops seamlessly. With an intro before the loop,
+  you get an intro+loop file whose loop points are in a `smpl` chunk (WAV) and a `.loop.json` sidecar (samples and seconds:
+  Godot `loop_offset`, Unity scheduling, FMOD/Wwise markers).
+- Loudness normalised to the project's `target_lufs` (default -16), brick-wall limited to `ceiling_db`.
+- `stems=True`: per-track files. `layers=True`: one file per track `layer` for vertical adaptive music. `midi=True`: a type-1
+  MIDI file to finish the arrangement in Cubase.
+- Formats: wav (16/24/32-bit), ogg, flac, mp3.
+
+## For agents
+
+46 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
+The skill (`skill/SKILL.md`) is the composition playbook: understanding the project, forms per cue type, melody/harmony/bass/
+arrangement craft, genre palettes, mixing targets, the review loop and delivery per engine.
+
+TTN, the note notation agents write in:
+
+```
+D4:q!mf F4 A4:h | (D3 A3 F4):w | r:h C5:e. B4:s A4:q' G4:q> | E4:h~ E4:q r:q
+```
+
+`examples/ember_hollow_menu.py` builds a complete intro+loop menu theme with nothing but API calls.
+
+## Layout
+
+```
+src/tunetrack/
+  model.py      project/track/clip/note data, tempo map, undo snapshots
+  notation.py   TTN parser/formatter         theory.py  keys, modes, chords, roman numerals, voice leading, ranges
+  generators.py chords/arps/basslines/drums  edit.py    transpose, quantize, humanize, legato, ...
+  synths.py     built-in Faust synths + FX   sfz.py     native SFZ sampler
+  plugins.py    VST3 registry + patch library
+  worker.py     plugin host subprocess (DawDreamer; pedalboard for shell plugins)
+  engine.py     cached parallel track renders, mixing, buses, master, loudness, limiter, loops, stems, MIDI export
+  analysis.py   loudness/spectrum/loop-seam/note checks, piano-roll and spectrogram images
+  api.py        every operation (shared by MCP, CLI and editor)
+  mcp_server.py MCP tools    server.py + web/  editor    cli.py  command line
+library/        plugins.json, patches/, instruments/ (SFZ), config.json
+projects/<name>/project.json, audio/, renders/, cache/, history/
+```
+
+## Limits
+
+- Playback is render-then-play (offline, cached per track), not a real-time audio engine. Edits to one track re-render only
+  that track.
+- Built-in synths ignore CC and pitch bend (VST3 and SFZ instruments respond to both). Plugin parameter automation isn't
+  exposed yet; track volume/pan automation is.
+- VST3 effects see the project's starting tempo for tempo-synced features.
+- Audio clips are placed and faded, but not time-stretched.

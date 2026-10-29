@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# TuneTrack machine-specific / large / regenerable data
+library/plugins.json
+library/state.json
+library/config.json
+library/server.log
+library/audition/
+library/auditions/
+library/instruments/
+library/.params_*
+projects/*/cache/
+projects/*/history/
+projects/*/renders/

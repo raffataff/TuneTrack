@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TuneTrack</title>
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<header id="top">
+  <div class="brand">TuneTrack</div>
+  <button id="projBtn" class="ghost" title="Open / new project"><span id="projName">No project</span> ▾</button>
+  <div class="sep"></div>
+  <button id="playBtn" title="Render changed tracks and play (Space)">▶ Play</button>
+  <button id="stopBtn" title="Stop">■</button>
+  <button id="loopBtn" class="toggle" title="Loop the loop region">⟲ Loop</button>
+  <span id="pos" class="lcd">1:1.00</span>
+  <span id="status" class="status"></span>
+  <div class="sep"></div>
+  <label class="field">BPM <input id="tempo" type="number" min="20" max="300" step="1"></label>
+  <label class="field">Key <input id="key" type="text" size="10"></label>
+  <label class="field">Sig <input id="sig" type="text" size="4"></label>
+  <div class="sep"></div>
+  <label class="field">Snap <select id="snap">
+    <option value="4">Bar</option><option value="1" selected>1/4</option><option value="0.5">1/8</option>
+    <option value="0.25">1/16</option><option value="0.3333333">1/8T</option><option value="0.125">1/32</option>
+    <option value="0">Off</option></select></label>
+  <div class="spacer"></div>
+  <button id="undoBtn" class="ghost" title="Undo (Ctrl+Z)">↶</button>
+  <button id="redoBtn" class="ghost" title="Redo (Ctrl+Y)">↷</button>
+  <button id="exportBtn" title="Render deliverables">Export…</button>
+</header>
+
+<main id="arr">
+  <div id="headers">
+    <div id="rulerCorner">
+      <button id="addMidi" class="ghost small" title="Add instrument track">+ Inst</button>
+      <button id="addAudio" class="ghost small" title="Add audio track">+ Audio</button>
+      <button id="addBus" class="ghost small" title="Add bus (shared FX)">+ Bus</button>
+    </div>
+    <div id="trackHeaders"></div>
+  </div>
+  <div id="timeline">
+    <canvas id="ruler"></canvas>
+    <div id="lanesWrap"><canvas id="lanes"></canvas></div>
+  </div>
+</main>
+
+<section id="bottom">
+  <nav id="tabs">
+    <button data-tab="roll" class="active">Piano roll</button>
+    <button data-tab="mixer">Mixer</button>
+    <button data-tab="inspector">Track</button>
+    <button data-tab="report">Render report</button>
+    <button data-tab="brief">Brief</button>
+    <div class="spacer"></div>
+    <span id="rollInfo" class="muted"></span>
+  </nav>
+  <div id="panel-roll" class="panel active">
+    <div id="rollWrap"><canvas id="roll"></canvas></div>
+    <canvas id="vel"></canvas>
+  </div>
+  <div id="panel-mixer" class="panel"><div id="mixer"></div></div>
+  <div id="panel-inspector" class="panel"><div id="inspector" class="pad"></div></div>
+  <div id="panel-report" class="panel"><div id="report" class="pad"></div></div>
+  <div id="panel-brief" class="panel"><div id="brief" class="pad"></div></div>
+</section>
+
+<div id="modal" class="hidden"><div class="box" id="modalBox"></div></div>
+<div id="menu" class="hidden"></div>
+<div id="toast" class="hidden"></div>
+<script src="/web/app.js"></script>
+</body>
+</html>
