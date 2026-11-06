@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-gm-brass-section",
+ "name": "Brass Section (GM)",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "brass section",
+  "ensemble",
+  "gm",
+  "halion-sonic-brass-multi"
+ ],
+ "channel": 2,
+ "state": "halion-sonic-brass-multi.multi.state",
+ "created": "2026-10-29 20:05",
+ "param_count": 3537,
+ "description": "[GM 062] Brass Section (HALion Sonic), slot 2 of multi halion-sonic-brass-multi",
+ "role": "brass"
+}

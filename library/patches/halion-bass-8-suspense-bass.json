@@ -1,0 +1,18 @@
+{
+ "id": "halion-bass-8-suspense-bass",
+ "name": "Suspense Bass",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "bass",
+  "bass"
+ ],
+ "role": "bass",
+ "channel": 8,
+ "description": "Suspense Bass, slot 8 of the bass multi (shared state halion-sonic-bass-junky-set)",
+ "state": "halion-sonic-bass-junky-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

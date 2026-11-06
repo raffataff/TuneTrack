@@ -1,0 +1,18 @@
+{
+ "id": "halion-bass-4-bass-tard-forever",
+ "name": "Bass Tard Forever",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "bass",
+  "bass"
+ ],
+ "role": "bass",
+ "channel": 4,
+ "description": "Bass Tard Forever, slot 4 of the bass multi (shared state halion-sonic-bass-junky-set)",
+ "state": "halion-sonic-bass-junky-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

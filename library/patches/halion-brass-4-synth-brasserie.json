@@ -1,0 +1,18 @@
+{
+ "id": "halion-brass-4-synth-brasserie",
+ "name": "Synth Brasserie",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "brass",
+  "brass"
+ ],
+ "role": "brass",
+ "channel": 4,
+ "description": "Synth Brasserie, slot 4 of the brass multi (shared state halion-sonic-brass-set)",
+ "state": "halion-sonic-brass-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

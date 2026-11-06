@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-space-trumpet",
+ "name": "Space Trumpet",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "trumpet",
+  "lead",
+  "synth",
+  "hybrid",
+  "halion-sonic-brass-multi"
+ ],
+ "channel": 7,
+ "state": "halion-sonic-brass-multi.multi.state",
+ "created": "2026-10-29 20:05",
+ "param_count": 3537,
+ "description": "Space Trumpet (acoustic trumpet + synth layer) (HALion Sonic), slot 7 of multi halion-sonic-brass-multi",
+ "role": "trumpet"
+}

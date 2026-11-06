@@ -1,0 +1,18 @@
+{
+ "id": "halion-melodic-1-tackle",
+ "name": "Tackle",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "melodic",
+  "melodic"
+ ],
+ "role": "melodic",
+ "channel": 1,
+ "description": "Tackle, slot 1 of the melodic multi (shared state halion-sonic-melodic-set)",
+ "state": "halion-sonic-melodic-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

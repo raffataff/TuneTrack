@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-real-brass",
+ "name": "Real Brass",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "brass section",
+  "ensemble",
+  "acoustic",
+  "halion-sonic-brass-multi"
+ ],
+ "channel": 6,
+ "state": "halion-sonic-brass-multi.multi.state",
+ "created": "2026-10-29 20:05",
+ "param_count": 3537,
+ "description": "Real Brass (3-layer acoustic brass) (HALion Sonic), slot 6 of multi halion-sonic-brass-multi",
+ "role": "brass"
+}

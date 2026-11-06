@@ -1,0 +1,18 @@
+{
+ "id": "halion-bass-1-gm-035-electric-bass-pick",
+ "name": "[GM 035] Electric Bass (Pick)",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "bass",
+  "bass"
+ ],
+ "role": "bass",
+ "channel": 1,
+ "description": "[GM 035] Electric Bass (Pick), slot 1 of the bass multi (shared state halion-sonic-bass-junky-set)",
+ "state": "halion-sonic-bass-junky-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

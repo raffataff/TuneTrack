@@ -1,0 +1,18 @@
+{
+ "id": "halion-bass-7-phat-rat",
+ "name": "Phat Rat",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "bass",
+  "bass"
+ ],
+ "role": "bass",
+ "channel": 7,
+ "description": "Phat Rat, slot 7 of the bass multi (shared state halion-sonic-bass-junky-set)",
+ "state": "halion-sonic-bass-junky-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

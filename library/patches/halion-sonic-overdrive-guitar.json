@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-overdrive-guitar",
+ "name": "Overdrive Guitar",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "guitar",
+  "electric guitar",
+  "overdrive",
+  "distortion",
+  "gm",
+  "halion-sonic-brass-multi"
+ ],
+ "channel": 1,
+ "state": "halion-sonic-brass-multi.multi.state",
+ "created": "2026-10-29 20:05",
+ "param_count": 3537,
+ "description": "[GM 030] Overdrive Guitar (HALion Sonic), slot 1 of multi halion-sonic-brass-multi",
+ "role": "guitar"
+}

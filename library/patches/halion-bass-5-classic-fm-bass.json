@@ -1,0 +1,18 @@
+{
+ "id": "halion-bass-5-classic-fm-bass",
+ "name": "Classic FM Bass",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "bass",
+  "bass"
+ ],
+ "role": "bass",
+ "channel": 5,
+ "description": "Classic FM Bass, slot 5 of the bass multi (shared state halion-sonic-bass-junky-set)",
+ "state": "halion-sonic-bass-junky-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

@@ -1,0 +1,18 @@
+{
+ "id": "halion-brass-3-the-5th-brass",
+ "name": "The 5th Brass",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "brass",
+  "brass"
+ ],
+ "role": "brass",
+ "channel": 3,
+ "description": "The 5th Brass, slot 3 of the brass multi (shared state halion-sonic-brass-set)",
+ "state": "halion-sonic-brass-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

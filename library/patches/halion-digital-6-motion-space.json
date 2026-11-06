@@ -1,0 +1,18 @@
+{
+ "id": "halion-digital-6-motion-space",
+ "name": "Motion Space",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "digital",
+  "digital"
+ ],
+ "role": "digital",
+ "channel": 6,
+ "description": "Motion Space, slot 6 of the digital multi (shared state halion-sonic-digital-set)",
+ "state": "halion-sonic-digital-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

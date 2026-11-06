@@ -1,0 +1,28 @@
+{
+ "id": "halion-sonic-tremolo-strings",
+ "name": "Tremolo Strings",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "tremolo",
+  "strings",
+  "orchestral",
+  "tension",
+  "fuzeball"
+ ],
+ "description": "Tremolo string section, bowed and shimmering, for the tension section of the Fuzeball match track.",
+ "state": "halion-sonic-tremolo-strings.state",
+ "created": "2026-10-30 20:55",
+ "param_count": 3537,
+ "role": "violin",
+ "audition": {
+  "instrument": "HALion Sonic [halion-sonic-tremolo-strings]",
+  "phrase": "chords",
+  "peak_dbfs": -8.7,
+  "rms_dbfs": -30.2,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 340,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\halion-sonic-halion-sonic-tremolo-strings.wav"
+ }
+}

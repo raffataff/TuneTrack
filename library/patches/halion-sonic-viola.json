@@ -1,0 +1,28 @@
+{
+ "id": "halion-sonic-viola",
+ "name": "Viola",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "viola",
+  "strings",
+  "orchestral",
+  "solo",
+  "fuzeball"
+ ],
+ "description": "Solo viola, sustained bowed, mid register. Inner voices in the Fuzeball match track.",
+ "state": "halion-sonic-viola.state",
+ "created": "2026-10-30 20:55",
+ "param_count": 3537,
+ "role": "viola",
+ "audition": {
+  "instrument": "HALion Sonic [halion-sonic-viola]",
+  "phrase": "chords",
+  "peak_dbfs": -11.2,
+  "rms_dbfs": -26.2,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 524,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\halion-sonic-halion-sonic-viola.wav"
+ }
+}

@@ -1,0 +1,26 @@
+{
+ "id": "halion-sonic-bass-1",
+ "name": "Bass 1",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "bass",
+  "electric",
+  "fuzeball"
+ ],
+ "description": "Bass patch captured from HALion Sonic for the Fuzeball track.",
+ "state": "halion-sonic-bass-1.state",
+ "created": "2026-11-03 19:34",
+ "param_count": 3537,
+ "role": "bass",
+ "audition": {
+  "instrument": "HALion Sonic [halion-sonic-bass-1]",
+  "phrase": "chords",
+  "peak_dbfs": -6.3,
+  "rms_dbfs": -23.2,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 238,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\halion-sonic-halion-sonic-bass-1.wav"
+ }
+}

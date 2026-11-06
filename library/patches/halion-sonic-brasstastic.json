@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-brasstastic",
+ "name": "Brasstastic",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "synth",
+  "layer",
+  "stab",
+  "halion-sonic-brass-multi"
+ ],
+ "channel": 5,
+ "state": "halion-sonic-brass-multi.multi.state",
+ "created": "2026-10-29 20:05",
+ "param_count": 3537,
+ "description": "Brasstastic (synth comp, layered) (HALion Sonic), slot 5 of multi halion-sonic-brass-multi",
+ "role": "brass"
+}

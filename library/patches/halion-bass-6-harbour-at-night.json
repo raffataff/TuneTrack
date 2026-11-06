@@ -1,0 +1,18 @@
+{
+ "id": "halion-bass-6-harbour-at-night",
+ "name": "Harbour At Night",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "bass",
+  "bass"
+ ],
+ "role": "bass",
+ "channel": 6,
+ "description": "Harbour At Night, slot 6 of the bass multi (shared state halion-sonic-bass-junky-set)",
+ "state": "halion-sonic-bass-junky-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

@@ -1,0 +1,18 @@
+{
+ "id": "halion-digital-1-5th-percussion-organ",
+ "name": "5th Percussion Organ",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "digital",
+  "digital"
+ ],
+ "role": "digital",
+ "channel": 1,
+ "description": "5th Percussion Organ, slot 1 of the digital multi (shared state halion-sonic-digital-set)",
+ "state": "halion-sonic-digital-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

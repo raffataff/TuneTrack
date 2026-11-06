@@ -1,0 +1,18 @@
+{
+ "id": "halion-digital-2-analog-pad",
+ "name": "Analog Pad",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "digital",
+  "digital"
+ ],
+ "role": "digital",
+ "channel": 2,
+ "description": "Analog Pad, slot 2 of the digital multi (shared state halion-sonic-digital-set)",
+ "state": "halion-sonic-digital-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

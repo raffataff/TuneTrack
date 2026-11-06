@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-taiko",
+ "name": "Taiko Drum",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "taiko",
+  "drum",
+  "percussion",
+  "epic",
+  "gm",
+  "halion-sonic-taiko-bigband-multi"
+ ],
+ "channel": 1,
+ "state": "halion-sonic-taiko-bigband-multi.multi.state",
+ "created": "2026-10-29 20:05",
+ "param_count": 3537,
+ "description": "[GM 117] Taiko Drum (HALion Sonic), slot 1 of multi halion-sonic-taiko-bigband-multi",
+ "role": "drums"
+}

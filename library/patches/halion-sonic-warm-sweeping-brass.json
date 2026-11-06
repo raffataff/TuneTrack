@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-warm-sweeping-brass",
+ "name": "Warm Sweeping Brass",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "synth brass",
+  "pad",
+  "sweep",
+  "halion-sonic-brass-multi"
+ ],
+ "channel": 8,
+ "state": "halion-sonic-brass-multi.multi.state",
+ "created": "2026-10-29 20:05",
+ "param_count": 3537,
+ "description": "Warm Sweeping Brass (synth brass pad) (HALion Sonic), slot 8 of multi halion-sonic-brass-multi",
+ "role": "brass"
+}

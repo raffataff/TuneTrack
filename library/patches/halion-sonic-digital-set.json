@@ -1,0 +1,14 @@
+{
+ "id": "halion-sonic-digital-set",
+ "name": "Digital multi",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "digital",
+  "multi"
+ ],
+ "description": "",
+ "state": "halion-sonic-digital-set.state",
+ "created": "2026-11-03 20:40",
+ "param_count": 3537
+}

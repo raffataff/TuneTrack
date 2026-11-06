@@ -1,0 +1,19 @@
+{
+ "id": "halion-sonic-synth-brass-1",
+ "name": "Synth Brass 1",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "synth brass",
+  "analog",
+  "gm",
+  "halion-sonic-brass-multi"
+ ],
+ "channel": 3,
+ "state": "halion-sonic-brass-multi.multi.state",
+ "created": "2026-10-29 20:05",
+ "param_count": 3537,
+ "description": "[GM 063] Synth Brass 1 (HALion Sonic), slot 3 of multi halion-sonic-brass-multi",
+ "role": "brass"
+}

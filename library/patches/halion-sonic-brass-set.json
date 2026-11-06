@@ -1,0 +1,14 @@
+{
+ "id": "halion-sonic-brass-set",
+ "name": "Brass multi",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "multi"
+ ],
+ "description": "",
+ "state": "halion-sonic-brass-set.state",
+ "created": "2026-11-03 20:39",
+ "param_count": 3537
+}

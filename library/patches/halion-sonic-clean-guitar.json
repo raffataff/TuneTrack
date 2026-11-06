@@ -1,0 +1,22 @@
+{
+ "id": "halion-sonic-clean-guitar",
+ "name": "Clean Guitar",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [],
+ "description": "",
+ "state": "halion-sonic-clean-guitar.state",
+ "created": "2026-11-06 14:29",
+ "param_count": 3537,
+ "role": "guitar",
+ "audition": {
+  "instrument": "HALion Sonic [halion-sonic-clean-guitar]",
+  "phrase": "chords",
+  "peak_dbfs": -7.9,
+  "rms_dbfs": -26.5,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 288,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\halion-sonic-halion-sonic-clean-guitar.wav"
+ }
+}

@@ -1,0 +1,14 @@
+{
+ "id": "halion-sonic-bass-junky-set",
+ "name": "Bass Junky multi",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "bass",
+  "multi"
+ ],
+ "description": "",
+ "state": "halion-sonic-bass-junky-set.state",
+ "created": "2026-11-03 20:40",
+ "param_count": 3537
+}

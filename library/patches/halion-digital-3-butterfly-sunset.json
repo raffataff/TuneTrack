@@ -1,0 +1,18 @@
+{
+ "id": "halion-digital-3-butterfly-sunset",
+ "name": "Butterfly Sunset",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "digital",
+  "digital"
+ ],
+ "role": "digital",
+ "channel": 3,
+ "description": "Butterfly Sunset, slot 3 of the digital multi (shared state halion-sonic-digital-set)",
+ "state": "halion-sonic-digital-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

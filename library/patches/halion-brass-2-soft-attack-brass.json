@@ -1,0 +1,18 @@
+{
+ "id": "halion-brass-2-soft-attack-brass",
+ "name": "Soft Attack Brass",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "brass",
+  "brass"
+ ],
+ "role": "brass",
+ "channel": 2,
+ "description": "Soft Attack Brass, slot 2 of the brass multi (shared state halion-sonic-brass-set)",
+ "state": "halion-sonic-brass-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

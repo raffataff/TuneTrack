@@ -1,0 +1,13 @@
+{
+ "loop_start_sample": 0,
+ "loop_end_sample": 5120000,
+ "sample_rate": 48000,
+ "loop_start_sec": 0.0,
+ "loop_end_sec": 106.666667,
+ "bpm": 72.0,
+ "time_signature": [
+  4,
+  4
+ ],
+ "mode": "loop"
+}

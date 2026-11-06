@@ -1,0 +1,18 @@
+{
+ "id": "halion-digital-5-dark-mist-strings",
+ "name": "Dark Mist Strings",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "halion",
+  "exported",
+  "digital",
+  "digital"
+ ],
+ "role": "digital",
+ "channel": 5,
+ "description": "Dark Mist Strings, slot 5 of the digital multi (shared state halion-sonic-digital-set)",
+ "state": "halion-sonic-digital-set.state",
+ "created": "2026-11-03 20:50",
+ "param_count": 3537
+}

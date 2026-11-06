@@ -1,0 +1,25 @@
+{
+ "id": "halion-sonic-halion-slot-capture-1",
+ "name": "HALion Slot Capture 1",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "fuzeball",
+  "single",
+  "capture"
+ ],
+ "description": "One HALion Sonic sound loaded in its own window and saved as a patch.",
+ "state": "halion-sonic-halion-slot-capture-1.state",
+ "created": "2026-11-03 19:58",
+ "param_count": 3537,
+ "audition": {
+  "instrument": "HALion Sonic [halion-sonic-halion-slot-capture-1]",
+  "phrase": "chords",
+  "peak_dbfs": -7.9,
+  "rms_dbfs": -23.2,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 834,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\halion-sonic-halion-sonic-halion-slot-capture-1.wav"
+ }
+}

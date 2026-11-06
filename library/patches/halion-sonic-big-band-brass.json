@@ -1,0 +1,20 @@
+{
+ "id": "halion-sonic-big-band-brass",
+ "name": "Big Band Brass",
+ "plugin": "HALion Sonic",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "brass section",
+  "big band",
+  "trumpet",
+  "trombone",
+  "halion-sonic-taiko-bigband-multi"
+ ],
+ "channel": 2,
+ "state": "halion-sonic-taiko-bigband-multi.multi.state",
+ "created": "2026-10-29 20:05",
+ "param_count": 3537,
+ "description": "Big Band Brass (trumpets + trombones) (HALion Sonic), slot 2 of multi halion-sonic-taiko-bigband-multi",
+ "role": "brass"
+}
