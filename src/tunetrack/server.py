@@ -1,8 +1,15 @@
-"""Local web editor server (127.0.0.1 only). Every edit goes through tunetrack.api, same as the agent's tools."""
+"""Local web editor server (127.0.0.1 only). Every edit goes through tunetrack.api, same as the agent's tools.
+
+Hardening against other web pages in the user's browser reaching this local service:
+- every request must carry a Host header naming this server (blocks DNS-rebinding),
+- /api/call needs the per-process session token (embedded in the editor page, which other origins can't read),
+  a same-origin Origin header and a JSON content type, and only runs an explicit allowlist of editor operations.
+"""
 from __future__ import annotations
 
-import inspect
+import hmac
 import json
+import secrets
 import subprocess
 import sys
 import time
@@ -19,13 +26,56 @@ from . import api, config
 
 PORT = 7373
 WEB = Path(__file__).parent / "web"
-_BLOCKED = {"load", "parse_device"}
-CALLABLE = {n for n, f in inspect.getmembers(api, inspect.isfunction)
-            if not n.startswith("_") and f.__module__ == api.__name__ and n not in _BLOCKED}
+# Only what the editor UI uses. Imports, patch deletion, opening files/apps etc. stay agent/CLI-only.
+CALLABLE = {
+    "audition", "clip_create", "clip_edit", "clip_set", "fx_add", "fx_remove", "fx_update", "library_status",
+    "markers", "patch_capture", "plugin_params", "preview", "project_list", "project_new", "project_open",
+    "project_set", "redo", "render", "sfz_list", "synths_list", "track_add", "track_duplicate", "track_move",
+    "track_remove", "track_update", "undo",
+}
+TOKEN = secrets.token_urlsafe(32)
+_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+
+def _port(scope) -> int:
+    server = scope.get("server") or (None, PORT)
+    return int(server[1] or PORT)
+
+
+def _host_ok(scope) -> bool:
+    host = dict(scope.get("headers") or []).get(b"host", b"").decode("latin-1").lower()
+    return host in {f"{h}:{_port(scope)}" for h in _HOSTS}
+
+
+def _origin_ok(req: Request) -> bool:
+    origin = req.headers.get("origin")
+    if origin is None:  # non-browser clients (curl, scripts) send none; they still need the token
+        return True
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(origin)
+        return u.scheme == "http" and (u.hostname or "") in {"127.0.0.1", "localhost", "::1"} and             u.port == _port(req.scope)
+    except ValueError:
+        return False
+
+
+class _HostGuard:
+    """ASGI middleware: reject any request whose Host isn't this local server."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and not _host_ok(scope):
+            await Response("bad host", status_code=421)(scope, receive, send)
+            return
+        await self.inner(scope, receive, send)
 
 
 async def index(_req: Request):
-    return FileResponse(WEB / "index.html")
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    html = html.replace("</head>", f'<meta name="tt-token" content="{TOKEN}">\n</head>', 1)
+    return Response(html, media_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 async def static(req: Request):
@@ -44,31 +94,61 @@ def _current() -> Path | None:
     return Path(cur) if cur and (Path(cur) / "project.json").exists() else None
 
 
+def _version(cur: Path) -> str:
+    st = (cur / "project.json").stat()
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
 async def version(_req: Request):
     cur = _current()
-    v = (cur / "project.json").stat().st_mtime_ns if cur else 0
-    return JSONResponse({"project": str(cur) if cur else None, "version": v})
+    return JSONResponse({"project": str(cur) if cur else None, "version": _version(cur) if cur else 0})
 
 
 async def state(_req: Request):
     cur = _current()
     if not cur:
         return JSONResponse({"project": None, "recent": api._state().get("recent", [])})
+    v = _version(cur)
     text = (cur / "project.json").read_text(encoding="utf-8")
     last = cur / "renders" / "last.json"
-    return JSONResponse({"project": str(cur), "version": (cur / "project.json").stat().st_mtime_ns,
+    return JSONResponse({"project": str(cur), "version": v,
                          "doc": json.loads(text),
                          "last_render": json.loads(last.read_text(encoding="utf-8")) if last.exists() else None})
 
 
 async def call(req: Request):
-    body = await req.json()
+    if not hmac.compare_digest(req.headers.get("x-tunetrack-token", ""), TOKEN):
+        return JSONResponse({"error": "missing or bad session token (reload the editor)"}, status_code=403)
+    if not _origin_ok(req):
+        return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
+    if req.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+        return JSONResponse({"error": "Content-Type must be application/json"}, status_code=415)
+    try:
+        body = await req.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
     fn = body.get("fn")
     if fn not in CALLABLE:
         return JSONResponse({"error": f"unknown function {fn!r}"}, status_code=400)
+    args = body.get("args") or {}
+    if not isinstance(args, dict):
+        return JSONResponse({"error": "args must be an object"}, status_code=400)
+    rev = body.get("rev")
+
+    def run():
+        tok = api.expected_rev.set(int(rev) if rev is not None else None)
+        try:
+            return getattr(api, fn)(**args)
+        finally:
+            api.expected_rev.reset(tok)
+
     try:
-        res = await run_in_threadpool(getattr(api, fn), **(body.get("args") or {}))
+        res = await run_in_threadpool(run)
         return JSONResponse({"result": res})
+    except api.ConflictError as e:
+        return JSONResponse({"error": str(e), "conflict": True}, status_code=409)
     except Exception as e:  # noqa: BLE001 - surface the message in the UI
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=400)
 
@@ -84,10 +164,10 @@ async def audio(req: Request):
     return FileResponse(f, headers={"Cache-Control": "no-store"})
 
 
-app = Starlette(routes=[
+app = _HostGuard(Starlette(routes=[
     Route("/", index), Route("/web/{name}", static), Route("/api/ping", ping), Route("/api/version", version),
     Route("/api/state", state), Route("/api/call", call, methods=["POST"]), Route("/api/audio", audio),
-])
+]))
 
 
 def url() -> str:

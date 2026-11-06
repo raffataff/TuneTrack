@@ -21,3 +21,7 @@ library/.params_*
 projects/*/cache/
 projects/*/history/
 projects/*/renders/
+
+# per-project edit lock (held while an operation edits project.json)
+.lock
+*.tmp

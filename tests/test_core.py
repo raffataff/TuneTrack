@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tunetrack import api, engine, generators, notation, plugins, theory
+from tunetrack import api, config, engine, generators, notation, plugins, theory
 
 
 # ---- notation ---------------------------------------------------------------------------------------------
@@ -229,6 +229,29 @@ def test_capture_and_import_do_not_send_registry_param_count(monkeypatch):
     plugins.import_preset("Fake Synth", "C:/fake.vstpreset", "Test Preset")
     assert [("params" in s["plugin"]) for s in specs] == [False, False]
     assert meta["param_count"] == 42
+
+
+def test_import_folder_keeps_same_named_presets_apart(monkeypatch, tmp_path):
+    entry = {"name": "Fake Synth", "path": "C:/fake.vst3", "kind": "instrument", "host": "dawdreamer", "params": 42}
+    monkeypatch.setattr(plugins, "load_registry", lambda: {"plugins": [entry]})
+    monkeypatch.setattr(config, "PATCH_DIR", tmp_path / "patches")
+    (tmp_path / "src" / "Bass").mkdir(parents=True)
+    (tmp_path / "src" / "Brass").mkdir(parents=True)
+    (tmp_path / "src" / "Bass" / "Suspense Bass.vstpreset").write_bytes(b"VST3")
+    (tmp_path / "src" / "Brass" / "Suspense Bass.vstpreset").write_bytes(b"VST3")
+    (tmp_path / "src" / "notes.txt").write_text("ignored")
+
+    def fake_worker(cmd, arg, timeout=300):
+        spec = json.loads(Path(arg).read_text(encoding="utf-8"))
+        Path(spec["state_out"]).write_bytes(b"state")
+        return {"ok": True}
+
+    monkeypatch.setattr(plugins, "run_worker", fake_worker)
+    res = plugins.import_folder("Fake Synth", str(tmp_path / "src"), tags=["halion"])
+    assert res["errors"] == []
+    assert res["imported"] == ["fake-synth-bass-suspense-bass", "fake-synth-brass-suspense-bass"]
+    meta = plugins.get_patch("fake-synth-bass-suspense-bass")
+    assert meta["tags"] == ["halion", "bass"] and meta["name"] == "Suspense Bass"
 
 
 def test_patch_channel_reaches_the_rendered_midi(monkeypatch, proj, tmp_path):

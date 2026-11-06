@@ -154,6 +154,6 @@ Velocity `!pp !p !mp !mf !f !ff` or `!0-127`, sticky. `'` staccato, `>` accent, 
 `|` bar line, checked against the time signature (mismatches come back as warnings, so fix them).
 `@6.5` moves the cursor to beat 6.5 of the written span, for a second voice in one call. Or use `mode="merge"`.
 
-Pattern tokens (for `pattern`): chord degrees `1 3 5 7 9`, `8 10 12` an octave up, `5-`/`3+` octave shifts, `b7`/`#4`, `.` rest,
+Pattern tokens (for `pattern`): chord degrees `1 3 5 7 9`, `8 10 12` an octave up, `5-`/`3+` octave shifts, `b7`/`#4` altered degrees above the root, `.` rest,
 `-` hold, `1>` accent. Example basses: `"1 - - 1 . 1 5- ."` (pop), `"1 . 1 . 1 . 1 ."` (8ths, synthwave), `"1 - 5- - 8 - 5- -"`
 (walking feel). Arps: `"1 5 8 10 12 10 8 5"`, `"1 3 5 8"` with rate 0.25 for 16ths.

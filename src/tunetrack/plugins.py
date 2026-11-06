@@ -230,6 +230,30 @@ def import_preset(plugin: str, preset_file: str, name: str, tags: list[str] | No
     return save_patch(meta)
 
 
+def import_folder(plugin: str, folder: str, tags: list[str] | None = None, role: str | None = None) -> dict:
+    """Import every .vstpreset/.fxp under a folder (subfolders included). Each subfolder name becomes a tag and
+    part of the patch id, so presets with the same name in different subfolders don't overwrite each other."""
+    root = Path(folder)
+    if not root.is_dir():
+        raise NotADirectoryError(f"No folder {folder!r}.")
+    files = sorted(f for f in root.rglob("*") if f.suffix.lower() in (".vstpreset", ".fxp"))
+    if not files:
+        raise FileNotFoundError(f"No .vstpreset or .fxp files under {folder!r}.")
+    entry = resolve(plugin)
+    patches, errors = [], []
+    for f in files:
+        rel = f.relative_to(root)
+        groups = [g for g in rel.parent.parts]
+        pid = slug(" ".join([entry["name"], *groups, f.stem]))
+        ptags = [*(tags or []), *(g.lower() for g in groups)]
+        try:
+            patches.append(import_preset(plugin, str(f), f.stem, ptags, pid=pid,
+                                         extra={"role": role} if role else None))
+        except Exception as e:  # noqa: BLE001 - keep going; report each failure
+            errors.append({"file": str(rel), "error": f"{type(e).__name__}: {e}"})
+    return {"imported": [p["id"] for p in patches], "errors": errors}
+
+
 def delete_patch(pid: str) -> None:
     meta = get_patch(pid)
     sf_ = state_file(meta)

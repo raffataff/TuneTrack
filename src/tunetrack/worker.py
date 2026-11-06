@@ -171,8 +171,9 @@ def _pb_plugin(dev: dict):
     return p
 
 
-def _midi_events(midi_path: str):
-    """MIDI file -> (notes [(on, off, key, vel)], ccs [(t, num, val)]) in seconds."""
+def _midi_events(midi_path: str, bends: list | None = None):
+    """MIDI file -> (notes [(on, off, key, vel)], ccs [(t, num, val)]) in seconds.
+    Pass a list as `bends` to also collect pitch-wheel events [(t, value -8192..8191)]."""
     import mido
     mf = mido.MidiFile(midi_path)
     t = 0.0
@@ -188,6 +189,8 @@ def _midi_events(midi_path: str):
                 notes.append((on, t, msg.note, vel))
         elif msg.type == "control_change":
             ccs.append((t, msg.control, msg.value))
+        elif msg.type == "pitchwheel" and bends is not None:
+            bends.append((t, msg.pitch))
     for k, lst in active.items():
         for on, vel in lst:
             notes.append((on, t, k, vel))
@@ -262,19 +265,23 @@ def cmd_render(spec_path: str) -> None:
     elif inst:
         if inst["type"] == "sfz":
             from .sfz import Instrument
-            notes, ccs = _midi_events(midi) if midi else ([], [])
-            events = [("note", on, off, k, v) for on, off, k, v in notes] + [("cc", t, c, v) for t, c, v in ccs]
+            bends: list = []
+            notes, ccs = _midi_events(midi, bends) if midi else ([], [])
+            events = [("note", on, off, k, v) for on, off, k, v in notes] + [("cc", t, c, v) for t, c, v in ccs]                 + [("bend", t, v) for t, v in bends]
             audio = Instrument(inst["path"]).render(events, dur, sr)
         elif inst["type"] == "vst3" and inst.get("host") == "pedalboard":
             import mido
             p = _pb_plugin(inst)
-            notes, ccs = _midi_events(midi) if midi else ([], [])
+            bends = []
+            notes, ccs = _midi_events(midi, bends) if midi else ([], [])
             msgs = []
             for on, off, k, v in notes:
                 msgs.append(mido.Message("note_on", note=k, velocity=v, time=on))
                 msgs.append(mido.Message("note_off", note=k, velocity=0, time=off))
             for t, c, v in ccs:
                 msgs.append(mido.Message("control_change", control=c, value=v, time=t))
+            for t, v in bends:
+                msgs.append(mido.Message("pitchwheel", pitch=v, time=t))
             msgs.sort(key=lambda m: m.time)
             audio = p(msgs, duration=dur, sample_rate=sr, num_channels=2)
         elif inst["type"] == "vst3":

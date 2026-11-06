@@ -92,8 +92,9 @@ def stretch(notes: list[Note], factor: float, origin: float = 0.0) -> None:
 
 
 def shift(notes: list[Note], beats: float) -> None:
+    """Move notes in time. Starts may go below 0 (before the clip); the caller re-fits the clip."""
     for n in notes:
-        n.start = max(0.0, n.start + beats)
+        n.start = n.start + beats
 
 
 def reverse(notes: list[Note], start: float, end: float) -> None:

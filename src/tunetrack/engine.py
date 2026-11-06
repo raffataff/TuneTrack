@@ -349,9 +349,9 @@ class Renderer:
     def run(self) -> dict:
         p = self.p
         t0 = time.time()
-        soloed = any(t.solo for t in p.tracks)
         sources = [t for t in p.tracks if t.kind != "bus"]
-        audible = [t for t in sources if not t.mute and (not soloed or t.solo)]
+        playing = soloed_sources(p)
+        audible = [t for t in sources if not t.mute and t.id in playing]
         report: dict = {"tracks": {}, "warnings": []}
         specs = {}
         for t in audible:
@@ -388,8 +388,18 @@ class Renderer:
                         f"track '{t.name}' rendered SILENT though it has notes - instrument loaded no sound "
                         f"(empty plugin slot? capture a patch with a program loaded) or notes out of its range")
 
-        # post-fader processing and routing
+        self.pre = pre
+        self.master, self.post = self.mix(pre, report)
+        report["render_seconds"] = round(time.time() - t0, 1)
+        self.report = report
+        return report
+
+    def mix(self, pre: dict[str, np.ndarray], report: dict | None = None) -> tuple[np.ndarray, dict]:
+        """Faders, sends, buses (with their FX) and the master chain for the given pre-fader track signals.
+        Returns (master, post-fader signals by track/bus id). Used for the full mix and for each layer/stem."""
+        p = self.p
         buses = {t.id: t for t in p.tracks if t.kind == "bus"}
+        sources = [t for t in p.tracks if t.kind != "bus"]
         bus_in = {bid: np.zeros((2, self.n), dtype=np.float32) for bid in buses}
         post: dict[str, np.ndarray] = {}
 
@@ -433,15 +443,13 @@ class Renderer:
                 post[bid] = fader(b, sig)
                 route(b, post[bid], master)
                 done.add(bid)
-        if len(done) < len(buses):
+        if len(done) < len(buses) and report is not None:
             report["warnings"].append("bus routing has a cycle; some buses were skipped")
 
-        master = self.render_fx(master, [d for d in p.master.get("fx", []) if isinstance(d, Device)], "master")
-        master *= 10 ** (float(p.master.get("volume_db", 0)) / 20)
-        self.master, self.post = master, post
-        report["render_seconds"] = round(time.time() - t0, 1)
-        self.report = report
-        return report
+        if float(np.abs(master).max(initial=0)) > 0:
+            master = self.render_fx(master, [d for d in p.master.get("fx", []) if isinstance(d, Device)], "master")
+        master = master * 10 ** (float(p.master.get("volume_db", 0)) / 20)
+        return master, post
 
     # ---- export -------------------------------------------------------------------------------------------------
     def export(self, out_dir: Path, base: str, fmt: str = "wav", bits: int = 24, loop: str = "auto",
@@ -502,19 +510,32 @@ class Renderer:
                     "bpm": p.tempo, "time_signature": p.time_sig, "mode": mode}
             (out_dir / f"{base}.loop.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
             files.append(str(out_dir / f"{base}.loop.json"))
+        # Stems and layers go through the same buses (shared reverb, bus EQ) and master chain as the full mix, get
+        # the full mix's normalisation gain (so they sum back to roughly the mix level) and the master limiter.
+        part_gr: dict[str, float] = {}
+
+        def part(ids: list[str], label: str) -> np.ndarray:
+            sig, _ = self.mix({i: self.pre[i] for i in ids})
+            sig, red = limiter(shape(sig) * g, sr, float(p.master.get("ceiling_db", -1.0)))
+            if red > 0.05:
+                part_gr[label] = round(red, 1)
+            return sig
+
         if stems:
             for t in p.tracks:
-                if t.id in self.post and t.kind != "bus":
-                    files.append(write_audio(out_dir / f"{base}_stem_{_safe(t.name)}.{ext}", shape(self.post[t.id]) * g,
-                                             sr, fmt, bits, loop_pts))
+                if t.id in self.pre and t.kind != "bus":
+                    files.append(write_audio(out_dir / f"{base}_stem_{_safe(t.name)}.{ext}",
+                                             part([t.id], f"stem {t.name}"), sr, fmt, bits, loop_pts))
         if layers:
-            groups: dict[str, np.ndarray] = {}
+            groups: dict[str, list[str]] = {}
             for t in p.tracks:
-                if t.id in self.post and t.kind != "bus":
-                    lay = t.layer or "base"
-                    groups[lay] = groups.get(lay, 0) + self.post[t.id]
-            for lay, sig in groups.items():
-                files.append(write_audio(out_dir / f"{base}_layer_{_safe(lay)}.{ext}", shape(sig) * g, sr, fmt, bits, loop_pts))
+                if t.id in self.pre and t.kind != "bus":
+                    groups.setdefault(t.layer or "base", []).append(t.id)
+            for lay, ids in groups.items():
+                files.append(write_audio(out_dir / f"{base}_layer_{_safe(lay)}.{ext}", part(ids, f"layer {lay}"),
+                                         sr, fmt, bits, loop_pts))
+        if part_gr:
+            rep["stem_limiter_reduction_db"] = part_gr
         if midi:
             files.append(export_midi(p, out_dir / f"{base}.mid"))
         rep["files"] = files
@@ -532,6 +553,33 @@ class Renderer:
                 rep["warnings"].append("loop: " + seam["warning"])
         self.final = mix
         return rep
+
+
+def soloed_sources(p: Project) -> set[str]:
+    """Ids of the source (non-bus) tracks that play given the solo buttons. Soloing a bus plays every track that
+    feeds it, directly or through other buses (via output or sends). No solo anywhere = every track."""
+    sources = [t for t in p.tracks if t.kind != "bus"]
+    soloed = [t for t in p.tracks if t.solo]
+    if not soloed:
+        return {t.id for t in sources}
+
+    def targets(t: Track) -> set[str]:
+        return {t.output} | {s.get("to") for s in t.sends if s.get("to")}
+
+    keep = {t.id for t in soloed if t.kind != "bus"}
+    wanted = {t.id for t in soloed if t.kind == "bus"}
+    if wanted:
+        buses = {t.id: t for t in p.tracks if t.kind == "bus"}
+        # every bus that (transitively) feeds a soloed bus counts as soloed too
+        grow = True
+        while grow:
+            grow = False
+            for b in buses.values():
+                if b.id not in wanted and targets(b) & wanted:
+                    wanted.add(b.id)
+                    grow = True
+        keep |= {t.id for t in sources if targets(t) & wanted}
+    return keep
 
 
 def _safe(name: str) -> str:

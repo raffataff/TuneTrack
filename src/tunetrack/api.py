@@ -6,6 +6,8 @@ Positions accept beats (16) or "bar:beat" strings ("5:1" = bar 5, beat 1). Lengt
 """
 from __future__ import annotations
 
+import contextvars
+import hashlib
 import json
 import math
 import os
@@ -15,7 +17,7 @@ import time
 from pathlib import Path
 
 from . import analysis, config, edit, engine, generators, notation, plugins, synths, theory
-from .model import Clip, Device, Note, Project, Track, redo as _redo, undo as _undo
+from .model import Clip, Device, Note, Project, Track, project_lock, redo as _redo, undo as _undo
 
 STATE_FILE = config.HOME / "state.json"
 
@@ -62,18 +64,43 @@ def load(project: str | None = None) -> Project:
     return Project.load(_path(project))
 
 
+class ConflictError(RuntimeError):
+    """The project changed since the caller last read it; the edit was not applied."""
+
+
+# Set by the web editor per request: the project revision its edit was based on (None = don't check).
+expected_rev: contextvars.ContextVar[int | None] = contextvars.ContextVar("expected_rev", default=None)
+
+
 class _Edit:
-    """with _Edit(project) as p: ...  -> loads, yields, saves with an undo snapshot."""
+    """with _Edit(project) as p: ...  -> locks the project, loads, yields, saves with an undo snapshot.
+
+    The lock is held from load to save, so concurrent editors (MCP server, web UI, CLI) are serialised and
+    never overwrite each other's changes."""
 
     def __init__(self, project: str | None):
-        self.p = load(project)
+        self.path = _path(project)
+        self._lock = project_lock(self.path)
 
     def __enter__(self) -> Project:
+        self._lock.__enter__()
+        try:
+            self.p = load(str(self.path))
+            want = expected_rev.get()
+            if want is not None and int(want) != self.p.rev:
+                raise ConflictError(f"The project changed since you loaded it (revision {want} -> {self.p.rev}); "
+                                    f"reload and try again")
+        except BaseException:
+            self._lock.__exit__(None, None, None)
+            raise
         return self.p
 
     def __exit__(self, exc_type, *_):
-        if exc_type is None:
-            self.p.save()
+        try:
+            if exc_type is None:
+                self.p.save()
+        finally:
+            self._lock.__exit__(None, None, None)
         return False
 
 
@@ -182,6 +209,37 @@ def _put_notes(p: Project, t: Track, notes: list[Note], at: float, length: float
 
 def _abs_notes(t: Track) -> list[tuple[Clip, Note]]:
     return [(c, n) for c in t.clips if c.kind == "midi" for n in c.notes]
+
+
+def _fit_clip(p: Project, c: Clip, moved: list[Note] | None = None) -> None:
+    """Grow a MIDI clip (bar-aligned) so the notes an edit moved are still played: the renderer skips notes that
+    start past a clip's end. `moved` = the edited notes that were audible before the edit (default: all notes).
+    Notes pushed before the song start are dropped."""
+    bpb = p.beats_per_bar
+    c.notes = [n for n in c.notes if c.start + n.start >= -1e-9]
+    for n in c.notes:
+        n.start = max(n.start, -c.start)
+    keep = {id(n) for n in c.notes}
+    moved = [n for n in (c.notes if moved is None else moved) if id(n) in keep]
+    if not moved:
+        return
+    first = min(n.start for n in moved)
+    if first < -1e-9:
+        shift = c.start - max(0.0, math.floor((c.start + first) / bpb + 1e-9) * bpb)
+        for n in c.notes:
+            n.start += shift
+        for pts in c.cc.values():
+            for pt in pts:
+                pt[0] += shift
+        c.start -= shift
+        c.length += shift
+    last = max(n.start for n in moved) + 1e-3
+    if last > c.length + 1e-9:
+        c.length = math.ceil((c.start + last) / bpb - 1e-9) * bpb - c.start
+
+
+def _note_key(notes) -> list:
+    return sorted((int(n[0]), round(float(n[1]), 4), round(float(n[2]), 4), int(n[3])) for n in notes)
 
 
 # ---- project ----------------------------------------------------------------------------------------------------
@@ -613,6 +671,7 @@ def notes_edit(track: str, op: str, start=None, end=None, low=None, high=None, p
             if not sel:
                 continue
             touched += len(sel)
+            audible = [n for n in sel if n.start < c.length - 1e-9]
             if op == "transpose":
                 edit.transpose(sel, int(args.get("semitones", 0)), int(args.get("steps", 0)), key)
             elif op == "quantize":
@@ -639,7 +698,9 @@ def notes_edit(track: str, op: str, start=None, end=None, low=None, high=None, p
             elif op == "invert":
                 edit.invert(sel, _pitch(args["axis"]) if "axis" in args else None, key if args.get("diatonic", True) else None)
             elif op == "double":
-                c.notes.extend(edit.double(sel, int(args.get("interval", 12))))
+                added = edit.double(sel, int(args.get("interval", 12)))
+                c.notes.extend(added)
+                audible += [n for n in added if n.start < c.length - 1e-9]
             elif op == "delete":
                 ids = {id(n) for n in sel}
                 c.notes = [n for n in c.notes if id(n) not in ids]
@@ -650,6 +711,7 @@ def notes_edit(track: str, op: str, start=None, end=None, low=None, high=None, p
             else:
                 raise ValueError(f"Unknown op {op!r}")
             edit.trim_overlaps(c.notes)
+            _fit_clip(p, c, audible)
             c.sort()
     return {"track": t.name, "op": op, "notes": touched}
 
@@ -709,12 +771,17 @@ def clip_edit(clip: str, op: str, project: str | None = None, to=None, track: st
     return res
 
 
-def arrange(op: str, start, end, to=None, tracks: list | None = None, project: str | None = None) -> dict:
-    """Song-level editing across tracks (notes, CC, audio clips, markers):
-    copy(start, end, to) - copy a section (e.g. verse) to another position, merging into what's there
+def arrange(op: str, start, end, to=None, tracks: list | None = None, project: str | None = None,
+            mode: str = "replace") -> dict:
+    """Song-level editing across tracks (notes, CC, audio clips, automation; markers, tempo changes, loop region
+    and song length too when no `tracks` filter is given):
+    copy(start, end, to[, mode]) - copy a section (e.g. verse) to another position. mode="replace" (default)
+        clears the destination's notes/CC first; mode="merge" layers the copy on top of what's there
     move(start, end, to) | insert(start, end) - open a gap of end-start beats at start, pushing later material
     delete(start, end) - remove a section and close the gap | clear(start, end) - empty a section
     """
+    if mode not in ("replace", "merge"):
+        raise ValueError("mode must be 'replace' or 'merge'")
     with _Edit(project) as p:
         s, e = p.pos(start), p.pos(end)
         span = e - s
@@ -736,14 +803,15 @@ def arrange(op: str, start, end, to=None, tracks: list | None = None, project: s
                         gcc.setdefault(k, []).extend([[c.start + b - s, v] for b, v in pts if s <= c.start + b < e])
                 if op == "move":
                     _clear(t, s, e)
+                if op == "copy" and mode == "replace":
+                    _clear(t, d, d + span, audio=False)
                 if grabbed or gcc:
                     c = _clip_for(p, t, d, d + span)
-                    if op == "copy":
-                        c.notes = [n for n in c.notes if not (d - c.start - 1e-9 <= n.start < d + span - c.start - 1e-9)]
                     for n in grabbed:
                         c.notes.append(Note(n.pitch, n.start + d - c.start, n.dur, n.vel))
                     for k, pts in gcc.items():
                         c.cc.setdefault(k, []).extend([[b + d - c.start, v] for b, v in pts])
+                    edit.trim_overlaps(c.notes)
                     c.sort()
             elif op == "insert":
                 for c in t.clips:
@@ -771,26 +839,95 @@ def arrange(op: str, start, end, to=None, tracks: list | None = None, project: s
                             c.length -= min(span, max(0.0, c.end - s))
             else:
                 raise ValueError("op must be copy, move, insert, delete or clear")
-        if op == "insert":
-            for m in p.markers:
-                if m["at"] >= s:
-                    m["at"] += span
-        if op == "delete":
-            p.markers = [m for m in p.markers if not (s <= m["at"] < e)]
-            for m in p.markers:
-                if m["at"] >= e:
-                    m["at"] -= span
+        if op in ("insert", "delete"):
+            for t in ([p.track(x) for x in tracks] if tracks else p.tracks):
+                for lane, pts in list(t.automation.items()):
+                    t.automation[lane] = _shift_lane(pts, s, e, op)
+            if not tracks:
+                _shift_timeline(p, s, e, op)
         for t in p.tracks:
             t.clips = [c for c in t.clips if c.length > 1e-6]
     return {"op": op, "range": f"{p.fmt_pos(s)} - {p.fmt_pos(e)}", "length_bars": round(p.end / p.beats_per_bar, 2)}
 
 
-def _clear(t: Track, s: float, e: float) -> None:
+def _lane_value(pts: list, at: float) -> float:
+    pts = sorted(pts)
+    if at <= pts[0][0]:
+        return pts[0][1]
+    for (b0, v0), (b1, v1) in zip(pts, pts[1:]):
+        if b0 <= at <= b1:
+            return v0 if b1 - b0 < 1e-9 else v0 + (v1 - v0) * (at - b0) / (b1 - b0)
+    return pts[-1][1]
+
+
+def _shift_lane(pts: list, s: float, e: float, op: str) -> list:
+    """Automation points (linear) after inserting a gap at s (held at the value there) or deleting [s, e)."""
+    if not pts:
+        return pts
+    span = e - s
+    if op == "insert":
+        v = _lane_value(pts, s)
+        out = [[b, x] for b, x in pts if b < s - 1e-9] + [[b + span, x] for b, x in pts if b >= s - 1e-9]
+        if pts[0][0] < s < pts[-1][0] + 1e-9 or any(abs(b - s) < 1e-9 for b, _ in pts):
+            out += [[s, v], [s + span, v]]
+    else:
+        v = _lane_value(pts, e)
+        has_after = any(b >= e - 1e-9 for b, _ in pts)
+        out = [[b, x] for b, x in pts if b < s - 1e-9] + [[b - span, x] for b, x in pts if b >= e - 1e-9]
+        if has_after and pts[0][0] < e:
+            out.append([s, v])
+    dedup: dict[float, float] = {}
+    for b, x in sorted(out):
+        dedup[round(b, 9)] = x
+    return [[b, x] for b, x in sorted(dedup.items())]
+
+
+def _shift_timeline(p: Project, s: float, e: float, op: str) -> None:
+    """Move markers, tempo changes, the loop region and the explicit song length with an insert/delete."""
+    span = e - s
+    if op == "insert":
+        for m in p.markers:
+            if m["at"] >= s - 1e-9:
+                m["at"] += span
+        for tc in p.tempo_changes:
+            if tc[0] >= s - 1e-9:
+                tc[0] += span
+        if p.loop:
+            if p.loop["start"] >= s - 1e-9:
+                p.loop["start"] += span
+            if p.loop["end"] > s + 1e-9:
+                p.loop["end"] += span
+        if p.length is not None and p.length > s + 1e-9:
+            p.length += span
+        return
+    bpm_after = p.tempo_map().bpm_at(e)
+    p.markers = [m for m in p.markers if not (s - 1e-9 <= m["at"] < e - 1e-9)]
+    for m in p.markers:
+        if m["at"] >= e - 1e-9:
+            m["at"] -= span
+    kept = [tc for tc in p.tempo_changes if tc[0] < s - 1e-9]
+    later = [[tc[0] - span, tc[1]] for tc in p.tempo_changes if tc[0] >= e - 1e-9]
+    p.tempo_changes = kept + later
+    if abs(p.tempo_map().bpm_at(s) - bpm_after) > 1e-6:
+        p.tempo_changes = sorted([tc for tc in p.tempo_changes if abs(tc[0] - s) > 1e-9] + [[s, bpm_after]])
+
+    def moved(b: float) -> float:
+        return b if b <= s else (s if b < e else b - span)
+
+    if p.loop:
+        p.loop = {"start": moved(p.loop["start"]), "end": moved(p.loop["end"])}
+        if p.loop["end"] - p.loop["start"] < 1e-6:
+            p.loop = None
+    if p.length is not None:
+        p.length = moved(p.length)
+
+
+def _clear(t: Track, s: float, e: float, audio: bool = True) -> None:
     for c in list(t.clips):
         if c.end <= s or c.start >= e:
             continue
         if c.kind == "audio":
-            if c.start >= s and c.end <= e:
+            if audio and c.start >= s and c.end <= e:
                 t.clips.remove(c)
             continue
         c.notes = [n for n in c.notes if not (s - 1e-9 <= c.start + n.start < e - 1e-9)]
@@ -798,6 +935,35 @@ def _clear(t: Track, s: float, e: float) -> None:
             c.cc[k] = [pt for pt in c.cc[k] if not (s <= c.start + pt[0] < e)]
         if not c.notes and c.start >= s and c.end <= e:
             t.clips.remove(c)
+
+
+def _file_digest(path: Path) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _audio_dest(folder: Path, src: Path) -> Path:
+    """Where to copy an imported file: reuse an identical copy already in the project, else a free name
+    (tone.wav, tone-2.wav, ...) so different recordings with the same filename never collide."""
+    folder.mkdir(parents=True, exist_ok=True)
+    digest = None
+    for i in range(1, 10000):
+        cand = folder / (src.name if i == 1 else f"{src.stem}-{i}{src.suffix}")
+        if not cand.exists():
+            return cand
+        try:
+            if cand.resolve() == src.resolve():
+                return cand
+        except OSError:
+            pass
+        if cand.stat().st_size == src.stat().st_size:
+            digest = digest or _file_digest(src)
+            if _file_digest(cand) == digest:
+                return cand
+    raise FileExistsError(f"Too many files named like {src.name} in {folder}")
 
 
 def audio_import(track: str, file: str, at=0, project: str | None = None, copy: bool = True, gain_db: float = 0.0,
@@ -812,11 +978,10 @@ def audio_import(track: str, file: str, at=0, project: str | None = None, copy: 
             raise FileNotFoundError(file)
         rel = src
         if copy:
-            dst = p.path / "audio" / src.name
-            dst.parent.mkdir(exist_ok=True)
+            dst = _audio_dest(p.path / "audio", src)
             if not dst.exists():
                 shutil.copy2(src, dst)
-            rel = Path("audio") / src.name
+            rel = Path("audio") / dst.name
         info = sf.info(str(src))
         s = p.pos(at)
         tm = p.tempo_map()
@@ -988,6 +1153,10 @@ def patch_import(plugin: str, preset_file: str, name: str, tags: list | None = N
     return plugins.import_preset(plugin, preset_file, name, tags, description, extra=extra)
 
 
+def patch_import_folder(plugin: str, folder: str, tags: list | None = None, role: str | None = None) -> dict:
+    return plugins.import_folder(plugin, folder, tags, role)
+
+
 def patch_update(patch_id: str, name: str | None = None, tags: list | None = None, description: str | None = None,
                  role: str | None = None, dynamics_cc: int | None = None, drum_map: dict | None = None,
                  range: list | None = None, channel: int | None = None) -> dict:
@@ -1130,10 +1299,16 @@ def clip_create(track: str, start=0, length="1 bar", name: str | None = None, pr
 
 
 def clip_set(clip: str, notes: list | None = None, start=None, length=None, name: str | None = None,
-             muted: bool | None = None, track: str | None = None, project: str | None = None) -> dict:
-    """Replace a clip's notes ([[pitch, start_in_clip, dur, vel]]) and/or move/resize it in one step."""
+             muted: bool | None = None, track: str | None = None, project: str | None = None,
+             expect_notes: list | None = None) -> dict:
+    """Replace a clip's notes ([[pitch, start_in_clip, dur, vel]]) and/or move/resize it in one step.
+
+    expect_notes: the clip's notes as the caller last saw them. If the clip has changed since (another editor
+    wrote to it), nothing is applied and ConflictError is raised, so whole-list saves never clobber edits."""
     with _Edit(project) as p:
         t, c = p.clip(clip)
+        if expect_notes is not None and _note_key(n.to_json() for n in c.notes) != _note_key(expect_notes):
+            raise ConflictError(f"Clip '{c.name}' was changed by another editor; reloaded - redo your edit")
         if notes is not None:
             c.notes = [Note(int(n[0]), float(n[1]), float(n[2]), int(n[3])) for n in notes]
         if start is not None:

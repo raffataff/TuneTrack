@@ -227,7 +227,7 @@ def pattern(track: str, progression: str, pattern: str, at: Any = 0, rate: float
             key: str | None = None, mode: str = "replace", project: str | None = None) -> dict:
     """Arpeggios/basslines/ostinatos that follow a progression. pattern = chord degrees, one per `rate` beats:
     "1 3 5 8 5 3" arp, "1 . 1 5- 8 . 5- ." bass, "1 - - 5 8 -" ('-' holds, '.' rests), "5+"/"3-" octave
-    shifts, "b7"/"#4" alterations, "1>" accent. octave = octave of the chord root (C4 = middle C; bass ~2)."""
+    shifts, "b7"/"#4" altered degrees above the root, "1>" accent. octave = octave of the chord root (C4 = middle C; bass ~2)."""
     return api.pattern(track, progression, pattern, at, project, key, chord_length, rate, octave, vel, gate,
                        restart, mode)
 
@@ -290,10 +290,12 @@ def clip_edit(clip: str, op: str, to: Any = None, track: str | None = None, time
 
 @tool
 def arrange(op: str, start: Any, end: Any, to: Any = None, tracks: list[str] | None = None,
-            project: str | None = None) -> dict:
+            mode: str = "replace", project: str | None = None) -> dict:
     """Section editing across tracks: copy(start,end,to) move(start,end,to) insert(start,end) opens a gap,
-    delete(start,end) removes and closes the gap, clear(start,end). tracks limits it to some tracks."""
-    return api.arrange(op, start, end, to, tracks, project)
+    delete(start,end) removes and closes the gap, clear(start,end). copy mode="replace" (default) clears the
+    destination's notes first, "merge" layers onto them. Automation moves with insert/delete; markers, tempo
+    changes, loop region and song length do too unless `tracks` limits it to some tracks."""
+    return api.arrange(op, start, end, to, tracks, project, mode)
 
 
 @tool
@@ -365,6 +367,13 @@ def patch_import(plugin: str, preset_file: str, name: str, tags: list[str] | Non
                  role: str | None = None) -> dict:
     """Create a patch headlessly from a .vstpreset/.fxp file for that plugin."""
     return api.patch_import(plugin, preset_file, name, tags, description, role)
+
+
+@tool
+def patch_import_folder(plugin: str, folder: str, tags: list[str] | None = None, role: str | None = None) -> dict:
+    """Create patches headlessly from every .vstpreset/.fxp in a folder (subfolders included; each subfolder name
+    becomes a tag). Returns the imported patch ids and any per-file errors."""
+    return api.patch_import_folder(plugin, folder, tags, role)
 
 
 @tool

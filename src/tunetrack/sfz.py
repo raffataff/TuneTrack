@@ -5,7 +5,11 @@ pitch_keycenter, lovel/hivel, lorand/hirand, seq_length/seq_position, sw_lokey/s
 loccN/hiccN, xfin/xfout (vel and CC), trigger=attack|release|first|legato, rt_decay, volume/amplitude/pan/
 tune/transpose/pitch_keytrack/amp_veltrack, offset/end, loop_mode/loop_start/loop_end, ampeg_* (delay,
 attack, hold, decay, sustain, release), group/off_by, amplitude_onccN/volume_onccN, set_ccN, note_offset/
-octave_offset, delay.
+octave_offset, delay, bend_up/bend_down.
+
+CC crossfades (xfin/xfout_loccN) and amplitude/volume_onccN follow the controller for the whole voice, so a
+CC1/CC11 swell on a held note changes its level; loccN/hiccN pick regions at note-on. Pitch bend applies to
+every sounding voice.
 """
 from __future__ import annotations
 
@@ -173,11 +177,38 @@ class Instrument:
 
     # ------------------------------------------------------------------------------------------
     def render(self, events: list[tuple], duration: float, sr: int = 48000, seed: int = 7) -> np.ndarray:
-        """events: ("note", t_on, t_off, key, vel) and ("cc", t, number, value). Returns (2, n) float32."""
+        """events: ("note", t_on, t_off, key, vel), ("cc", t, number, value) and ("bend", t, -8192..8191).
+        Returns (2, n) float32."""
         n_out = int(math.ceil(duration * sr))
         out = np.zeros((n_out, 2), dtype=np.float32)
         rng = random.Random(seed)
         cc_events = sorted((e for e in events if e[0] == "cc"), key=lambda e: e[1])
+        lanes: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for num in {int(e[2]) for e in cc_events}:
+            pts = [(e[1], float(e[3])) for e in cc_events if int(e[2]) == num]
+            lanes[num] = (np.array([p[0] for p in pts]), np.array([p[1] for p in pts]))
+        bend_ev = sorted((e for e in events if e[0] == "bend"), key=lambda e: e[1])
+        bend_lane = (np.array([e[1] for e in bend_ev]), np.array([float(e[2]) for e in bend_ev])) if bend_ev else None
+        smooth = max(1, int(0.004 * sr))  # ~4 ms de-zipper on controller steps
+
+        def lane_curve(lane, default: float, t0: float, n: int) -> np.ndarray:
+            if lane is None:
+                return np.full(n, default, dtype=np.float32)
+            ts, vs = lane
+            pad = smooth
+            tt = t0 + (np.arange(-pad, n, dtype=np.float64) / sr)
+            idx = np.searchsorted(ts, tt + 1e-9, side="right") - 1
+            arr = np.where(idx >= 0, vs[np.maximum(idx, 0)], default).astype(np.float32)
+            if smooth > 1:
+                from scipy.ndimage import uniform_filter1d
+                arr = uniform_filter1d(arr, size=smooth, mode="nearest", origin=(smooth - 1) // 2)
+            return arr[pad:]
+
+        def cc_curve(num: int, t0: float, n: int) -> np.ndarray:
+            return lane_curve(lanes.get(num), self.cc_defaults.get(num, 127.0 if num in (7, 11) else 0.0), t0, n)
+
+        def bend_curve(t0: float, n: int) -> np.ndarray | None:
+            return None if bend_lane is None else lane_curve(bend_lane, 0.0, t0, n)
         notes = sorted((e for e in events if e[0] == "note"), key=lambda e: e[1])
         ks = self.keyswitches()
         sw_lo = min((_note_val(r.op["sw_lokey"]) for r in self.regions if "sw_lokey" in r.op), default=None)
@@ -235,7 +266,7 @@ class Instrument:
                         pos = seq_counter.get(gkey, 0) % seq_len + 1
                         if int(r.f("seq_position", 1)) != pos:
                             continue
-                    xf = _xfade(r, vel, lambda num: cc_at(num, t_on))
+                    xf = _xfade(r, vel, None)  # velocity part; CC crossfades are applied per sample
                     if xf <= 0:
                         continue
                     if trig == "attack":
@@ -265,10 +296,10 @@ class Instrument:
         for r, t_on, t_off, key, vel, xf, cut in voices:
             if r.sample is None:
                 continue
-            self._voice(out, sr, r, t_on, t_off, key, vel, xf, cut, lambda num, t=t_on: cc_at(num, t))
+            self._voice(out, sr, r, t_on, t_off, key, vel, xf, cut, cc_curve, bend_curve)
         return out.T.copy()
 
-    def _voice(self, out, sr, r: Region, t_on, t_off, key, vel, xf, cut, cc) -> None:
+    def _voice(self, out, sr, r: Region, t_on, t_off, key, vel, xf, cut, cc_curve, bend_curve) -> None:
         data, ssr = self.load(r.sample, sr)
         n_src = len(data)
         offset = int(r.f("offset", 0))
@@ -309,7 +340,25 @@ class Instrument:
         if n <= 0 or i0 >= len(out):
             return
         n = min(n, len(out) - i0)
-        pos = offset + ratio * np.arange(n, dtype=np.float64)
+        # controller curves over this voice's lifetime (CC crossfades + amplitude/volume_onccN)
+        cc_gain = _xfade_cc(r, lambda num: cc_curve(num, start, n))
+        for k, v in r.op.items():
+            m = re.fullmatch(r"(amplitude|volume)_oncc(\d+)", k)
+            if m:
+                c = cc_curve(int(m.group(2)), start, n) / 127.0
+                fac = (1 + (float(v) / 100.0) * (c - 1)) if m.group(1) == "amplitude" else 10 ** (float(v) * c / 20)
+                cc_gain = cc_gain * fac
+        if np.ndim(cc_gain) and float(np.max(cc_gain, initial=0.0)) <= 1e-6:
+            return
+        bend = bend_curve(start, n)
+        if bend is not None and np.any(bend):
+            up, down = r.f("bend_up", 200), abs(r.f("bend_down", -200))
+            bc = np.where(bend >= 0, bend / 8191.0 * up, bend / 8192.0 * down).astype(np.float64)
+            step = ratio * 2 ** (bc / 1200.0)
+            pos = offset + np.concatenate(([0.0], np.cumsum(step[:-1])))
+        else:
+            step = None
+            pos = offset + ratio * np.arange(n, dtype=np.float64)
         if looping:
             sustain_loop = loop_mode == "loop_sustain"
             limit = n if not sustain_loop else min(n, int(note_len * sr))
@@ -319,7 +368,8 @@ class Instrument:
             if sustain_loop and limit < n:
                 # after release, continue forward from where the loop was
                 p_last = pos[limit - 1] if limit > 0 else offset
-                pos[limit:] = p_last + ratio * np.arange(1, n - limit + 1)
+                tail_steps = step[limit:] if step is not None else np.full(n - limit, ratio)
+                pos[limit:] = p_last + np.cumsum(tail_steps)
         valid = pos < end - 1
         pos = np.where(valid, pos, end - 2)
         i = pos.astype(np.int64)
@@ -344,12 +394,7 @@ class Instrument:
         # gain
         veltrack = r.f("amp_veltrack", 100) / 100.0
         vel_gain = (1 - veltrack) + veltrack * (vel / 127.0) ** 2
-        g = 10 ** (r.f("volume", 0) / 20) * (r.f("amplitude", 100) / 100.0) * vel_gain * xf
-        for k, v in r.op.items():
-            m = re.fullmatch(r"(amplitude|volume)_oncc(\d+)", k)
-            if m:
-                c = cc(int(m.group(2))) / 127.0
-                g *= (1 + (float(v) / 100.0) * (c - 1)) if m.group(1) == "amplitude" else 10 ** (float(v) * c / 20)
+        g = 10 ** (r.f("volume", 0) / 20) * (r.f("amplitude", 100) / 100.0) * vel_gain * xf * cc_gain
         pan = r.f("pan", 0) / 100.0
         gl = math.cos((pan + 1) * math.pi / 4) * math.sqrt(2)
         gr = math.sin((pan + 1) * math.pi / 4) * math.sqrt(2)
@@ -358,19 +403,34 @@ class Instrument:
         out[i0:i0 + n, 1] += sig[:, 1] * min(gr, 1.0)
 
 
-def _xfade(r: Region, vel: int, cc) -> float:
+def _ramp(x, lo, hi, rising):
+    """Equal-power crossfade gain; x may be a scalar or a numpy array."""
+    x = np.asarray(x, dtype=np.float32)
+    if hi <= lo:
+        g = (x >= lo) if rising else (x <= hi)
+    else:
+        f = np.clip((x - lo) / (hi - lo), 0.0, 1.0)
+        g = np.sqrt(f) if rising else np.sqrt(1 - f)
+    g = np.asarray(g, dtype=np.float32)
+    return g if g.ndim else float(g)
+
+
+def _xfade(r: Region, vel: int, cc=None):
+    """Velocity crossfade gain; with a `cc` callable (num -> value) the CC crossfades are included too."""
     g = 1.0
-
-    def ramp(x, lo, hi, rising):
-        if hi <= lo:
-            return 1.0 if (x >= lo if rising else x <= hi) else 0.0
-        f = min(1.0, max(0.0, (x - lo) / (hi - lo)))
-        return math.sqrt(f) if rising else math.sqrt(1 - f)  # equal-power
-
     if "xfin_lovel" in r.op or "xfin_hivel" in r.op:
-        g *= ramp(vel, r.f("xfin_lovel", 0), r.f("xfin_hivel", 0), True)
+        g *= _ramp(vel, r.f("xfin_lovel", 0), r.f("xfin_hivel", 0), True)
     if "xfout_lovel" in r.op or "xfout_hivel" in r.op:
-        g *= ramp(vel, r.f("xfout_lovel", 127), r.f("xfout_hivel", 127), False)
+        g *= _ramp(vel, r.f("xfout_lovel", 127), r.f("xfout_hivel", 127), False)
+    if cc is not None:
+        g = g * _xfade_cc(r, cc)
+    return g
+
+
+def _xfade_cc(r: Region, cc):
+    """CC crossfade gain. `cc(num)` returns a value or a per-sample array; so does this."""
+    ramp = _ramp
+    g = 1.0
     for k in list(r.op):
         m = re.fullmatch(r"xfin_locc(\d+)", k)
         if m:

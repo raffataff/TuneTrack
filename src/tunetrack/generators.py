@@ -70,7 +70,17 @@ def chord_notes(progression: list[tuple[Chord, float]], rhythm: str | None = Non
     return notes
 
 
-_PAT_TOKEN = re.compile(r"^(\d+)([b#]?)([+\-]*)(>?)$")
+_PAT_TOKEN = re.compile(r"^([b#]?)(\d+)([b#]?)([+\-]*)(>?)$")
+# major-scale interval above the root for a degree written with a leading accidental (b7, #4, b9 ...)
+_DEGREE_SEMIS = {1: 0, 2: 2, 3: 4, 4: 5, 5: 7, 6: 9, 7: 11}
+
+
+def _degree_semis(deg: int) -> int:
+    base, octave = deg, 0
+    while base > 7:
+        base -= 7
+        octave += 12
+    return _DEGREE_SEMIS[max(1, base)] + octave
 
 
 def pattern_notes(progression: list[tuple[Chord, float]], pattern: str, rate: float = 0.5, octave: int = 4,
@@ -80,7 +90,8 @@ def pattern_notes(progression: list[tuple[Chord, float]], pattern: str, rate: fl
 
     pattern tokens (one per `rate` beats):
         1 3 5 7 9   chord tones (the chord's own 3rd/5th/7th), 8 / 10 / 12 = root / 3rd / 5th an octave up
-        b7 #4       explicitly altered degree (b = -1, # = +1 semitone)
+        b7 #4 b9    altered scale degree above the chord root (b7 = minor 7th, #4 = tritone, b9 = minor 9th)
+        7b 5#       the chord's own tone for that degree, lowered / raised a semitone
         5- 3+ 1--   shift down / up an octave per sign
         1>          accent
         .           rest
@@ -113,9 +124,14 @@ def pattern_notes(progression: list[tuple[Chord, float]], pattern: str, rate: fl
                 continue
             m = _PAT_TOKEN.match(tok)
             if not m:
-                raise ValueError(f"Bad pattern token {tok!r} (use chord degrees like 1 3 5 8, '.', '-', 5-, 3+)")
-            deg, alt, octs, acc = m.groups()
-            semis = chord.tone(int(deg)) + {"b": -1, "#": 1, "": 0}[alt]
+                raise ValueError(f"Bad pattern token {tok!r} (use chord degrees like 1 3 5 8, b7, #4, '.', '-', 5-, 3+)")
+            pre, deg, alt, octs, acc = m.groups()
+            if pre and alt:
+                raise ValueError(f"Bad pattern token {tok!r}: put the accidental before or after the degree, not both")
+            if pre:
+                semis = _degree_semis(int(deg)) + {"b": -1, "#": 1}[pre]
+            else:
+                semis = chord.tone(int(deg)) + {"b": -1, "#": 1, "": 0}[alt]
             semis += 12 * (octs.count("+") - octs.count("-"))
             n = Note(base + semis, at, rate * gate, min(127, vel + (accent if acc else 0)))
             notes.append(n)

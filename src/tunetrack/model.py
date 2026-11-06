@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import bisect
 import json
+import os
 import re
 import shutil
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -244,6 +247,7 @@ class Project:
     tail: float = 4.0  # seconds rendered past the end for release/reverb tails
     tempo_changes: list[list[float]] = field(default_factory=list)
     next_id: int = 1
+    rev: int = 0  # bumped on every save; lets editors detect that someone else changed the project
     path: Path | None = None  # project folder (not serialised)
 
     # ---- time helpers -------------------------------------------------
@@ -329,7 +333,7 @@ class Project:
             "key": self.key, "sample_rate": self.sample_rate, "length": self.length, "loop": self.loop,
             "tail": self.tail, "markers": sorted(self.markers, key=lambda m: m["at"]),
             "master": {**self.master, "fx": [f.to_json() if isinstance(f, Device) else f for f in self.master.get("fx", [])]},
-            "next_id": self.next_id,
+            "next_id": self.next_id, "rev": self.rev,
             "tracks": [t.to_json() for t in self.tracks],
         }
 
@@ -341,7 +345,7 @@ class Project:
                 tracks=[Track.from_json(t) for t in d.get("tracks", [])],
                 markers=list(d.get("markers", [])), loop=d.get("loop"), length=d.get("length"),
                 tail=float(d.get("tail", 4.0)), tempo_changes=list(d.get("tempo_changes", [])),
-                next_id=int(d.get("next_id", 1)), path=path)
+                next_id=int(d.get("next_id", 1)), rev=int(d.get("rev", 0)), path=path)
         m = dict(d.get("master", {}))
         p.master = {"volume_db": 0.0, "target_lufs": -16.0, "ceiling_db": -1.0, **m,
                     "fx": [Device.from_json(f) for f in m.get("fx", [])]}
@@ -367,11 +371,108 @@ class Project:
         self.path.mkdir(parents=True, exist_ok=True)
         for sub in ("audio", "cache", "renders", "history"):
             (self.path / sub).mkdir(exist_ok=True)
-        if snapshot and self.file.exists():
-            _push_history(self.path)
-        tmp = self.file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.to_json(), indent=1), encoding="utf-8")
-        tmp.replace(self.file)
+        with project_lock(self.path):
+            if snapshot and self.file.exists():
+                _push_history(self.path)
+            self.rev = max(self.rev, read_rev(self.path)) + 1
+            _atomic_write(self.file, json.dumps(self.to_json(), indent=1))
+
+
+def read_rev(path: Path) -> int:
+    f = Path(path) / "project.json"
+    try:
+        return int(json.loads(f.read_text(encoding="utf-8")).get("rev", 0))
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def _atomic_write(file: Path, text: str) -> None:
+    tmp = file.with_name(f"{file.stem}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    for i in range(50):
+        try:
+            tmp.replace(file)
+            return
+        except PermissionError:  # Windows: a reader has the file open for a moment
+            time.sleep(0.02 * (i + 1) if i < 10 else 0.2)
+    tmp.replace(file)
+
+
+# ---- cross-process project lock ---------------------------------------------
+# The MCP server, the CLI and the web editor are separate processes that all edit project.json. Every
+# read-modify-write holds this lock so one editor can't overwrite another's change made in between.
+
+_held = threading.local()
+_thread_locks: dict[str, threading.RLock] = {}
+_thread_locks_guard = threading.Lock()
+
+
+class LockTimeout(TimeoutError):
+    pass
+
+
+@contextmanager
+def project_lock(path: Path, timeout: float = 60.0):
+    key = str(Path(path).resolve()).lower()
+    depth = getattr(_held, "depth", {})
+    _held.depth = depth
+    if depth.get(key):
+        depth[key] += 1
+        try:
+            yield
+        finally:
+            depth[key] -= 1
+        return
+    with _thread_locks_guard:
+        tl = _thread_locks.setdefault(key, threading.RLock())
+    if not tl.acquire(timeout=timeout):
+        raise LockTimeout(f"Project {path} is busy (another edit is in progress)")
+    try:
+        Path(path).mkdir(parents=True, exist_ok=True)
+        fh = open(Path(path) / ".lock", "a+b")  # noqa: SIM115 - held for the duration of the lock
+        try:
+            _os_lock(fh, timeout, path)
+            depth[key] = 1
+            try:
+                yield
+            finally:
+                depth.pop(key, None)
+                _os_unlock(fh)
+        finally:
+            fh.close()
+    finally:
+        tl.release()
+
+
+def _os_lock(fh, timeout: float, path) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() > deadline:
+                raise LockTimeout(f"Project {path} is busy (another process holds its lock)") from None
+            time.sleep(0.02)
+
+
+def _os_unlock(fh) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
 
 
 # ---- undo / redo: snapshots of project.json --------------------------------
@@ -393,20 +494,41 @@ def _push_history(path: Path) -> None:
 
 
 def undo(path: Path) -> bool:
+    with project_lock(path):
+        return _undo(path)
+
+
+def redo(path: Path) -> bool:
+    with project_lock(path):
+        return _redo(path)
+
+
+def _restore(snap: Path, path: Path) -> None:
+    """Put a snapshot back as project.json, keeping the revision counter moving forward."""
+    try:
+        d = json.loads(snap.read_text(encoding="utf-8"))
+        d["rev"] = read_rev(path) + 1
+        _atomic_write(path / "project.json", json.dumps(d, indent=1))
+        snap.unlink()
+    except (OSError, ValueError):
+        snap.replace(path / "project.json")
+
+
+def _undo(path: Path) -> bool:
     h, redo = _hist(path)
     snaps = sorted(h.glob("*.json"))
     if not snaps:
         return False
     shutil.copy2(path / "project.json", redo / f"{time.time_ns()}.json")
-    snaps[-1].replace(path / "project.json")
+    _restore(snaps[-1], path)
     return True
 
 
-def redo(path: Path) -> bool:
+def _redo(path: Path) -> bool:
     h, rd = _hist(path)
     snaps = sorted(rd.glob("*.json"))
     if not snaps:
         return False
     shutil.copy2(path / "project.json", h / f"{time.time_ns()}.json")
-    snaps[-1].replace(path / "project.json")
+    _restore(snaps[-1], path)
     return True

@@ -14,10 +14,11 @@ const S = {
 };
 
 // ---------------------------------------------------------------- api
+const TOKEN = document.querySelector('meta[name="tt-token"]')?.content || "";
 async function api(fn, args = {}) {
-  const r = await fetch("/api/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fn, args }) });
+  const r = await fetch("/api/call", { method: "POST", headers: { "Content-Type": "application/json", "X-TuneTrack-Token": TOKEN }, body: JSON.stringify({ fn, args }) });
   const j = await r.json();
-  if (j.error) throw new Error(j.error);
+  if (j.error) { const e = new Error(j.error); e.conflict = !!j.conflict; throw e; }
   return j.result;
 }
 async function act(fn, args, msg) {
@@ -58,6 +59,8 @@ async function loadState() {
   const st = await (await fetch("/api/state")).json();
   if (!st.project) { S.doc = null; renderAll(); openProjectModal(st.recent || []); return; }
   S.doc = st.doc; S.version = st.version; S.path = st.project;
+  // notes as last loaded, per clip: whole-list saves send these so the server can refuse a stale overwrite
+  S.base = {}; for (const t of S.doc.tracks) for (const c of t.clips) if (c.notes) S.base[c.id] = c.notes.map((n) => [...n]);
   if (st.last_render && !S.lastRender) S.lastRender = st.last_render;
   if (S.sel.clip && !findClip(S.sel.clip)[1]) { S.sel.clip = null; S.sel.notes.clear(); }
   if (S.sel.track && !S.doc.tracks.find((t) => t.id === S.sel.track)) S.sel.track = null;
@@ -461,7 +464,8 @@ function scheduleSave() {
   clearTimeout(S.pendingSave);
   S.pendingSave = setTimeout(async () => {
     const [, c] = selClip(); S.pendingSave = null; if (!c) return;
-    try { await api("clip_set", { clip: c.id, notes: c.notes }); await loadState(); } catch (e) { toast(e.message); }
+    try { await api("clip_set", { clip: c.id, notes: c.notes, expect_notes: S.base[c.id] || [] }); await loadState(); }
+    catch (e) { toast(e.message); if (e.conflict) await loadState(); }
   }, 350);
   drawArrangement();
 }
