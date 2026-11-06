@@ -131,7 +131,18 @@ reharmonised cadence, drums opened up).
    PNG** to check the form, density and register spread.
 2. `render()`. Act on every warning: silent track (no patch loaded), mud, dull or harsh top end, peaks, limiter working hard, loop
    seam. Unchanged tracks are cached, so iterate freely.
-3. Tell the user what you made and how it's built (form, key, tempo, instruments, the motif), give the file path, and offer
+3. `listen()`: your ears. It measures the rendered audio, not the notes, and catches what the notes can't show you:
+   - `energy_arc`, `sections`, `bar_lufs`: does each section do what the form says? B should differ from A in level, brightness,
+     density or who leads (`tracks_db`, `most_present`); builds rise bar by bar; the loop's last bar flows into its first.
+   - `masking`: each track's `vs_rest_db` in its main band. Keep the lead at 0 or above. Parts under about -10 are barely heard:
+     raise them, EQ-dip the `covered_by` track there, move register, or cut them. `pairs` are parts fighting for one band
+     (kick vs bass at 63 Hz: let one own the lows, or duck it on the hits).
+   - `verify`: probe renders of every pitch each part uses. They show silent or much quieter pitches (outside the instrument's
+     range), parts that sound transposed, slow attacks on short notes, bars with notes but no sound (CC at 0?), and `drum_notes`:
+     what each drum note really sounds like and how loud it is at equal velocity. Trust these over patch names and descriptions.
+   Fix, re-render, listen again until every warning is fixed or deliberate. The first run probe-renders each instrument (seconds
+   per plugin track, cached after). `reference="<file>"` compares the mix with a track the user wants to match.
+4. Tell the user what you made and how it's built (form, key, tempo, instruments, the motif), give the file path, and offer
    `play()` or the editor (`ui_open()`) so they can listen. Their ears are the final judge, so ask what to change.
 
 ## 8. Deliver

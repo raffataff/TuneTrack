@@ -27,6 +27,9 @@ Workflow:
    seam). Fix what it flags, re-render (unchanged tracks are cached). Game loops: project_set(loop="1:1-17:1")
    and render(loop="auto") folds reverb tails into the loop start for a seamless loop + .loop.json sidecar.
    Deliver into the game's audio folder with render(out="<game>/Audio/Music/menu_theme.ogg").
+7. listen() - your ears: measures the rendered audio per section (level, brightness, who leads), which parts are
+   buried or fight for one band, and probe-renders each instrument to catch silent/out-of-range pitches, transposed
+   patches, slow attacks and drum notes that don't sound like their names. Fix what it flags and listen again.
 
 TTN notation: D4:q!mf F4 A4:h | (D3 A3 F4):w | r:h C5:e. B4:s ...  durations w h q e s t (dotted '.', triplet '3',
 beats '1.5'), sticky; velocity !p..!ff or !0-127; ' staccato, > accent, ~ tie, | bar check, @beat reposition.
@@ -427,6 +430,22 @@ def analyze(images: bool = True, start: Any = None, end: Any = None, project: st
     """Note checks (out-of-key, out-of-range, overlaps, low-register mud) + piano-roll PNG and spectrogram PNG of
     the last render. Read the PNG files to see the arrangement."""
     return api.analyze(project, images, start, end)
+
+
+@tool
+def listen(reference: str | None = None, probe: bool = True, section_bars: int | None = None,
+           tracks: list[str] | None = None, project: str | None = None) -> dict:
+    """Your ears: measures the rendered audio instead of the notes. Run it after render() and act on its warnings.
+    sections: loudness (LUFS), brightness, stereo width, notes per bar and each track's level per marker section
+    (or every section_bars bars), bar_lufs (one value per bar), energy_arc; flags neighbouring sections that barely
+    differ and big level jumps at the loop point.
+    masking: each track's main band and how far it sits above (+) or under (-) the rest of the mix there, what covers
+    it, and pairs of tracks fighting for one band (kick vs bass, pad vs lead) with the bars.
+    verify: bars where a track has notes but no sound, and a probe render of every pitch each track uses (tracks:
+    limit it to these): pitches that are silent or much quieter (out of range), slow attacks, instruments sounding
+    transposed, and what each drum note really sounds like (kick/snare/hat/cymbal/click) vs its name.
+    reference: path to a recording to compare loudness, loudness range, crest, band balance, brightness, width."""
+    return api.listen(project, reference, probe, section_bars, tracks)
 
 
 @tool

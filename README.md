@@ -99,9 +99,29 @@ take over at any point.
   MIDI file to finish the arrangement in Cubase.
 - Formats: wav (16/24/32-bit), ogg, flac, mp3.
 
+## Listening (the agent's ears)
+
+An agent can't hear, so `listen()` (`tunetrack call listen '{}'`) measures the rendered audio and reports it as text it can act
+on. The full report is also saved to `renders/listen.json`.
+
+- **Sections**: loudness, peak, brightness, stereo width, notes per bar, band balance and each track's level per marker section
+  (or every `section_bars` bars), plus one loudness value per bar. Warns when neighbouring sections barely differ, or when the
+  loop wraps across a big level jump.
+- **Masking**: each track's main octave band, how far it sits above or below everything else there, and what covers it. Also
+  pairs of tracks that fight for one band (kick vs bass, pad vs lead), with the bars where they do.
+- **Verify**: bars that have notes but no sound, and a probe render of every pitch each track uses through its instrument. This
+  catches pitches that make no sound or are much quieter (outside the range), patches that sound transposed, slow attacks on
+  short notes, and what each drum note really sounds like (kick/snare/hat/cymbal/click, with its level at equal velocity), so a
+  wrong drum map or a choked crash shows up. Probe renders are cached like track renders.
+- **Reference**: `reference="song.wav"` compares loudness, loudness range, crest, band balance, brightness and width with a track
+  you want to match.
+
+The drum and pitch readings are heuristics (spectral features, harmonic matching). They're tuned on the built-in synths,
+Groove Agent SE, MODO DRUM and HALion, and they only warn on clear mismatches. Your ears still decide.
+
 ## For agents
 
-46 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
+47 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
 The skill (`skill/SKILL.md`) is the composition playbook: understanding the project, forms per cue type, melody/harmony/bass/
 arrangement craft, genre palettes, mixing targets, the review loop and delivery per engine.
 
@@ -125,6 +145,7 @@ src/tunetrack/
   worker.py     plugin host subprocess (DawDreamer; pedalboard for shell plugins)
   engine.py     cached parallel track renders, mixing, buses, master, loudness, limiter, loops, stems, MIDI export
   analysis.py   loudness/spectrum/loop-seam/note checks, piano-roll and spectrogram images
+  listening.py  listen(): per-section measurements, masking, probe renders that verify each instrument, reference compare
   api.py        every operation (shared by MCP, CLI and editor)
   mcp_server.py MCP tools    server.py + web/  editor    cli.py  command line
 library/        plugins.json, patches/, instruments/ (SFZ), config.json

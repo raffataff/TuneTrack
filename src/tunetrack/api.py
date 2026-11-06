@@ -53,7 +53,8 @@ def _path(project: str | None) -> Path:
                 cand = config.PROJECTS_DIR / plugins.slug(project)
                 if cand.exists():
                     p = cand
-        return p.parent if p.is_file() else p
+        # absolute, so worker processes (which run in another folder) find the project's cache files
+        return (p.parent if p.is_file() else p).resolve()
     cur = _state().get("current")
     if not cur:
         raise RuntimeError("No project open. Use project_new or project_open first.")
@@ -1274,6 +1275,25 @@ def analyze(project: str | None = None, images: bool = True, start=None, end=Non
                 data, sr = sf.read(files[0], dtype="float32", always_2d=True)
                 rep["spectrogram_png"] = analysis.spectrogram_png(data.T, sr, out / "spectrogram.png")
     return rep
+
+
+def listen(project: str | None = None, reference: str | None = None, probe: bool = True,
+           section_bars: int | None = None, tracks: list | None = None) -> dict:
+    """Measure what the mix sounds like (the agent's ears): per-section loudness/brightness/width/balance and a
+    loudness value per bar, masking between tracks, a check of each track's audio against its notes (with probe
+    renders of every pitch it uses), and an optional comparison with a reference recording."""
+    from . import listening
+    p = load(project)
+    t0 = time.time()
+    r = engine.Renderer(p)
+    rep = r.run()
+    res = listening.report(p, r, reference=reference, probe=probe,
+                           section_bars=int(section_bars) if section_bars else None, tracks=tracks)
+    res["warnings"] = [w for w in rep["warnings"]] + res["warnings"]
+    res["seconds"] = round(time.time() - t0, 1)
+    (p.path / "renders").mkdir(exist_ok=True)
+    (p.path / "renders" / "listen.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
+    return res
 
 
 def play(file: str | None = None, project: str | None = None) -> dict:
