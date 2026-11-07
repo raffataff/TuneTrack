@@ -36,7 +36,8 @@ Before writing a note, find out what the music is for:
 
 ## 3. Plan the form (before the notes)
 
-Set `markers()` for sections and `project_set(loop="5:1-21:1")` for the loop region. Typical forms:
+Set `markers()` for sections and `project_set(loop="5:1-21:1")` for the loop region, then put each section's harmony on
+the chord track (section 4). Typical forms:
 
 | Cue | Length | Form and notes |
 |---|---|---|
@@ -58,7 +59,19 @@ render with `layers=True` for vertically layered stems that the game crossfades.
 
 ## 4. Write the music
 
-Order: **motif, then harmony, bass, melody phrases, counterline and inner parts, rhythm section, dynamics, then variation.**
+Order: **motif, then harmony on the chord track, bass, melody phrases, counterline and inner parts, rhythm section,
+dynamics, then variation.**
+
+Chord track first
+- Set the harmony once per section before writing parts: `harmony("i VI III VII i VI iv V", section="A")`. Roman numerals
+  follow the project key; symbols work too (`"Am7 F/A G"`). One chord per bar, or `:beats` per chord (`"i:2 iv:2 V7:4"`);
+  with `section` or `end` the progression repeats to fill the range. `harmony()` with no progression reads it back.
+- Then generate the parts that follow it, without passing a progression: `chords("Pad", section="A")`,
+  `pattern("Bass", pattern="1 - - 1 . 1 5- .", section="A", octave=2)`, `pattern("Harp", pattern="1 5 8 10", section="B")`.
+  Write melodies against it with `write()`; `score()` checks them against it.
+- Reharmonise by editing the chord track for a range (`harmony("III iv:2 V:2", at="10:1", end="12:1")`) and re-running
+  the generators for that range (`chords("Pad", at="10:1", end="12:1", ...)` with the same settings as before). `score()`
+  flags any part you forgot as "doesn't follow the chord track". A modulation: `harmony(..., key="F major")` for that range.
 
 Melody
 - Build from a 1-2 bar motif with a recognisable rhythm and contour. Develop it with repetition, sequence (moved up a step),
@@ -69,7 +82,7 @@ Melody
 - Chord tones on strong beats; passing and neighbour tones on weak beats. Long notes on dissonances are deliberate choices.
 
 Harmony
-- `chords()` voice-leads for you. Choose progressions that serve the mood. Vary harmonic rhythm: 1 chord per bar, faster at cadences.
+- `chords()` voice-leads for you (following the chord track). Choose progressions that serve the mood. Vary harmonic rhythm: 1 chord per bar, faster at cadences.
 - Useful moves: minor i-VI-III-VII (epic/heroic), i-iv-VII-III (nostalgic), I-V-vi-IV (bright), ii-V-I and IVmaj7-iii7-vi7
   (jazzy/cozy), bVI-bVII-I (triumphant), Lydian I-II (wonder/magic), Phrygian i-bII (menace), Dorian i-IV (adventurous, folk),
   chromatic mediants (bIII, bVI major in major key) for cinematic colour, pedal points under changing chords for tension.
@@ -127,8 +140,14 @@ reharmonised cadence, drums opened up).
 
 ## 7. Review loop (always)
 
-1. `notes_read(track)` to check your lines as TTN. `analyze()` gives key/range/overlap/mud checks plus a piano-roll PNG. **Read the
-   PNG** to check the form, density and register spread.
+1. `score(section="A")` (or `start`/`end`) per section: the chord on each beat and every part's notes in TTN, bar by bar, lined
+   up by beat so you can see what sounds together. Read it like a score: does the bass land on roots or chosen inversions, does
+   the melody sit on chord tones at strong beats, do counterlines answer in the gaps? Fix every `!` line or decide it's
+   deliberate: clashes on strong beats (the fix names chord tones to use), parallel 5ths/8ves between bass and lead, voice
+   crossings, parts that don't follow the chord track (re-run that generator for the range). `Dm*` marks a chord inferred
+   from the notes where the chord track has none.
+   `notes_read(track)` shows a clip's TTN with velocities. `analyze()` gives key/range/overlap/mud checks, the same
+   `harmony_warnings` and a piano-roll PNG. **Read the PNG** to check the form, density and register spread.
 2. `render()`. Act on every warning: silent track (no patch loaded), mud, dull or harsh top end, peaks, limiter working hard, loop
    seam. Unchanged tracks are cached, so iterate freely.
 3. `listen()`: your ears. It measures the rendered audio, not the notes, and catches what the notes can't show you:
@@ -142,6 +161,8 @@ reharmonised cadence, drums opened up).
      what each drum note really sounds like and how loud it is at equal velocity. Trust these over patch names and descriptions.
    Fix, re-render, listen again until every warning is fixed or deliberate. The first run probe-renders each instrument (seconds
    per plugin track, cached after). `reference="<file>"` compares the mix with a track the user wants to match.
+   `score()` tells you what the notes do, `listen()` what the audio does: a part can be right in the score and buried in the mix,
+   or loud and clear but off the chord. Use both.
 4. Tell the user what you made and how it's built (form, key, tempo, instruments, the motif), give the file path, and offer
    `play()` or the editor (`ui_open()`) so they can listen. Their ears are the final judge, so ask what to change.
 

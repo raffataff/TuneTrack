@@ -119,9 +119,50 @@ on. The full report is also saved to `renders/listen.json`.
 The drum and pitch readings are heuristics (spectral features, harmonic matching). They're tuned on the built-in synths,
 Groove Agent SE, MODO DRUM and HALion, and they only warn on clear mismatches. Your ears still decide.
 
+## Harmony: the chord track and the score
+
+A project holds one harmonic timeline, the chord track (`chord_track` in `project.json`, covered by undo). Set it per
+section, then let the parts follow it:
+
+```python
+harmony("i VI III VII", section="Intro")         # roman numerals follow the project key; symbols too: "Am7 F/A G"
+harmony("i VI III VII i VI iv V", section="A")   # one chord per bar, or "i:2 iv:2 V7:4"; repeats to fill the section
+chords("Pad", section="A", voices=4)             # no progression: follows the chord track
+pattern("Bass", pattern="1 - - 1 . 1 5- .", section="A", octave=2)
+```
+
+To reharmonise, change the chord track for a range (`harmony("III iv:2 V:2", at="10:1", end="12:1")`) and re-run the
+generators there. An explicit `progression` works as before and ignores the chord track. `arrange` moves the chord
+track with insert/delete/move and copies it in replace mode. `%` repeats a chord, `N.C.` leaves a gap, `key=` gives a
+range its own key.
+
+`score()` (`tunetrack call score '{"section": "A"}'`) is the text view an agent reads alongside `analyze()` and
+`listen()`:
+
+```
+bar 11
+  chord   Gm(iv)            -       A(V)    -
+  Melody  G5:q.             F5:e    E5:q    D5
+  Harp    G3:e D4           G4 Bb4  D5 Bb4  G4 D4
+  Pad     (G3 Bb3 D4 G4):w
+  Bass    G2:q.             G2:e    r G2    D2
+  ! 11:3-12:1 Pad doesn't follow the chord track (plays Gm where it says A(V)): re-run chords()/pattern() for
+    11:3-12:1 without a progression so it follows the chord track, or change the chord track there
+```
+
+- **Chords**: the chord on each beat, from the chord track, or inferred from all pitched parts where it has none (`Dm*`).
+- **Parts**: each part's notes per bar in TTN, highest part first, columns lined up by beat. Humanized timing and gated
+  lengths read as written and `%` repeats the bar before, so a 32-bar, 6-track cue comes to about 2-4k tokens. Drums
+  are left out unless named in `tracks`.
+- **Harmony warnings**, each with bar:beat and a fix (also in `analyze()` as `harmony_warnings`): lead or bass notes that
+  clash with the chord on a strong beat, unless they move on by step; parallel fifths/octaves between bass and lead;
+  voice crossings by role; parts that don't follow the chord track. Like `listen()` it only flags clear problems:
+  colour tones (9ths, 11ths, 13ths, maj7), passing and neighbour notes, pedal points, slash chords like D/E and long
+  octave doublings pass.
+
 ## For agents
 
-47 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
+50 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
 The skill (`skill/SKILL.md`) is the composition playbook: understanding the project, forms per cue type, melody/harmony/bass/
 arrangement craft, genre palettes, mixing targets, the review loop and delivery per engine.
 
@@ -131,7 +172,8 @@ TTN, the note notation agents write in:
 D4:q!mf F4 A4:h | (D3 A3 F4):w | r:h C5:e. B4:s A4:q' G4:q> | E4:h~ E4:q r:q
 ```
 
-`examples/ember_hollow_menu.py` builds a complete intro+loop menu theme with nothing but API calls.
+`examples/ember_hollow_menu.py` builds a complete intro+loop menu theme with nothing but API calls, its harmony set once
+on the chord track.
 
 ## Layout
 
@@ -145,6 +187,7 @@ src/tunetrack/
   worker.py     plugin host subprocess (DawDreamer; pedalboard for shell plugins)
   engine.py     cached parallel track renders, mixing, buses, master, loudness, limiter, loops, stems, MIDI export
   analysis.py   loudness/spectrum/loop-seam/note checks, piano-roll and spectrogram images
+  harmony.py    chord track, chord inference, score() text view, harmony check (clashes, parallels, crossings)
   listening.py  listen(): per-section measurements, masking, probe renders that verify each instrument, reference compare
   api.py        every operation (shared by MCP, CLI and editor)
   mcp_server.py MCP tools    server.py + web/  editor    cli.py  command line

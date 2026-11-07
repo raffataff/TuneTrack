@@ -14,15 +14,20 @@ INSTRUCTIONS = """TuneTrack is a multitrack music workstation for game soundtrac
 Workflow:
 1. status() - see instruments: VST3 plugins, saved patches (plugin + sound), built-in synths, SFZ libraries.
 2. project_new(name, tempo, key, time_sig, brief={genre, mood, use, references}) - plan form first (sections,
-   bars, loop region, where the hook lands) and record it with markers().
+   bars, loop region, where the hook lands) and record it with markers(). Then put the harmony on the chord track:
+   harmony("i VI III VII", section="A") per section (roman numerals in the key, or symbols "Am7 F/A G").
 3. track_add(name, instrument=..., role=...) per part. instrument: "patch:<id>" (real VST3 sound - preferred for
    acoustic/orchestral), "sfz:<path>", "synth:<preset>" (built-in Faust synths; great for electronic/chiptune),
    "vst3:<plugin>" (only if it makes sound without a patch, e.g. MODO DRUM). Add buses (kind="bus") for shared
    reverb and route with sends.
 4. Write music: write() with TTN notation for melodies/counterlines, chords() for voice-led harmony, pattern()
    for arps/basslines/ostinatos, drums() for grooves, cc() for dynamics swells (CC1/CC11 on orchestral patches).
-   Positions are beats or "bar:beat" ("9:1"). Reuse material with arrange(op="copy") and vary it with notes_edit.
-5. Review: notes_read() (TTN text), analyze() (key/range/overlap/mud checks + piano_roll_png - view it).
+   chords()/pattern() without a progression follow the chord track (section="A" or at/end); to reharmonise, edit
+   the chord track and re-run them for that range. Positions are beats or "bar:beat" ("9:1"). Reuse material with
+   arrange(op="copy") and vary it with notes_edit.
+5. Review: score() (bar by bar: the chord on each beat and every part in TTN, lined up, plus harmony warnings:
+   clashes, parallel 5ths/8ves, crossings, parts off the chord track), notes_read() (TTN per clip), analyze()
+   (key/range/overlap/mud/harmony checks + piano_roll_png - view it).
 6. render() - returns loudness, band balance, per-track levels and warnings (silent tracks, mud, clipping, loop
    seam). Fix what it flags, re-render (unchanged tracks are cached). Game loops: project_set(loop="1:1-17:1")
    and render(loop="auto") folds reverb tails into the loop start for a seamless loop + .loop.json sidecar.
@@ -120,6 +125,19 @@ def markers(add: list[dict] | None = None, remove: list[str] | None = None, clea
 
 
 @tool
+def harmony(progression: str | None = None, at: Any = None, end: Any = None, section: str | None = None,
+            chord_length: Any = None, key: str | None = None, clear: bool = False, project: str | None = None) -> dict:
+    """The chord track: one harmonic timeline for the song. chords() and pattern() follow it when called without a
+    progression, and score() checks every part against it. Set it before writing parts.
+    Set: progression = roman numerals in the key ("i VI III VII", "ii7 V7 Imaj7", "V/V") or symbols ("Am7 F/A G"),
+    one chord per bar (chord_length) or ":beats" per chord ("i:2 iv:2 V7:4"); "%" repeats the previous chord,
+    "N.C." leaves a gap. It replaces the range starting at `at` (or the marker `section`); with `end` or `section` it
+    repeats to fill that range. key: a different key for this range (a modulation); roman numerals otherwise follow
+    the project key. clear=True removes the range (or everything). No progression and no clear: read it."""
+    return api.harmony(progression, at, end, section, chord_length, key, clear, project)
+
+
+@tool
 def undo(project: str | None = None) -> dict:
     """Undo the last edit."""
     return api.undo(project)
@@ -213,26 +231,31 @@ def add_notes(track: str, notes: list, mode: str = "merge", project: str | None 
 
 
 @tool
-def chords(track: str, progression: str, at: Any = 0, chord_length: Any = None, rhythm: str | None = None,
-           voices: int = 4, low: str = "C3", high: str = "G5", vel: int = 80, gate: float = 1.0, bass: bool = False,
-           bass_octave: int = 2, key: str | None = None, mode: str = "replace", project: str | None = None) -> dict:
-    """Voice-led chords. progression: roman numerals in the key ("i VI III VII", "ii7 V7 Imaj7", "V/V", "bVI")
-    or symbols ("Dm Bb F C", "Cmaj7/E"); each lasts chord_length (default 1 bar), override per chord with
-    ":beats" ("i:2 iv:2 V:4"). rhythm repeats within each chord: "h h", "q. e q q", "e r:e e e q h", "q>" accents.
+def chords(track: str, progression: str | None = None, at: Any = None, end: Any = None, section: str | None = None,
+           chord_length: Any = None, rhythm: str | None = None, voices: int = 4, low: str = "C3", high: str = "G5",
+           vel: int = 80, gate: float = 1.0, bass: bool = False, bass_octave: int = 2, key: str | None = None,
+           mode: str = "replace", project: str | None = None) -> dict:
+    """Voice-led chords. Without a progression they follow the chord track (harmony) over the marker `section` or
+    [at, end) (end defaults to the end of the chord track). progression: roman numerals in the key
+    ("i VI III VII", "ii7 V7 Imaj7", "V/V", "bVI") or symbols ("Dm Bb F C", "Cmaj7/E"); each lasts chord_length
+    (default 1 bar), override per chord with ":beats" ("i:2 iv:2 V:4"); with end/section it repeats to fill them.
+    rhythm repeats within each chord: "h h", "q. e q q", "e r:e e e q h", "q>" accents.
     voices/low/high bound the voicing; bass=True adds a root in bass_octave."""
     return api.chords(track, progression, at, project, key, chord_length, rhythm, voices, low, high, vel, gate,
-                      bass, bass_octave, mode)
+                      bass, bass_octave, mode, end, section)
 
 
 @tool
-def pattern(track: str, progression: str, pattern: str, at: Any = 0, rate: float = 0.5, octave: int = 4,
-            vel: int = 85, gate: float = 0.9, chord_length: Any = None, restart: bool = True,
-            key: str | None = None, mode: str = "replace", project: str | None = None) -> dict:
-    """Arpeggios/basslines/ostinatos that follow a progression. pattern = chord degrees, one per `rate` beats:
+def pattern(track: str, pattern: str, progression: str | None = None, at: Any = None, end: Any = None,
+            section: str | None = None, rate: float = 0.5, octave: int = 4, vel: int = 85, gate: float = 0.9,
+            chord_length: Any = None, restart: bool = True, key: str | None = None, mode: str = "replace",
+            project: str | None = None) -> dict:
+    """Arpeggios/basslines/ostinatos that follow the chords: the chord track over `section` or [at, end) when no
+    progression is given (like chords()), else the progression. pattern = chord degrees, one per `rate` beats:
     "1 3 5 8 5 3" arp, "1 . 1 5- 8 . 5- ." bass, "1 - - 5 8 -" ('-' holds, '.' rests), "5+"/"3-" octave
     shifts, "b7"/"#4" altered degrees above the root, "1>" accent. octave = octave of the chord root (C4 = middle C; bass ~2)."""
     return api.pattern(track, progression, pattern, at, project, key, chord_length, rate, octave, vel, gate,
-                       restart, mode)
+                       restart, mode, end, section)
 
 
 @tool
@@ -297,7 +320,8 @@ def arrange(op: str, start: Any, end: Any, to: Any = None, tracks: list[str] | N
     """Section editing across tracks: copy(start,end,to) move(start,end,to) insert(start,end) opens a gap,
     delete(start,end) removes and closes the gap, clear(start,end). copy mode="replace" (default) clears the
     destination's notes first, "merge" layers onto them. Automation moves with insert/delete; markers, tempo
-    changes, loop region and song length do too unless `tracks` limits it to some tracks."""
+    changes, loop region, song length and the chord track do too unless `tracks` limits it to some tracks (copy
+    takes the chord track along in replace mode)."""
     return api.arrange(op, start, end, to, tracks, project, mode)
 
 
@@ -426,9 +450,21 @@ def render(out: str | None = None, format: str = "wav", bits: int = 24, loop: st
 
 
 @tool
+def score(start: Any = None, end: Any = None, section: str | None = None, tracks: list[str] | None = None,
+          check: bool = True, project: str | None = None) -> dict:
+    """Read the music as a score, bar by bar: the chord on each beat (from the chord track; "Dm*" = inferred from
+    the notes where it has none) and every part's notes in TTN, columns lined up by beat so you can see what
+    sounds together. Harmony warnings ("!" lines and `warnings`) give bar:beat and a fix: lead/bass notes that clash
+    with the chord on strong beats (not passing/neighbour notes that move on by step), parallel 5ths/8ves between
+    bass and lead, voice crossings, parts that don't follow the chord track. Range: start/end or a marker section
+    (default the whole song, up to 32 bars). tracks: only these parts (drums are left out unless named)."""
+    return api.score(start, end, section, tracks, check, project)
+
+
+@tool
 def analyze(images: bool = True, start: Any = None, end: Any = None, project: str | None = None) -> dict:
-    """Note checks (out-of-key, out-of-range, overlaps, low-register mud) + piano-roll PNG and spectrogram PNG of
-    the last render. Read the PNG files to see the arrangement."""
+    """Note checks (out-of-key, out-of-range, overlaps, low-register mud), harmony_warnings (as in score()) +
+    piano-roll PNG and spectrogram PNG of the last render. Read the PNG files to see the arrangement."""
     return api.analyze(project, images, start, end)
 
 

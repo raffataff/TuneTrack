@@ -242,6 +242,8 @@ class Project:
     tracks: list[Track] = field(default_factory=list)
     master: dict = field(default_factory=lambda: {"volume_db": 0.0, "fx": [], "target_lufs": -16.0, "ceiling_db": -1.0})
     markers: list[dict] = field(default_factory=list)  # {"at": beat, "name": "Chorus"}
+    # one harmonic timeline: {"at": beat, "len": beats, "chord": "Am7" | "iv" [, "key": "F major"]}; see harmony.py
+    chord_track: list[dict] = field(default_factory=list)
     loop: dict | None = None  # {"start": beat, "end": beat}
     length: float | None = None  # explicit song end in beats
     tail: float = 4.0  # seconds rendered past the end for release/reverb tails
@@ -332,6 +334,7 @@ class Project:
             "tempo": _r(self.tempo), "tempo_changes": self.tempo_changes, "time_sig": self.time_sig,
             "key": self.key, "sample_rate": self.sample_rate, "length": self.length, "loop": self.loop,
             "tail": self.tail, "markers": sorted(self.markers, key=lambda m: m["at"]),
+            "chord_track": sorted(self.chord_track, key=lambda e: e["at"]),
             "master": {**self.master, "fx": [f.to_json() if isinstance(f, Device) else f for f in self.master.get("fx", [])]},
             "next_id": self.next_id, "rev": self.rev,
             "tracks": [t.to_json() for t in self.tracks],
@@ -343,7 +346,8 @@ class Project:
                 time_sig=list(d.get("time_sig", [4, 4])), key=d.get("key", "C major"),
                 sample_rate=int(d.get("sample_rate", 48000)), brief=dict(d.get("brief", {})),
                 tracks=[Track.from_json(t) for t in d.get("tracks", [])],
-                markers=list(d.get("markers", [])), loop=d.get("loop"), length=d.get("length"),
+                markers=list(d.get("markers", [])), chord_track=[dict(e) for e in d.get("chord_track") or []],
+                loop=d.get("loop"), length=d.get("length"),
                 tail=float(d.get("tail", 4.0)), tempo_changes=list(d.get("tempo_changes", [])),
                 next_id=int(d.get("next_id", 1)), rev=int(d.get("rev", 0)), path=path)
         m = dict(d.get("master", {}))
