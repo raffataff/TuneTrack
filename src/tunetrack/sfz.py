@@ -41,38 +41,48 @@ def _expand(path: Path, root: Path, defines: dict, depth: int = 0) -> str:
     if depth > 16:
         raise ValueError("SFZ #include nesting too deep")
     text = _strip_comments(path.read_text(encoding="utf-8", errors="replace"))
+
+    def subst(s: str) -> str:
+        for k, v in sorted(defines.items(), key=lambda kv: -len(kv[0])):
+            s = s.replace(k, v)
+        return s
+
     out = []
     for line in text.splitlines():
         m = re.match(r'\s*#define\s+(\$\w+)\s+(.*?)\s*$', line)
         if m:
             defines[m.group(1)] = m.group(2)
             continue
-        m = re.match(r'\s*#include\s+"(.+?)"', line)
-        if m:
-            inc = m.group(1)
-            for k, v in sorted(defines.items(), key=lambda kv: -len(kv[0])):
-                inc = inc.replace(k, v)
-            out.append(_expand(root / inc, root, defines, depth + 1))
-            continue
-        for k, v in sorted(defines.items(), key=lambda kv: -len(kv[0])):
-            line = line.replace(k, v)
-        out.append(line)
+        # #include may sit anywhere on a line ("<group> #include "a.txt" lovel=1 #include "b.txt""), and an included
+        # file's #defines apply to the rest of the line, so expand left to right.
+        parts, pos = [], 0
+        for m in re.finditer(r'#include\s+"(.+?)"', line):
+            parts.append(subst(line[pos:m.start()]))
+            parts.append("\n" + _expand(root / subst(m.group(1)), root, defines, depth + 1) + "\n")
+            pos = m.end()
+        parts.append(subst(line[pos:]))
+        out.append("".join(parts))
     return "\n".join(out)
 
 
 _OPCODE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=")
+# Opcodes whose values may contain spaces (paths and labels): they run to the next opcode or the end of the line.
+_FREE_TEXT = re.compile(r"sample|default_path|\w*_label|label_cc\d+")
 
 
 def _opcodes(body: str) -> dict[str, str]:
-    """Parse 'a=1 sample=My Sample.wav b=2' (values may contain spaces)."""
+    """Parse 'a=1 sample=My Sample.wav b=2' (sample/default_path/label values may contain spaces)."""
     ops = {}
     ms = list(_OPCODE.finditer(body))
     for i, m in enumerate(ms):
         end = ms[i + 1].start() if i + 1 < len(ms) else len(body)
         val = body[m.end():end].strip()
-        if m.group(1) != "sample":
+        name = m.group(1).lower()  # some hand-written files use "Sample=" etc.
+        if _FREE_TEXT.fullmatch(name):
+            val = val.splitlines()[0].strip() if val else ""
+        else:
             val = val.split()[0] if val.split() else ""
-        ops[m.group(1)] = val
+        ops[name] = val
     return ops
 
 
@@ -147,7 +157,8 @@ class Instrument:
             center = _note_val(op["pitch_keycenter"]) if "pitch_keycenter" in op else lo
         if "pitch_keycenter" in op:
             center = _note_val(op["pitch_keycenter"])
-        self.regions.append(Region(op, spath, lo + note_offset, hi + note_offset, center + note_offset,
+        # note_offset transposes incoming notes (note n plays as n + note_offset), so regions move the other way
+        self.regions.append(Region(op, spath, lo - note_offset, hi - note_offset, center - note_offset,
                                    int(op.get("lovel", 1)), int(op.get("hivel", 127))))
 
     def key_range(self) -> tuple[int, int]:

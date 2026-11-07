@@ -17,6 +17,10 @@ library/server.log
 library/audition/
 library/auditions/
 library/instruments/
+library/vst3/
+# patches made from the locally installed free plugins in library/vst3/
+library/patches/surge-xt-*
+library/patches/dexed-*
 library/.params_*
 projects/*/cache/
 projects/*/history/

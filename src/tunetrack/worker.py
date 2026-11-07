@@ -160,6 +160,33 @@ def _dd_plugin(eng, name: str, dev: dict):
     return p
 
 
+_JUCE_B64 = ".ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+"
+
+
+def fxp_chunk(path: str) -> bytes | None:
+    """The opaque plugin chunk in a VST2 program file ('CcnK' ... 'FPCh'), or None for any other preset file."""
+    raw = Path(path).read_bytes()
+    if len(raw) < 60 or raw[:4] != b"CcnK" or raw[8:12] != b"FPCh":
+        return None
+    return raw[60:60 + int.from_bytes(raw[56:60], "big")]
+
+
+def juce_base64(data: bytes) -> str:
+    """JUCE MemoryBlock::toBase64Encoding: '<size>.' then 6-bit groups, least significant bit first."""
+    bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8), bitorder="little")
+    bits = np.concatenate([bits, np.zeros(-len(bits) % 6, dtype=np.uint8)]).reshape(-1, 6)
+    vals = bits @ (1 << np.arange(6))
+    return f"{len(data)}." + "".join(_JUCE_B64[v] for v in vals)
+
+
+def vst3_state_from_chunk(chunk: bytes) -> bytes:
+    """A JUCE-hosted VST3 state (the format DawDreamer's save_state writes) whose component state is `chunk`.
+    JUCE-built plugins (Surge XT, Dexed, ...) store the same data as a VST2 .fxp chunk and as VST3 component state."""
+    xml = ('<?xml version="1.0" encoding="UTF-8"?> <VST3PluginState><IComponent>' + juce_base64(chunk)
+           + "</IComponent></VST3PluginState>").encode("utf-8")
+    return b"VC2!" + len(xml).to_bytes(4, "little") + xml + b"\0"
+
+
 def _pb_plugin(dev: dict):
     import pedalboard
     p = pedalboard.load_plugin(dev["path"], plugin_name=dev.get("shell"))
@@ -224,6 +251,8 @@ def _run_dd(specs: list[dict], audio: np.ndarray | None, sr: int, bpm: float, du
             p.compile()
         else:
             p = _dd_plugin(eng, name, dev)
+            if dev.get("is_instrument") and (dev.get("state") or dev.get("preset")):
+                _process_briefly(eng, p)  # else plugins that apply a loaded patch on the audio thread drop notes at 0
             latency += int(p.get_latency_samples() or 0)
             if dev.get("is_instrument") and midi:
                 p.load_midi(midi, clear_previous=True, beats=False, all_events=True)
@@ -358,9 +387,39 @@ def cmd_import_preset(spec_path: str) -> None:
         Path(spec["state_out"]).write_bytes(p.raw_state)
     else:
         eng = _engine(48000, 120)
-        p = _dd_plugin(eng, "imp", {**entry, "preset": spec["preset"]})
+        try:
+            p = _dd_plugin(eng, "imp", {**entry, "preset": spec["preset"]})
+        except RuntimeError:
+            chunk = fxp_chunk(spec["preset"])
+            if chunk is None:
+                raise
+            # DawDreamer reads .fxp files only into VST2 plugins: hand the chunk to the VST3 as its component state.
+            out = Path(spec["state_out"])
+            tmp, default = out.with_suffix(".fxp.tmp"), out.with_suffix(".default.tmp")
+            try:
+                eng.make_plugin_processor("default", entry["path"]).save_state(str(default))
+                tmp.write_bytes(vst3_state_from_chunk(chunk))
+                p = _dd_plugin(eng, "imp_chunk", {**entry, "state": str(tmp)})
+                _process_briefly(eng, p)
+                p.save_state(str(out))
+                if out.read_bytes() == default.read_bytes():
+                    out.unlink()
+                    raise RuntimeError(f"Plugin ignored the chunk in {spec['preset']} (state unchanged)") from None
+            finally:
+                tmp.unlink(missing_ok=True)
+                default.unlink(missing_ok=True)
+            _result({"ok": True, "via": "fxp chunk as VST3 component state"})
+            return
+        _process_briefly(eng, p)
         p.save_state(spec["state_out"])
     _result({"ok": True})
+
+
+def _process_briefly(eng, p) -> None:
+    """Run a few audio blocks: some plugins (Surge XT) queue a loaded patch and apply it on the audio thread, so
+    saving the state straight after loading would save the previous sound."""
+    eng.load_graph([(p, [])])
+    eng.render(0.25)
 
 
 def cmd_params(spec_path: str) -> None:
