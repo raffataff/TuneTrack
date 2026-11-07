@@ -299,7 +299,7 @@ def _fake_renderer(monkeypatch, p, sources: dict[str, float]):
     r.n = 4800
     r.sr = 48000
 
-    def fake_fx(self, audio, devices, tag):
+    def fake_fx(self, audio, devices, tag, *_owner_warnings):
         return audio * 2 if devices else audio
 
     monkeypatch.setattr(engine.Renderer, "render_fx", fake_fx)

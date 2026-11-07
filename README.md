@@ -55,6 +55,13 @@ Effects work the same way: `vst3:TDR Nova`, `vst3:ValhallaSupermassive`, SSL, Wa
 pedalboard) or 10 built-ins (`eq`, `compressor`, `reverb`, `delay`, `chorus`, `saturator`, `width`, `filter`, `bitcrush`,
 `gain`). Agents set VST3 parameters by name and display text: `{"Mix": "100 %", "LowCut": "200 Hz"}`.
 
+**Sidechain.** `fx_add("Bass", "vst3:SSL Native Bus Compressor 2", sidechain="Kick")` keys the compressor from the Kick track's
+own sound (before its fader, and even while it's muted, so a silent ghost-kick track works). It works with `builtin:compressor`
+and with VST3s that have a sidechain input (SSL Bus Compressor 2, Channel Strip 2, G3 MultiBusComp, LMC+). TuneTrack turns on
+the plugin's external sidechain switch ("External S/C" and similar) for you. Waves shells hosted through pedalboard can't be
+keyed. Keyed tracks render after their keys, and a change to the key re-renders the tracks it ducks. The editor's Track tab has
+a Sidechain picker on each effect.
+
 ### Free instruments worth installing
 
 - **BBC Symphony Orchestra Discover** and **Spitfire LABS** (free, Spitfire account + app). Install them, run `tunetrack scan`, then capture

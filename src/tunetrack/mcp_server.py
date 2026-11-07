@@ -186,18 +186,24 @@ def track_duplicate(track: str, new_name: str | None = None, with_clips: bool = 
 
 
 @tool
-def fx_add(track: str, device: Any, index: int | None = None, project: str | None = None) -> dict:
+def fx_add(track: str, device: Any, index: int | None = None, sidechain: str | None = None,
+           project: str | None = None) -> dict:
     """Insert an effect on a track, bus, or "master". device: "builtin:<eq|compressor|reverb|delay|chorus|
-    saturator|width|filter|bitcrush|gain>", "vst3:<plugin>", "patch:<id>" or {"type","name","params"}."""
-    return api.fx_add(track, device, project, index)
+    saturator|width|filter|bitcrush|gain>", "vst3:<plugin>", "patch:<id>" or {"type","name","params"}.
+    sidechain: a MIDI/audio track whose own sound (pre-fader, ignoring its mute/solo) drives the effect's detector,
+    e.g. a compressor on the bass keyed by "Kick" for ducking/pumping. Works with builtin:compressor and VST3s with a
+    sidechain input (SSL Bus Compressor 2, Channel Strip 2, G3, LMC+); their external sidechain switch is turned on
+    for you (see "notes"). A muted ghost-kick track makes a clean key."""
+    return api.fx_add(track, device, project, index, sidechain)
 
 
 @tool
 def fx_update(track: str, index: int, params: dict | None = None, bypass: bool | None = None,
-              replace: Any = None, project: str | None = None) -> dict:
+              replace: Any = None, sidechain: str | None = None, project: str | None = None) -> dict:
     """Change an effect's params (built-in: names from synths_list; VST3: param name -> 0..1 or display text like
-    "-6 dB"), bypass it, or replace the device."""
-    return api.fx_update(track, index, project, params, bypass, replace)
+    "-6 dB"), bypass it, replace the device, or set its sidechain key (a track name; "" disconnects it and turns
+    the plugin's external sidechain switch off)."""
+    return api.fx_update(track, index, project, params, bypass, replace, sidechain)
 
 
 @tool
