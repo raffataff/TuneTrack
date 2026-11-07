@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from . import analysis, config, edit, engine, generators, notation, plugins, synths, theory
+from . import harmony as harm
 from .model import Clip, Device, Note, Project, Track, project_lock, redo as _redo, undo as _undo
 
 STATE_FILE = config.HOME / "state.json"
@@ -197,7 +198,9 @@ def _put_notes(p: Project, t: Track, notes: list[Note], at: float, length: float
     length = max(length, max((n.end for n in notes), default=0.0), 1e-3)
     c = _clip_for(p, t, at, at + length, name)
     if mode == "replace":
-        lo, hi = at - c.start, at - c.start + length
+        # edges shifted by 1/24 beat so humanized notes go with the beat they belong to (an old downbeat note nudged
+        # just before `at` is replaced too; the next range's downbeat nudged just before the end is kept)
+        lo, hi = at - c.start - 1 / 24, at - c.start + length - 1 / 24
         c.notes = [n for n in c.notes if not (lo - 1e-9 <= n.start < hi - 1e-9)]
     elif mode != "merge":
         raise ValueError("mode must be 'replace' or 'merge'")
@@ -315,6 +318,7 @@ def project_info(project: str | None = None, clips: bool = True) -> dict:
         "duration_s": round(p.tempo_map().sec(p.end), 1),
         "loop": {"start": p.fmt_pos(p.loop["start"]), "end": p.fmt_pos(p.loop["end"])} if p.loop else None,
         "markers": [{"at": p.fmt_pos(m["at"]), "name": m["name"]} for m in sorted(p.markers, key=lambda m: m["at"])],
+        **({"chord_track": harm.summary(p)} if p.chord_track else {}),
         "master": {k: (v if k != "fx" else [f.label() for f in v]) for k, v in p.master.items()},
         **({"tempo_changes": p.tempo_changes} if p.tempo_changes else {}),
         "tracks": tracks,
@@ -377,6 +381,69 @@ def markers(project: str | None = None, add: list | None = None, remove: list | 
         for m in add or []:
             p.markers.append({"at": p.pos(m["at"]), "name": m["name"]})
     return {"markers": [{"at": p.fmt_pos(m["at"]), "name": m["name"]} for m in sorted(p.markers, key=lambda m: m["at"])]}
+
+
+def _span(p: Project, at=None, end=None, section: str | None = None) -> tuple[float, float | None]:
+    """A range from a marker section and/or at/end positions (at/end override the section's edges)."""
+    s, e = harm.section_range(p, section) if section else (0.0, None)
+    if at is not None:
+        s = p.pos(at)
+    if end is not None:
+        e = p.pos(end)
+    if e is not None and e <= s + 1e-9:
+        raise ValueError(f"the range ends ({p.fmt_pos(e)}) before it starts ({p.fmt_pos(s)})")
+    return s, e
+
+
+def harmony(progression: str | None = None, at=None, end=None, section: str | None = None, chord_length=None,
+            key: str | None = None, clear: bool = False, project: str | None = None) -> dict:
+    """The chord track: one harmonic timeline that chords()/pattern() follow when given no progression and that
+    score() checks the parts against.
+
+    Set: progression ("i VI III VII", "Am7 F/A G", "i:2 iv:2 V7:4", '%' repeats, 'N.C.' leaves a gap) replaces the
+    range from `at` (or the marker `section`); with `end` or `section` it repeats to fill that range, else it lasts
+    as written. Roman numerals follow the project key, or `key` for this range (a modulation).
+    clear=True: removes the range (everything without one). Neither: read (optionally a range).
+    """
+    if not progression and not clear:
+        p = load(project)
+        s, e = _span(p, at, end, section) if (at is not None or end is not None or section) else (None, None)
+        out = {"key": p.key, "chord_track": harm.listing(p, s, e)}
+        if not p.chord_track:
+            out["hint"] = "empty: set it with harmony(progression='i VI III VII', section='A') before writing parts"
+        return out
+    res: dict = {}
+    with _Edit(project) as p:
+        s, e = _span(p, at, end, section)
+        if progression:
+            k = _key(p, key)
+            cl = p.dur(chord_length) if chord_length is not None else p.beats_per_bar
+            prog = theory.parse_progression(progression, k, cl)
+            total = sum(ln for _, ln in prog)
+            if total <= 1e-9:
+                raise ValueError("empty progression")
+            span = (e - s) if e is not None else total
+            if total < span - 1e-6:
+                res["repeated"] = f"{span / total:g}x to fill {p.fmt_pos(s)} - {p.fmt_pos(s + span)}"
+            elif total > span + 1e-6:
+                res["warnings"] = [(f"the progression is {total / p.beats_per_bar:g} bars but the range is "
+                                    f"{span / p.beats_per_bar:g}: the rest was cut")]
+            extra = {"key": k.text} if key and k.text != theory.Key(p.key).text else {}
+            new, t = [], s
+            for c, ln in harm.fill(prog, span):
+                if c is not None:
+                    new.append({"at": t, "len": ln, "chord": c.symbol, **extra})
+                t += ln
+            p.chord_track = harm.put(p.chord_track, new, s, s + span)
+            res["set"] = f"{p.fmt_pos(s)} - {p.fmt_pos(s + span)}"
+        elif at is None and end is None and not section:
+            p.chord_track = []
+            res["cleared"] = "all"
+        else:
+            p.chord_track = harm.cut(p.chord_track, s, e if e is not None else math.inf)
+            res["cleared"] = f"{p.fmt_pos(s)} - {p.fmt_pos(e) if e is not None else 'end'}"
+    res["chord_track"] = harm.listing(p)
+    return res
 
 
 def undo(project: str | None = None) -> dict:
@@ -536,31 +603,61 @@ def add_notes(track: str, notes: list, project: str | None = None, mode: str = "
     return res
 
 
-def chords(track: str, progression: str, at=0, project: str | None = None, key: str | None = None,
-           chord_length=None, rhythm: str | None = None, voices: int = 4, low="C3", high="G5", vel: int = 80,
-           gate: float = 1.0, bass: bool = False, bass_octave: int = 2, mode: str = "replace") -> dict:
-    """Voice-led block chords from 'i VI III VII' (roman, in the key) or 'Dm Bb F C'; ':beats' per chord overrides."""
-    with _Edit(project) as p:
-        t = p.track(track)
+def _progression(p: Project, progression: str | None, at, end, section, key, chord_length) -> tuple[float, list, bool]:
+    """(start, [(chord | None, beats)], followed_the_chord_track) for chords()/pattern().
+
+    An explicit progression works as it always has (from `at`, each chord chord_length); with `end`/`section` it
+    repeats to fill that range. Without one, the chord track over [at, end) / the section is used (end defaults to
+    the end of the chord track)."""
+    s, e = _span(p, at, end, section)
+    if progression:
         cl = p.dur(chord_length) if chord_length is not None else p.beats_per_bar
         prog = theory.parse_progression(progression, _key(p, key), cl)
+        return s, (harm.fill(prog, e - s) if e is not None else prog), False
+    if not p.chord_track:
+        raise ValueError("No progression given and the chord track is empty: set it first with "
+                         "harmony(progression='i VI III VII', section='A'), or pass progression=...")
+    e = harm.track_end(p) if e is None else e
+    prog = harm.progression(p, s, e) if e > s + 1e-9 else []
+    if all(c is None for c, _ in prog):
+        raise ValueError(f"The chord track has no chords in {p.fmt_pos(s)} - {p.fmt_pos(max(e, s))}: "
+                         f"harmony() shows what it has")
+    return s, prog, True
+
+
+def chords(track: str, progression: str | None = None, at=None, project: str | None = None, key: str | None = None,
+           chord_length=None, rhythm: str | None = None, voices: int = 4, low="C3", high="G5", vel: int = 80,
+           gate: float = 1.0, bass: bool = False, bass_octave: int = 2, mode: str = "replace", end=None,
+           section: str | None = None) -> dict:
+    """Voice-led block chords from 'i VI III VII' (roman, in the key) or 'Dm Bb F C'; ':beats' per chord overrides.
+    Without a progression they follow the chord track over [at, end) or a marker section."""
+    with _Edit(project) as p:
+        t = p.track(track)
+        s, prog, followed = _progression(p, progression, at, end, section, key, chord_length)
         notes = generators.chord_notes(prog, rhythm, int(voices), _pitch(low), _pitch(high), int(vel), float(gate),
                                        bool(bass), int(bass_octave))
-        res = _put_notes(p, t, notes, p.pos(at), sum(l for _, l in prog), mode)
-    res["chords"] = [c.symbol for c, _ in prog]
+        res = _put_notes(p, t, notes, s, sum(l for _, l in prog), mode)
+    res["chords"] = [c.symbol if c is not None else "N.C." for c, _ in prog]
+    if followed:
+        res["followed"] = "chord track"
     return res
 
 
-def pattern(track: str, progression: str, pattern: str, at=0, project: str | None = None, key: str | None = None,
-            chord_length=None, rate: float = 0.5, octave: int = 4, vel: int = 85, gate: float = 0.9,
-            restart: bool = True, mode: str = "replace") -> dict:
-    """Arpeggios, basslines and ostinatos from chord-degree patterns ('1 5 8 5', '1 . 1 5- 8 -') that follow chords."""
+def pattern(track: str, progression: str | None = None, pattern: str | None = None, at=None,
+            project: str | None = None, key: str | None = None, chord_length=None, rate: float = 0.5, octave: int = 4,
+            vel: int = 85, gate: float = 0.9, restart: bool = True, mode: str = "replace", end=None,
+            section: str | None = None) -> dict:
+    """Arpeggios, basslines and ostinatos from chord-degree patterns ('1 5 8 5', '1 . 1 5- 8 -') that follow chords:
+    the progression given, else the chord track over [at, end) or a marker section."""
+    if not pattern:
+        raise ValueError("pattern is required (chord degrees like '1 5 8 5')")
     with _Edit(project) as p:
         t = p.track(track)
-        cl = p.dur(chord_length) if chord_length is not None else p.beats_per_bar
-        prog = theory.parse_progression(progression, _key(p, key), cl)
+        s, prog, followed = _progression(p, progression, at, end, section, key, chord_length)
         notes = generators.pattern_notes(prog, pattern, float(rate), int(octave), int(vel), float(gate), 0.0, bool(restart))
-        res = _put_notes(p, t, notes, p.pos(at), sum(l for _, l in prog), mode)
+        res = _put_notes(p, t, notes, s, sum(l for _, l in prog), mode)
+    if followed:
+        res["followed"] = "chord track"
     return res
 
 
@@ -774,8 +871,9 @@ def clip_edit(clip: str, op: str, project: str | None = None, to=None, track: st
 
 def arrange(op: str, start, end, to=None, tracks: list | None = None, project: str | None = None,
             mode: str = "replace") -> dict:
-    """Song-level editing across tracks (notes, CC, audio clips, automation; markers, tempo changes, loop region
-    and song length too when no `tracks` filter is given):
+    """Song-level editing across tracks (notes, CC, audio clips, automation; markers, tempo changes, loop region,
+    song length and the chord track too when no `tracks` filter is given; copy takes the chord track along in
+    replace mode):
     copy(start, end, to[, mode]) - copy a section (e.g. verse) to another position. mode="replace" (default)
         clears the destination's notes/CC first; mode="merge" layers the copy on top of what's there
     move(start, end, to) | insert(start, end) - open a gap of end-start beats at start, pushing later material
@@ -840,6 +938,13 @@ def arrange(op: str, start, end, to=None, tracks: list | None = None, project: s
                             c.length -= min(span, max(0.0, c.end - s))
             else:
                 raise ValueError("op must be copy, move, insert, delete or clear")
+        if not tracks and (op == "move" or (op == "copy" and mode == "replace")):
+            got = harm.grab(p.chord_track, s, e)
+            if got:
+                d = p.pos(to)
+                if op == "move":
+                    p.chord_track = harm.cut(p.chord_track, s, e)
+                p.chord_track = harm.put(p.chord_track, [{**x, "at": x["at"] + d} for x in got], d, d + span)
         if op in ("insert", "delete"):
             for t in ([p.track(x) for x in tracks] if tracks else p.tracks):
                 for lane, pts in list(t.automation.items()):
@@ -884,8 +989,10 @@ def _shift_lane(pts: list, s: float, e: float, op: str) -> list:
 
 
 def _shift_timeline(p: Project, s: float, e: float, op: str) -> None:
-    """Move markers, tempo changes, the loop region and the explicit song length with an insert/delete."""
+    """Move markers, tempo changes, the loop region, the explicit song length and the chord track with an
+    insert/delete."""
     span = e - s
+    p.chord_track = harm.shift(p.chord_track, s, e, op)
     if op == "insert":
         for m in p.markers:
             if m["at"] >= s - 1e-9:
@@ -1067,7 +1174,8 @@ def theory_info(scale: str | None = None, chord: str | None = None, progression:
         k = theory.Key(key)
         prog = theory.parse_progression(progression, k)
         names = theory.FLAT_NAMES if k.flats else theory.SHARP_NAMES
-        out["progression"] = [{"chord": c.symbol, "root": names[c.root], "notes": [names[pc] for pc in c.pcs]} for c, _ in prog]
+        out["progression"] = [{"chord": c.symbol, "root": names[c.root], "notes": [names[pc] for pc in c.pcs]}
+                              if c is not None else {"chord": "N.C."} for c, _ in prog]
     if range:
         r = theory.range_of(range)
         if not r:
@@ -1261,6 +1369,10 @@ def analyze(project: str | None = None, images: bool = True, start=None, end=Non
     """Note-level checks + a piano-roll overview PNG (and a spectrogram of the last render). View the PNGs."""
     p = load(project)
     rep = analysis.notes_report(p)
+    hw = harm.warnings(p, p.pos(start) if start is not None else None, p.pos(end) if end is not None else None)
+    if hw:
+        rep["harmony_warnings"] = hw[:12] + ([f"... {len(hw) - 12} more: score() shows them bar by bar"]
+                                             if len(hw) > 12 else [])
     if images:
         out = p.path / "renders"
         out.mkdir(exist_ok=True)
@@ -1275,6 +1387,25 @@ def analyze(project: str | None = None, images: bool = True, start=None, end=Non
                 data, sr = sf.read(files[0], dtype="float32", always_2d=True)
                 rep["spectrogram_png"] = analysis.spectrogram_png(data.T, sr, out / "spectrogram.png")
     return rep
+
+
+def score(start=None, end=None, section: str | None = None, tracks: list | None = None, check: bool = True,
+          project: str | None = None) -> dict:
+    """Bar-by-bar text score: the chord on each beat (chord track, else inferred from the notes, marked *) and every
+    part's notes in TTN, columns lined up by beat, plus harmony warnings (clashes on strong beats, parallel 5ths/8ves
+    between bass and lead, voice crossings, parts that disagree with the chord track) with bar:beat and a fix.
+    Default range: the whole song, at most 32 bars. Drum tracks are left out unless named in `tracks`."""
+    p = load(project)
+    s, e = _span(p, start, end, section)
+    song_end = max(p.end, harm.track_end(p))
+    if e is None:
+        e = min(song_end, s + 32 * p.beats_per_bar)
+    if e <= s + 1e-9:
+        return {"score": "nothing written yet: no notes and no chord track", "bars": None}
+    res = harm.score(p, s, e, tracks, bool(check))
+    if e < song_end - 1e-9 and end is None and section is None:
+        res["more"] = f"showing to {p.fmt_pos(e)} of {p.fmt_pos(song_end)}: pass start/end for the rest"
+    return res
 
 
 def listen(project: str | None = None, reference: str | None = None, probe: bool = True,
