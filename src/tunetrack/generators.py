@@ -48,13 +48,17 @@ def parse_rhythm(text: str | None, length: float) -> list[tuple[float, float, bo
     return out
 
 
-def chord_notes(progression: list[tuple[Chord, float]], rhythm: str | None = None, voices: int = 4,
+def chord_notes(progression: list[tuple[Chord | None, float]], rhythm: str | None = None, voices: int = 4,
                 low: int = 48, high: int = 76, vel: int = 80, gate: float = 1.0, bass: bool = False,
                 bass_octave: int = 2, start: float = 0.0, prev: list[int] | None = None) -> list[Note]:
-    """Block chords with smooth voice leading. With bass=True a root (or slash-bass) note is added in bass_octave."""
+    """Block chords with smooth voice leading. With bass=True a root (or slash-bass) note is added in bass_octave.
+    A None chord (N.C., a gap in the chord track) is a rest."""
     notes: list[Note] = []
     t = start
     for chord, length in progression:
+        if chord is None:
+            t += length
+            continue
         voicing = voice_chord(chord, voices, low, high, prev)
         prev = voicing
         for off, d, rest, accent in parse_rhythm(rhythm, length):
@@ -83,7 +87,7 @@ def _degree_semis(deg: int) -> int:
     return _DEGREE_SEMIS[max(1, base)] + octave
 
 
-def pattern_notes(progression: list[tuple[Chord, float]], pattern: str, rate: float = 0.5, octave: int = 4,
+def pattern_notes(progression: list[tuple[Chord | None, float]], pattern: str, rate: float = 0.5, octave: int = 4,
                   vel: int = 85, gate: float = 0.9, start: float = 0.0, restart: bool = True,
                   accent: int = 12) -> list[Note]:
     """Arpeggios / basslines / ostinatos from chord-degree patterns, following the progression.
@@ -96,7 +100,8 @@ def pattern_notes(progression: list[tuple[Chord, float]], pattern: str, rate: fl
         1>          accent
         .           rest
         -           hold (extend the previous note)
-    The chord root sits in `octave` (C4 = octave 4). restart=True restarts the pattern on each chord.
+    The chord root sits in `octave` (C4 = octave 4). restart=True restarts the pattern on each chord. A None chord
+    (N.C., a gap in the chord track) is a rest.
     """
     toks = pattern.split()
     if not toks:
@@ -107,6 +112,9 @@ def pattern_notes(progression: list[tuple[Chord, float]], pattern: str, rate: fl
     for chord, length in progression:
         if restart:
             step = 0
+        if chord is None:
+            t += length
+            continue
         n_steps = int(round(length / rate))
         base = (octave + 1) * 12 + chord.root
         last: Note | None = None

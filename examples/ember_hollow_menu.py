@@ -1,6 +1,8 @@
 """Worked example: a fantasy main-menu loop built only with TuneTrack API calls (the same calls the MCP tools make).
 
-Form: 4-bar intro (played once) + 16-bar loop (A 8 bars, B 8 bars) in D minor, 84 BPM.
+Form: 4-bar intro (played once) + 16-bar loop (A 8 bars, B 8 bars) in D minor, 84 BPM. The progression is set once
+per section on the chord track (harmony); the pad, harp and bass follow it, so reharmonising a section means editing
+the chord track and re-running those three calls for it.
 Uses built-in synths, MODO DRUM (VST3) and a Valhalla Supermassive reverb bus, so it runs without captured patches.
 
     uv run python examples/ember_hollow_menu.py
@@ -31,22 +33,23 @@ api.track_add("Drums", "vst3:MODO DRUM", role="drums", volume_db=-2)
 for t, db in (("Pad", -8), ("Harp", -6), ("Melody", -9), ("Bell", -3)):
     api.track_update(t, sends=[{"to": "Reverb", "db": db}])
 
-# ---- harmony -----------------------------------------------------------------------------------------------
-INTRO = "i VI III VII"
-A = "i VI III VII i VI iv V"
-B = "VI VII III i iv VI V V"
-api.chords("Pad", INTRO, at="1:1", voices=4, low="F3", high="A4", vel=55)
-api.chords("Pad", A, at="5:1", voices=4, low="F3", high="A4", vel=62)
-api.chords("Pad", B, at="13:1", voices=4, low="F3", high="C5", vel=72)
+# ---- harmony: set once on the chord track; the pad, harp and bass follow it -----------------------------------
+api.harmony("i VI III VII", section="Intro")
+api.harmony("i VI III VII i VI iv V", section="A")
+api.harmony("VI VII III i iv VI V V", section="B")  # the last section runs to the loop end (21:1)
+
+api.chords("Pad", section="Intro", voices=4, low="F3", high="A4", vel=55)
+api.chords("Pad", section="A", voices=4, low="F3", high="A4", vel=62)
+api.chords("Pad", section="B", voices=4, low="F3", high="C5", vel=72)
 
 arp = "1 5 8 10 12 10 8 5"
-api.pattern("Harp", INTRO, arp, at="1:1", octave=3, rate=0.5, vel=58)
-api.pattern("Harp", A, arp, at="5:1", octave=3, rate=0.5, vel=66)
-api.pattern("Harp", B, "1 5 8 10 12 15 12 10", at="13:1", octave=3, rate=0.5, vel=74)
+api.pattern("Harp", pattern=arp, section="Intro", octave=3, rate=0.5, vel=58)
+api.pattern("Harp", pattern=arp, section="A", octave=3, rate=0.5, vel=66)
+api.pattern("Harp", pattern="1 5 8 10 12 15 12 10", section="B", octave=3, rate=0.5, vel=74)
 api.notes_edit("Harp", "humanize", timing_ms=8, velocity=8, seed=3)
 
-api.pattern("Bass", A, "1 - - 1 . 1 5- .", at="5:1", octave=2, rate=0.5, vel=92)
-api.pattern("Bass", B, "1 - - - 1 - 5- -", at="13:1", octave=2, rate=0.5, vel=100)
+api.pattern("Bass", pattern="1 - - 1 . 1 5- .", section="A", octave=2, rate=0.5, vel=92)
+api.pattern("Bass", pattern="1 - - - 1 - 5- -", section="B", octave=2, rate=0.5, vel=100)
 
 # ---- melody (motif D-E-F-A, answered and varied; B lifts an octave and leads back via C#) -------------------
 api.write("Bell", "r:h D6:q!p A5 | F6:w | r:h C6:q A5 | G5:w", at="1:1")
@@ -76,6 +79,7 @@ api.notes_edit("Drums", "humanize", timing_ms=5, velocity=6, seed=11)
 # first render flagged "very little energy above 2 kHz": open up the top end on the master
 api.fx_add("master", {"type": "builtin", "name": "eq", "params": {"hpf": 28, "high_freq": 4500, "high_gain": 4,
                                                                    "low_freq": 90, "low_gain": -1.5}})
+print(api.score(section="A")["score"])  # bar-by-bar chords + parts, with harmony warnings
 print(api.analyze())
 rep = api.render()
 print({k: rep[k] for k in ("files", "warnings", "loop_mode", "normalize_gain_db")})

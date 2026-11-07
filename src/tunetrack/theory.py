@@ -240,12 +240,13 @@ def parse_roman(token: str, key: Key) -> Chord:
     return Chord(root % 12, CHORD_QUALITIES[quality], None, t)
 
 
-def parse_progression(text: str, key: Key | None = None, default_len: float = 4.0) -> list[tuple[Chord, float]]:
+def parse_progression(text: str, key: Key | None = None, default_len: float = 4.0) -> list[tuple[Chord | None, float]]:
     """'i VI III VII' or 'Dm Bb F C' (each one bar by default); durations with ':': 'i:2 iv:2 V7:4'.
 
-    '|' separators are ignored. Returns (chord, length_in_beats) pairs.
+    '|' separators are ignored, '%' repeats the previous chord, 'N.C.' (or 'NC') is a span with no chord (None).
+    Returns (chord, length_in_beats) pairs.
     """
-    out = []
+    out: list[tuple[Chord | None, float]] = []
     for tok in re.split(r"[\s|,]+", text.strip()):
         if not tok or tok == "-":
             continue
@@ -253,13 +254,43 @@ def parse_progression(text: str, key: Key | None = None, default_len: float = 4.
         if ":" in tok:
             tok, ln = tok.rsplit(":", 1)
             length = float(eval_fraction(ln))
-        if tok[0] not in "ABCDEFG":
+        if tok == "%":
+            if not out:
+                raise ValueError("'%' repeats the previous chord, but there is none")
+            prev = out[-1][0]
+            out.append((None if prev is None else Chord(prev.root, prev.intervals, prev.bass, prev.symbol), length))
+        elif tok.upper().rstrip(".") in ("N.C", "NC"):
+            out.append((None, length))
+        elif tok[0] not in "ABCDEFG":
             if key is None:
                 raise ValueError("Roman numerals need a key")
             out.append((parse_roman(tok, key), length))
         else:
             out.append((parse_chord(tok), length))
     return out
+
+
+def parse_any(token: str, key: Key) -> Chord:
+    """One chord: a symbol ('Am7', 'F/A') or a roman numeral in `key` ('iv', 'V7/V')."""
+    t = token.strip()
+    return parse_chord(t) if t[:1] in "ABCDEFG" else parse_roman(t, key)
+
+
+_QUALITY_NAME: dict[tuple, str] = {}
+for _q, _iv in CHORD_QUALITIES.items():
+    _QUALITY_NAME.setdefault(tuple(_iv), _q)  # first spelling wins: "" "m" "dim" "7" "maj7" "m7" "m7b5" ...
+
+
+def chord_name(chord: Chord, flats: bool = False) -> str:
+    """Letter symbol for a chord (roman numerals resolved): 'Dm', 'Bbmaj7', 'F/A'."""
+    names = FLAT_NAMES if flats else SHARP_NAMES
+    q = _QUALITY_NAME.get(tuple(chord.intervals))
+    if q is None:
+        return chord.symbol or names[chord.root]
+    s = names[chord.root] + q
+    if chord.bass is not None and chord.bass != chord.root:
+        s += "/" + names[chord.bass]
+    return s
 
 
 def eval_fraction(s: str) -> float:
