@@ -124,7 +124,7 @@ reharmonised cadence, drums opened up).
 | Horror / tension | 50-80 or no pulse | Chromatic clusters, tritones, pedal | [dark_pad] drones, sparse high [bell] notes, low pulses, silence as a tool |
 | Ambient / space | 60-90 | Lydian, sus chords, slow changes | [pad], [dark_pad], [bell], long reverb sends, slow volume automation |
 | Lo-fi / chill | 70-90, swing | ii7-V7-Imaj7, m9 chords | [epiano], soft drums with swing 0.3-0.5, [saturator] and [filter] on the master |
-| Action / EDM | 120-150 | Minor, four-on-the-floor | [drums] or a kit, [reese_bass]/[analog_bass], [saw_pluck] arps, [supersaw] leads, sidechain-style volume automation |
+| Action / EDM | 120-150 | Minor, four-on-the-floor | [drums] or a kit, [reese_bass]/[analog_bass], [saw_pluck] arps, [supersaw] leads, bass and pads ducked from the kick (sidechain) |
 | Puzzle / casual | 100-130 | Major, playful chromatic passing tones | [mallet], [pluck], pizzicato patches, staccato bass |
 
 ## 6. Mix and master
@@ -136,7 +136,18 @@ reharmonised cadence, drums opened up).
 - Pan for width (harp left, second violins right, hats slightly off-centre). Keep bass and kick centred.
 - Loudness: the master is normalised to `target_lufs` (default -16). Background/menu cues often sit at -18 to -20; battle at -14 to -16.
 - The user's VST3 effects (SSL, TDR Nova, Waves, Valhalla) can go on tracks, buses or the master via `fx_add`; set parameters by name
-  with display text (`{"Mix": "100 %", "LowCut": "200 Hz"}`).
+  with display text (`{"Mix": "100 %", "LowCut": "200 Hz"}`). Some start neutral and do nothing until you set them (SSL X-Comp's
+  threshold starts at +12 dB, Vocalstrip 2's modules start off): check `plugin_params` and set them.
+- Sidechain ducking (kick pumping the bass or pads, or the music dipping under a stinger): `fx_add("Bass", <compressor>,
+  sidechain="Kick")`. The key is the Kick track's own sound before its fader, and it keys even when the Kick is muted. A muted
+  ghost-kick track with short notes (or `synth:drums` with `kdecay` 0.05-0.15) gives a clean pump without changing the drums.
+  Compressors: `builtin:compressor` (e.g. threshold -30, ratio 8, attack 0.002, release 0.12, makeup 0), or VST3s with a sidechain
+  input: SSL Native Bus Compressor 2 (Threshold "-20.0", Ratio "10:1", Attack "0.1", Release "0.1"), SSL Native Channel
+  Strip 2, SSL G3 MultiBusComp (one band, e.g. only the lows), SSL LMC+. TuneTrack switches the plugin's external sidechain
+  switch on for you (see `notes`); on G3, set only the band you want (`{"Low Ext S/C": "On"}`). Waves plugins can't be keyed.
+  A key that rings through the whole beat keeps the compressor clamped (flat, not pumping): use a short key. The render
+  report lists every connection under `sidechains`, and the keyed track's level in it drops by about the average ducking.
+  `fx_update(..., sidechain="")` disconnects and switches the plugin back.
 
 ## 7. Review loop (always)
 
@@ -155,7 +166,7 @@ reharmonised cadence, drums opened up).
      density or who leads (`tracks_db`, `most_present`); builds rise bar by bar; the loop's last bar flows into its first.
    - `masking`: each track's `vs_rest_db` in its main band. Keep the lead at 0 or above. Parts under about -10 are barely heard:
      raise them, EQ-dip the `covered_by` track there, move register, or cut them. `pairs` are parts fighting for one band
-     (kick vs bass at 63 Hz: let one own the lows, or duck it on the hits).
+     (kick vs bass at 63 Hz: let one own the lows, or duck the bass on the hits with a sidechain compressor keyed by the kick).
    - `verify`: probe renders of every pitch each part uses. They show silent or much quieter pitches (outside the instrument's
      range), parts that sound transposed, slow attacks on short notes, bars with notes but no sound (CC at 0?), and `drum_notes`:
      what each drum note really sounds like and how loud it is at equal velocity. Trust these over patch names and descriptions.

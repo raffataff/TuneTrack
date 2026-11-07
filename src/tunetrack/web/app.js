@@ -559,7 +559,9 @@ function stripFx(list, trackRef) {
      <span title="${esc(fxLabel(f))} (click to bypass)">${esc(fxLabel(f))}</span><button class="small ghost danger" data-rm="${i}">×</button></div>`).join("")}
      <button class="small" data-addfx="${esc(trackRef)}">+ FX</button></div>`;
 }
-const fxLabel = (f) => f.patch ? `${f.name} · ${f.patch}` : f.name;
+const fxLabel = (f) => (f.patch ? `${f.name} · ${f.patch}` : f.name) +
+  (f.sidechain ? ` ← ${(S.doc.tracks.find((x) => x.id === f.sidechain) || { name: "?" }).name}` : "");
+const canSidechain = (f) => f.type === "vst3" || (f.type === "builtin" && f.name === "compressor");
 function renderMixer() {
   const box = $("#mixer"); if (!S.doc) { box.innerHTML = ""; return; }
   const buses = S.doc.tracks.filter((t) => t.kind === "bus");
@@ -643,6 +645,9 @@ async function renderInspector() {
     return `<div style="margin-bottom:10px"><b>${i + 1}. ${esc(fxLabel(f))}</b> <span class="muted">${def ? esc(def.description) : f.type}</span>
       <button class="small" data-byp="${i}">${f.bypass ? "Enable" : "Bypass"}</button> <button class="small danger" data-del="${i}">Remove</button>
       ${f.type === "vst3" ? `<button class="small" data-vp="${i}">Parameters…</button>` : ""}
+      ${canSidechain(f) ? `<label class="muted" title="Another track's sound drives this effect's detector (ducking). Plugins without a sidechain input refuse.">
+        Sidechain <select data-sc="${i}"><option value="">none</option>${S.doc.tracks.filter((x) => x.kind !== "bus" && x.id !== t.id)
+          .map((x) => `<option value="${x.id}" ${f.sidechain === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>` : ""}
       ${def ? paramRows(def.params, f.params, `f${i}:`) : ""}</div>`;
   }).join("")}<button class="small" id="addFx">+ Add effect</button></div>`;
   const on = (sel, ev, fn) => { const el = box.querySelector(sel); if (el) el[ev] = fn; };
@@ -660,6 +665,7 @@ async function renderInspector() {
   box.querySelectorAll("[data-byp]").forEach((b) => b.onclick = () => act("fx_update", { track: t.id, index: +b.dataset.byp, bypass: !t.fx[+b.dataset.byp].bypass }));
   box.querySelectorAll("[data-del]").forEach((b) => b.onclick = () => act("fx_remove", { track: t.id, index: +b.dataset.del }));
   box.querySelectorAll("[data-vp]").forEach((b) => b.onclick = () => openVstParams(t, +b.dataset.vp));
+  box.querySelectorAll("[data-sc]").forEach((s) => s.onchange = () => act("fx_update", { track: t.id, index: +s.dataset.sc, sidechain: s.value }));
   const commit = (key, val) => {
     const [where, name] = key.split(":");
     if (where === "i") act("track_update", { track: t.id, instrument_params: { [name]: val } });

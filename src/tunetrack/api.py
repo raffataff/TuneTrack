@@ -299,7 +299,7 @@ def project_info(project: str | None = None, clips: bool = True) -> dict:
         if t.sends:
             d["sends"] = t.sends
         if t.fx:
-            d["fx"] = [f.label() + (" (bypassed)" if f.bypass else "") for f in t.fx]
+            d["fx"] = [_fx_label(p, f) + (" (bypassed)" if f.bypass else "") for f in t.fx]
         if t.role:
             d["role"] = t.role
         if t.layer:
@@ -319,7 +319,7 @@ def project_info(project: str | None = None, clips: bool = True) -> dict:
         "loop": {"start": p.fmt_pos(p.loop["start"]), "end": p.fmt_pos(p.loop["end"])} if p.loop else None,
         "markers": [{"at": p.fmt_pos(m["at"]), "name": m["name"]} for m in sorted(p.markers, key=lambda m: m["at"])],
         **({"chord_track": harm.summary(p)} if p.chord_track else {}),
-        "master": {k: (v if k != "fx" else [f.label() for f in v]) for k, v in p.master.items()},
+        "master": {k: (v if k != "fx" else [_fx_label(p, f) for f in v]) for k, v in p.master.items()},
         **({"tempo_changes": p.tempo_changes} if p.tempo_changes else {}),
         "tracks": tracks,
     }
@@ -503,11 +503,22 @@ def track_remove(track: str, project: str | None = None) -> dict:
     with _Edit(project) as p:
         t = p.track(track)
         p.tracks.remove(t)
+        unkeyed = []
         for o in p.tracks:
             o.sends = [s for s in o.sends if s["to"] != t.id]
             if o.output == t.id:
                 o.output = "master"
-    return {"removed": t.name}
+        for owner, chain in [(o.name, o.fx) for o in p.tracks] + [("master", p.master.get("fx", []))]:
+            for i, f in enumerate(chain):
+                if isinstance(f, Device) and f.sidechain == t.id:
+                    f.sidechain = None
+                    unkeyed.append(f"{owner} fx {i} ({f.label()})")
+    res: dict = {"removed": t.name}
+    if unkeyed:
+        res["warnings"] = [f"{u} lost its sidechain key '{t.name}'. A plugin whose external sidechain switch is still "
+                           f"on won't react to anything now: give it a new key or turn the switch off "
+                           f"(fx_update sidechain=..., params=...)" for u in unkeyed]
+    return res
 
 
 def track_duplicate(track: str, new_name: str | None = None, with_clips: bool = True, project: str | None = None) -> dict:
@@ -526,34 +537,145 @@ def track_duplicate(track: str, new_name: str | None = None, with_clips: bool = 
     return {"track": d.id, "name": d.name}
 
 
-def fx_add(track: str, device, project: str | None = None, index: int | None = None) -> dict:
-    """track = a track name/id or "master". device = 'builtin:reverb', 'vst3:TDR Nova', 'patch:<id>' or dict."""
+def _fx_chain(p: Project, track: str) -> list[Device]:
+    return p.master["fx"] if track == "master" else p.track(track).fx
+
+
+def _fx_label(p: Project, f: Device) -> str:
+    """An effect's label, with the track that keys its sidechain."""
+    if not f.sidechain:
+        return f.label()
+    key = next((t.name for t in p.tracks if t.id == f.sidechain), f"missing track {f.sidechain}")
+    return f"{f.label()} <- sidechain {key}"
+
+
+def _sidechain_device_check(dev: Device) -> None:
+    """Raise unless the effect has a sidechain input TuneTrack can feed."""
+    if dev.type == "builtin":
+        if dev.name not in synths.SIDECHAIN_FX:
+            raise ValueError(f"builtin:{dev.name} has no sidechain input. Built-in effects with one: "
+                             f"{', '.join(sorted(synths.SIDECHAIN_FX))}")
+        return
+    if dev.type != "vst3":
+        raise ValueError(f"{dev.label()} is not an effect with a sidechain input")
+    entry = plugins.resolve(dev.name)
+    if entry.get("host") == "pedalboard":
+        raise ValueError(f"{entry['name']} is hosted through pedalboard (a Waves-style shell), which can't feed a "
+                         f"sidechain input. Use a DawDreamer-hosted compressor (e.g. SSL Native Bus Compressor 2) or "
+                         f"builtin:compressor")
+    if entry.get("inputs") is not None and int(entry["inputs"]) <= 2:
+        raise ValueError(f"{entry['name']} has no sidechain input (it takes {entry['inputs']} input channels)")
+
+
+def _sidechain_key(p: Project, owner: str, ref) -> str | None:
+    """Resolve the sidechain source for an effect on `owner` (track name/id or "master") to a track id."""
+    if ref in (None, "", "none", False):
+        return None
+    key = p.track(ref)
+    if key.kind == "bus":
+        raise ValueError(f"'{key.name}' is a bus. A sidechain key must be a MIDI or audio track (its own sound, "
+                         f"before its fader)")
+    if owner != "master":
+        t = p.track(owner)
+        if t.id == key.id:
+            raise ValueError("An effect can't key from its own track; leave sidechain empty and it reacts to the "
+                             "track's own signal")
+        if t.kind != "bus" and _keys_on(p, key.id, t.id):
+            raise ValueError(f"Sidechain loop: '{key.name}' already depends on '{t.name}' through its own sidechain")
+    return key.id
+
+
+def _keys_on(p: Project, start: str, target: str) -> bool:
+    """True if track `start`'s render depends on track `target` through sidechain keys (directly or via others)."""
+    by_id = {t.id: t for t in p.tracks}
+    seen, todo = set(), [start]
+    while todo:
+        tid = todo.pop()
+        if tid == target:
+            return True
+        if tid in seen or tid not in by_id:
+            continue
+        seen.add(tid)
+        todo += [f.sidechain for f in by_id[tid].fx if f.sidechain]
+    return False
+
+
+def _sidechain_switches(dev: Device, on: bool, user_params: dict | None = None) -> tuple[dict, list[str]]:
+    """Params that turn the plugin's external-sidechain switch(es) on or off ("External S/C", "Low Ext S/C",
+    "EXT Sidechain"...), unless the caller already set one. Runs the plugin in a worker to read its parameters."""
+    if dev.type != "vst3":
+        return {}, []
+    try:
+        names = [d["name"] for d in plugin_params(dev.label() if not dev.patch else f"patch:{dev.patch}",
+                                                  limit=100000)["params"]
+                 if plugins.is_ext_sidechain_switch(d["name"])]
+    except Exception as e:  # noqa: BLE001 - the key still gets connected; tell the agent what to check
+        return {}, [f"couldn't read {dev.name}'s parameters ({e}); if it has an external sidechain switch, turn it "
+                    f"{'on' if on else 'off'} with fx_update params"]
+    if not names:
+        return {}, ([f"{dev.name} has no parameter that looks like an external sidechain switch; it may use the key "
+                     f"as soon as it's connected (check plugin_params)"] if on else [])
+    already = {k.lower() for k in {**dev.params, **(user_params or {})}}
+    if on and any(n.lower() in already for n in names):
+        return {}, []
+    return {n: 1.0 if on else 0.0 for n in names}, [
+        f"switched {'on' if on else 'off'} {', '.join(repr(n) for n in names)}"
+        + (" (set any of them in params yourself to key only some bands)" if on and len(names) > 1 else "")]
+
+
+def fx_add(track: str, device, project: str | None = None, index: int | None = None, sidechain: str | None = None) -> dict:
+    """track = a track name/id or "master". device = 'builtin:reverb', 'vst3:TDR Nova', 'patch:<id>' or dict.
+    sidechain = a track whose sound (pre-fader, its own instrument + inserts) feeds the effect's sidechain input."""
+    dev = parse_device(device, instrument=False)
+    notes: list[str] = []
+    if sidechain not in (None, "", "none"):
+        _sidechain_device_check(dev)
+        load(project).track(sidechain)  # fail fast on a bad name before starting a plugin worker
+        switch, notes = _sidechain_switches(dev, True)
+        dev.params.update(switch)
     with _Edit(project) as p:
-        dev = parse_device(device, instrument=False)
-        chain = p.master["fx"] if track == "master" else p.track(track).fx
+        dev.sidechain = _sidechain_key(p, track, sidechain)
+        chain = _fx_chain(p, track)
         chain.insert(len(chain) if index is None else int(index), dev)
-    return {"track": track, "fx": [f.label() for f in chain]}
+        labels = [_fx_label(p, f) for f in chain]
+    return {"track": track, "fx": labels, **({"params": dev.params, "notes": notes} if dev.sidechain else {})}
 
 
 def fx_update(track: str, index: int, project: str | None = None, params: dict | None = None,
-              bypass: bool | None = None, replace=None) -> dict:
+              bypass: bool | None = None, replace=None, sidechain: str | None = None) -> dict:
+    """sidechain: a track name to key the effect from, "" to disconnect it, None to leave it as it is.
+    A replaced device keeps the old one's sidechain key."""
+    old = _fx_chain(load(project), track)[int(index)]
+    new = parse_device(replace, instrument=False) if replace is not None else old
+    key = old.sidechain if sidechain is None else (sidechain or None)
+    switch, notes = {}, []
+    if key and (sidechain not in (None, "") or replace is not None):  # newly keyed, or a new device to key
+        _sidechain_device_check(new)
+        switch, notes = _sidechain_switches(new, True, params)
+    elif not key and old.sidechain and replace is None:
+        switch, notes = _sidechain_switches(old, False)
     with _Edit(project) as p:
-        chain = p.master["fx"] if track == "master" else p.track(track).fx
+        chain = _fx_chain(p, track)
         dev = chain[int(index)]
         if replace is not None:
-            dev = chain[int(index)] = parse_device(replace, instrument=False)
+            dev = chain[int(index)] = new
+        if sidechain is not None or replace is not None:
+            dev.sidechain = _sidechain_key(p, track, key)
+        dev.params.update(switch)
         if params:
             dev.params.update(params)
         if bypass is not None:
             dev.bypass = bool(bypass)
-    return {"track": track, "fx": [f.label() for f in chain], "params": dev.params}
+        labels = [_fx_label(p, f) for f in chain]
+    return {"track": track, "fx": labels, "params": dev.params, **({"notes": notes} if notes else {})}
 
 
 def fx_remove(track: str, index: int, project: str | None = None) -> dict:
     with _Edit(project) as p:
-        chain = p.master["fx"] if track == "master" else p.track(track).fx
+        chain = _fx_chain(p, track)
         removed = chain.pop(int(index))
-    return {"removed": removed.label(), "fx": [f.label() for f in chain]}
+        labels = [_fx_label(p, f) for f in chain]
+    return {"removed": removed.label(), "fx": labels}
 
 
 def automation(track: str, param: str = "volume_db", points: list | None = None, clear: bool = False,

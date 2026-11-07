@@ -140,10 +140,10 @@ def _settle(seconds: float) -> None:
         time.sleep(0.01)
 
 
-def _dd_plugin(eng, name: str, dev: dict):
+def _dd_plugin(eng, name: str, dev: dict, sidechain: bool = False):
     p = eng.make_plugin_processor(name, dev["path"])
-    if p.get_num_input_channels() > 2:
-        # sidechain inputs: feed only the main pair. (Never on instruments - it crashes HALion Sonic.)
+    if p.get_num_input_channels() > 2 and not sidechain:
+        # no key: feed only the main pair. (Never on instruments - it crashes HALion Sonic.)
         try:
             p.disable_nonmain_buses()
         except Exception:  # noqa: BLE001 - some plugins refuse; keep their default layout
@@ -238,6 +238,7 @@ def _run_dd(specs: list[dict], audio: np.ndarray | None, sr: int, bpm: float, du
         prev = "src"
     for i, dev in enumerate(specs):
         name = f"n{i}"
+        sc = dev.get("sidechain_in") if prev else None
         if dev["type"] == "synth":
             p = eng.make_faust_processor(name)
             p.num_voices = int(dev.get("voices", 32))
@@ -247,16 +248,24 @@ def _run_dd(specs: list[dict], audio: np.ndarray | None, sr: int, bpm: float, du
                 _load_midi_faust(p, midi)
         elif dev["type"] == "faust":
             p = eng.make_faust_processor(name)
-            p.set_dsp_string(dev["dsp"])
+            p.set_dsp_string(dev["dsp_sc"] if sc and dev.get("dsp_sc") else dev["dsp"])
             p.compile()
         else:
-            p = _dd_plugin(eng, name, dev)
+            p = _dd_plugin(eng, name, dev, sidechain=bool(sc))
             if dev.get("is_instrument") and (dev.get("state") or dev.get("preset")):
                 _process_briefly(eng, p)  # else plugins that apply a loaded patch on the audio thread drop notes at 0
-            latency += int(p.get_latency_samples() or 0)
             if dev.get("is_instrument") and midi:
                 p.load_midi(midi, clear_previous=True, beats=False, all_events=True)
-        graph.append((p, [prev] if prev else []))
+        inputs = [prev] if prev else []
+        if sc:
+            # the key arrives as extra input channels after the main pair (DawDreamer stacks inputs in order),
+            # delayed by what the devices before this one add, so it lines up with the signal it controls
+            key = _sidechain_audio(sc, sr, int(round(duration * sr)), latency, p.get_num_input_channels() - 2)
+            graph.append((eng.make_playback_processor(f"key{i}", key), []))
+            inputs.append(f"key{i}")
+        if dev["type"] == "vst3":
+            latency += int(p.get_latency_samples() or 0)
+        graph.append((p, inputs))
         prev = name
     eng.load_graph(graph)
     eng.render(duration + latency / sr)
@@ -267,6 +276,25 @@ def _run_dd(specs: list[dict], audio: np.ndarray | None, sr: int, bpm: float, du
     if latency:
         out = out[:, latency:]
     return out, latency
+
+
+def _sidechain_audio(src: str, sr: int, n: int, delay: int, channels: int) -> np.ndarray:
+    """The key signal for a sidechain input: a rendered track ("silent" = none), `delay` samples late."""
+    import soundfile as sf
+    channels = max(1, min(2, channels))
+    if src == "silent":
+        return np.zeros((channels, n + delay), dtype=np.float32)
+    data, fsr = sf.read(src, dtype="float32", always_2d=True)
+    if fsr != sr:
+        raise RuntimeError(f"sidechain key {src} is {fsr} Hz, the project renders at {sr} Hz")
+    key = data.T[:2]
+    if key.shape[0] == 1:
+        key = np.repeat(key, 2, axis=0)
+    key = key[:, :n]
+    key = np.pad(key, ((0, 0), (delay, n - key.shape[1])))
+    if channels == 1:
+        key = key.mean(axis=0, keepdims=True)
+    return np.ascontiguousarray(key, dtype=np.float32)
 
 
 def _load_midi_faust(p, midi: str) -> None:
@@ -320,6 +348,9 @@ def cmd_render(spec_path: str) -> None:
             pending.append({**inst, "is_instrument": True})
     for fx in spec.get("fx", []):
         if fx["type"] == "vst3" and fx.get("host") == "pedalboard":
+            if fx.get("sidechain_in"):
+                warnings.append(f"{fx.get('name')} is hosted through pedalboard, which can't feed a sidechain: "
+                                f"key ignored")
             audio, _ = _run_dd(pending, audio, sr, bpm, dur, midi)
             pending = []
             if audio is None:

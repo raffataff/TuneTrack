@@ -116,6 +116,16 @@ def scan(force: bool = False, retry_failed: bool = False, timeout: float = 120, 
     return {"scanned": len(files), "total": len(reg["plugins"]), "failed": len(reg.get("failed", []))}
 
 
+_EXT_SC = re.compile(r"\bext(?:ernal)?\.?\s*(?:s/?c|side\s*-?chain|key)\b", re.I)
+_EXT_SC_NOT = re.compile(r"listen|solo|audition|monitor|hpf|lpf|filter|freq|gain|level|mix|eq\b", re.I)
+
+
+def is_ext_sidechain_switch(param_name: str) -> bool:
+    """A plugin parameter that switches its detector to the external sidechain input ("External S/C",
+    "Low Ext S/C", "EXT Sidechain", "Ext Key"), not a sidechain filter or listen button."""
+    return bool(_EXT_SC.search(param_name)) and not _EXT_SC_NOT.search(param_name)
+
+
 def resolve(name: str, kind: str | None = None) -> dict:
     plugins = [p for p in load_registry()["plugins"] if kind is None or p["kind"] == kind]
     n = name.strip().lower()

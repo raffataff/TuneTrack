@@ -198,7 +198,8 @@ FX = {
            """chain = fi.highpass(2, hpf) : fi.low_shelf(low_gain, low_freq) : fi.peak_eq_cq(mid_gain, mid_freq, mid_q)
         : fi.high_shelf(high_gain, high_freq) : fi.lowpass(2, min(lpf, ma.SR * 0.45));
 process = chain, chain;"""),
-    "compressor": ("Stereo compressor (threshold dB, ratio, attack/release s, makeup dB, mix 0..1)", dict(
+    "compressor": ("Stereo compressor (threshold dB, ratio, attack/release s, makeup dB, mix 0..1); takes a "
+                   "sidechain key (fx_add sidechain=<track>) for ducking", dict(
         threshold=-18, ratio=3, attack=0.01, release=0.15, makeup=3, mix=1.0),
                    """comp = co.compressor_stereo(ratio, threshold, attack, release) : *(g), *(g) with { g = ba.db2linear(makeup); };
 process = _, _ <: (*(1 - mix), *(1 - mix)), (comp : *(mix), *(mix)) :> _, _;"""),
@@ -232,10 +233,24 @@ process = c, c;"""),
 }
 
 
-def fx_dsp(name: str, overrides: dict | None = None, bpm: float = 120.0) -> str:
+# Sidechain versions of built-in effects: 4 inputs (main L/R, key L/R); the key drives the detector.
+SIDECHAIN_BODIES = {
+    "compressor": """process(l, r, kl, kr) = l * w, r * w with {
+    g = co.compression_gain_mono(ratio, threshold, attack, release, abs(kl) + abs(kr));
+    w = (1 - mix) + mix * g * ba.db2linear(makeup);
+};""",
+}
+SIDECHAIN_FX = set(SIDECHAIN_BODIES)
+
+
+def fx_dsp(name: str, overrides: dict | None = None, bpm: float = 120.0, sidechain: bool = False) -> str:
     if name not in FX:
         raise KeyError(f"Unknown built-in effect {name!r}. Built-in effects: {', '.join(FX)}")
     _desc, defaults, body = FX[name]
+    if sidechain:
+        if name not in SIDECHAIN_BODIES:
+            raise ValueError(f"Built-in effect {name!r} has no sidechain input")
+        body = SIDECHAIN_BODIES[name]
     params = {**defaults}
     for k, v in (overrides or {}).items():
         if k not in params:

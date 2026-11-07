@@ -117,12 +117,14 @@ class Device:
           "sfz"     name = path to an .sfz file (native sampler)
           "builtin" name = built-in effect (eq, compressor, reverb, delay, chorus, saturator, width, filter, gain)
     params: name -> value. For vst3, values are normalised 0..1 or a display string ("-12 dB") matched to the plugin.
+    sidechain: id of the (non-bus) track whose pre-fader audio feeds this effect's sidechain input (effects only).
     """
     type: str
     name: str
     patch: str | None = None
     params: dict = field(default_factory=dict)
     bypass: bool = False
+    sidechain: str | None = None
 
     def to_json(self) -> dict:
         d: dict = {"type": self.type, "name": self.name}
@@ -132,6 +134,8 @@ class Device:
             d["params"] = self.params
         if self.bypass:
             d["bypass"] = True
+        if self.sidechain:
+            d["sidechain"] = self.sidechain
         return d
 
     @classmethod
@@ -139,7 +143,7 @@ class Device:
         if not d:
             return None
         return cls(type=d["type"], name=d["name"], patch=d.get("patch"), params=dict(d.get("params", {})),
-                   bypass=bool(d.get("bypass", False)))
+                   bypass=bool(d.get("bypass", False)), sidechain=d.get("sidechain") or None)
 
     def label(self) -> str:
         if self.type == "sfz":

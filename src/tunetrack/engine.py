@@ -27,7 +27,11 @@ def resolve_device(dev: Device, p: Project, instrument: bool) -> dict | None:
     if dev.type == "synth":
         return {"type": "synth", "dsp": synth_dsp(dev.name, dev.params), "voices": 32}
     if dev.type == "builtin":
-        return {"type": "faust", "dsp": fx_dsp(dev.name, dev.params, p.tempo)}
+        spec = {"type": "faust", "dsp": fx_dsp(dev.name, dev.params, p.tempo)}
+        if dev.sidechain and not instrument:
+            spec["dsp_sc"] = fx_dsp(dev.name, dev.params, p.tempo, sidechain=True)
+            spec["sidechain"] = dev.sidechain  # a track id; Renderer swaps it for the key track's render
+        return spec
     if dev.type == "sfz":
         path = Path(dev.name)
         if not path.is_absolute():
@@ -52,6 +56,8 @@ def resolve_device(dev: Device, p: Project, instrument: bool) -> dict | None:
         entry = plugins.resolve(name)
         if instrument and entry["kind"] != "instrument":
             raise ValueError(f"{entry['name']} is an effect, not an instrument")
+        if dev.sidechain and not instrument:
+            extra["sidechain"] = dev.sidechain  # a track id; Renderer swaps it for the key track's render
         return {"type": "vst3", "path": entry["path"], "host": entry["host"], "shell": entry.get("shell"),
                 "state": state, "params": dev.params, "name": entry["name"], **extra}
     raise ValueError(f"Unknown device type {dev.type!r}")
@@ -276,9 +282,33 @@ class Renderer:
         self.n = int(round(self.duration * self.sr))
         self.cache = p.path / "cache"
         self.cache.mkdir(parents=True, exist_ok=True)
+        self.key_fp: dict[str, str] = {}  # track id -> render fingerprint, for tracks that key a sidechain
+        self.failed: set[str] = set()
 
     def _base(self) -> dict:
         return {"sr": self.sr, "bpm": self.p.tempo, "tempo": [self.tm.beats, self.tm.bpms], "duration": round(self.duration, 4)}
+
+    def _key_for(self, kid: str, owner: str, warnings: list | None) -> str:
+        """The render fingerprint of a sidechain key track, or "silent" when it has no audio."""
+        fp = self.key_fp.get(kid)
+        if fp and kid not in self.failed:
+            return fp
+        if warnings is not None:
+            name = next((t.name for t in self.p.tracks if t.id == kid), kid)
+            warnings.append(f"{owner}: sidechain key '{name}' has no audio (no notes, or it failed to render); "
+                            f"the effect hears silence")
+        return "silent"
+
+    def _job_fx(self, fx: list[dict]) -> list[dict]:
+        """FX specs as the worker reads them: sidechain keys become the key track's cached render file."""
+        out = []
+        for d in fx:
+            d = {k: v for k, v in d.items() if k != "sidechain"}  # an unlinked key (direct render_track calls)
+            k = d.pop("sidechain_key", None)
+            if k:
+                d["sidechain_in"] = "silent" if k == "silent" else str(self.cache / f"{k}.wav")
+            out.append(d)
+        return out
 
     def track_spec(self, t: Track) -> dict | None:
         """Resolved, hashable description of everything that affects a track's pre-fader audio."""
@@ -305,6 +335,7 @@ class Renderer:
         info = {"cached": out.exists(), "key": key}
         if not out.exists():
             job = {k: v for k, v in spec.items() if k not in ("clips",)}
+            job["fx"] = self._job_fx(spec.get("fx", []))
             job["out"] = str(out)
             if t.kind == "midi":
                 midi = self.cache / f"{key}.mid"
@@ -327,17 +358,22 @@ class Renderer:
             audio = np.pad(audio, ((0, 0), (0, self.n - audio.shape[1])))
         return audio[:, : self.n], info
 
-    def render_fx(self, audio: np.ndarray, devices: list[Device], tag: str) -> np.ndarray:
+    def render_fx(self, audio: np.ndarray, devices: list[Device], tag: str, owner: str = "",
+                  warnings: list | None = None) -> np.ndarray:
         specs = [s for s in (resolve_device(d, self.p, False) for d in devices) if s]
         if not specs:
             return audio
+        for s in specs:
+            if "sidechain" in s:
+                s["sidechain_key"] = self._key_for(s.pop("sidechain"), owner or tag, warnings)
         key = _fingerprint({**self._base(), "fx": specs, "in": hashlib.sha1(audio.tobytes()).hexdigest()})
         out = self.cache / f"{tag}-{key}.wav"
         if not out.exists():
             inp = self.cache / f"{tag}-{key}.in.wav"
             sf.write(str(inp), audio.T, self.sr, subtype="FLOAT")
             jf = self.cache / f"{tag}-{key}.job.json"
-            jf.write_text(json.dumps({**self._base(), "fx": specs, "audio_in": str(inp), "out": str(out)}), encoding="utf-8")
+            jf.write_text(json.dumps({**self._base(), "fx": self._job_fx(specs), "audio_in": str(inp), "out": str(out)}),
+                          encoding="utf-8")
             plugins.run_worker("render", str(jf), timeout=1800)
             jf.unlink(missing_ok=True)
             inp.unlink(missing_ok=True)
@@ -353,8 +389,17 @@ class Renderer:
         playing = soloed_sources(p)
         audible = [t for t in sources if not t.mute and t.id in playing]
         report: dict = {"tracks": {}, "warnings": []}
+        # Sidechain keys play into the effect whatever their own mute/solo/fader say (so a muted "ghost kick" can
+        # pump a pad), so they're rendered even when they aren't heard.
+        keyed = sidechain_links(p)
+        key_ids = {kid for _o, _d, kid in keyed}
+        key_only = [t for t in sources if t.id in key_ids and t not in audible]
+        if keyed:
+            names = {t.id: t.name for t in p.tracks}
+            report["sidechains"] = [f"{o}: {d.label()} <- {names.get(kid, kid)}" for o, d, kid in keyed]
+        report["warnings"] += sidechain_switch_warnings(p)
         specs = {}
-        for t in audible:
+        for t in audible + key_only:
             try:
                 s = self.track_spec(t)
             except Exception as e:  # noqa: BLE001 - one broken track shouldn't stop the mix
@@ -362,37 +407,80 @@ class Renderer:
                 continue
             if s is not None:
                 specs[t.id] = s
+        deps = self._link_sidechains(specs, report["warnings"])
         pre: dict[str, np.ndarray] = {}
         workers = int(config.load_config().get("render_workers", 4))
 
         def job(t):
+            bad = [x.name for x in p.tracks if x.id in deps.get(t.id, set()) & self.failed]
+            if bad:
+                return t, None, None, f"its sidechain key '{bad[0]}' failed to render"
             try:
                 return t, *self.render_track(t, specs[t.id]), None
             except Exception as e:  # noqa: BLE001
                 return t, None, None, str(e)
 
-        todo = [t for t in audible if t.id in specs]
+        todo = [t for t in audible + key_only if t.id in specs]
+        heard = {t.id for t in audible}
         self.progress(f"rendering {len(todo)} tracks")
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-            for t, audio, info, err in ex.map(job, todo):
-                if err:
-                    report["warnings"].append(f"track '{t.name}' failed to render: {err}")
-                    continue
-                pre[t.id] = audio
-                report["tracks"][t.name] = {"render": "cached" if info["cached"] else f"{info.get('seconds')}s",
-                                            **analysis.stem_stats(audio)}
-                for w in info.get("warnings", []):
-                    report["warnings"].append(f"track '{t.name}': {w}")
-                if float(np.abs(audio).max(initial=0)) < 1e-4:
-                    report["warnings"].append(
-                        f"track '{t.name}' rendered SILENT though it has notes - instrument loaded no sound "
-                        f"(empty plugin slot? capture a patch with a program loaded) or notes out of its range")
+        finished: set[str] = set()
+        while todo:
+            # a track renders once every track keying its sidechains has (the key's render is its input)
+            ready = [t for t in todo if deps.get(t.id, set()) <= finished] or todo
+            todo = [t for t in todo if t not in ready]
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+                for t, audio, info, err in ex.map(job, ready):
+                    finished.add(t.id)
+                    if err:
+                        self.failed.add(t.id)
+                        report["warnings"].append(f"track '{t.name}' failed to render: {err}")
+                        continue
+                    for w in info.get("warnings", []):
+                        report["warnings"].append(f"track '{t.name}': {w}")
+                    if t.id not in heard:
+                        continue  # rendered only as a sidechain key
+                    pre[t.id] = audio
+                    report["tracks"][t.name] = {"render": "cached" if info["cached"] else f"{info.get('seconds')}s",
+                                                **analysis.stem_stats(audio)}
+                    if float(np.abs(audio).max(initial=0)) < 1e-4:
+                        report["warnings"].append(
+                            f"track '{t.name}' rendered SILENT though it has notes - instrument loaded no sound "
+                            f"(empty plugin slot? capture a patch with a program loaded) or notes out of its range")
 
         self.pre = pre
         self.master, self.post = self.mix(pre, report)
         report["render_seconds"] = round(time.time() - t0, 1)
         self.report = report
         return report
+
+    def _link_sidechains(self, specs: dict[str, dict], warnings: list) -> dict[str, set[str]]:
+        """Replace each insert's sidechain track id with that track's render fingerprint (keys first, so a key
+        that is itself keyed gets its final fingerprint). Returns track id -> ids of the key tracks it needs."""
+        names = {t.id: t.name for t in self.p.tracks}
+        deps: dict[str, set[str]] = {}
+
+        def link(tid: str, stack: frozenset) -> None:
+            if tid in self.key_fp:
+                return
+            deps[tid] = set()
+            for fx in specs[tid].get("fx", []):
+                kid = fx.pop("sidechain", None)
+                if kid is None:
+                    continue
+                if kid in stack or kid == tid:
+                    warnings.append(f"track '{names[tid]}': sidechain loop through '{names.get(kid, kid)}'; "
+                                    f"that effect hears silence")
+                    fx["sidechain_key"] = "silent"
+                    continue
+                if kid in specs:
+                    link(kid, stack | {tid})
+                    deps[tid].add(kid)
+                fx["sidechain_key"] = self._key_for(kid, f"track '{names[tid]}'", warnings)
+            self.key_fp[tid] = _fingerprint(specs[tid])
+
+        for tid in specs:
+            link(tid, frozenset())
+        return deps
 
     def mix(self, pre: dict[str, np.ndarray], report: dict | None = None) -> tuple[np.ndarray, dict]:
         """Faders, sends, buses (with their FX) and the master chain for the given pre-fader track signals.
@@ -439,7 +527,8 @@ class Renderer:
                     done.add(bid)
                     continue
                 if float(np.abs(sig).max(initial=0)) > 0:
-                    sig = self.render_fx(sig, b.fx, f"bus{bid}")
+                    sig = self.render_fx(sig, b.fx, f"bus{bid}", f"bus '{b.name}'",
+                                         report["warnings"] if report is not None else None)
                 post[bid] = fader(b, sig)
                 route(b, post[bid], master)
                 done.add(bid)
@@ -447,7 +536,8 @@ class Renderer:
             report["warnings"].append("bus routing has a cycle; some buses were skipped")
 
         if float(np.abs(master).max(initial=0)) > 0:
-            master = self.render_fx(master, [d for d in p.master.get("fx", []) if isinstance(d, Device)], "master")
+            master = self.render_fx(master, [d for d in p.master.get("fx", []) if isinstance(d, Device)], "master",
+                                    "master", report["warnings"] if report is not None else None)
         master = master * 10 ** (float(p.master.get("volume_db", 0)) / 20)
         return master, post
 
@@ -553,6 +643,35 @@ class Renderer:
                 rep["warnings"].append("loop: " + seam["warning"])
         self.final = mix
         return rep
+
+
+def sidechain_links(p: Project) -> list[tuple[str, Device, str]]:
+    """(owner, effect, key track id) for every active effect with a sidechain key."""
+    out = []
+    for owner, chain in [(f"track '{t.name}'" if t.kind != "bus" else f"bus '{t.name}'", t.fx) for t in p.tracks] \
+            + [("master", [d for d in p.master.get("fx", []) if isinstance(d, Device)])]:
+        out += [(owner, d, d.sidechain) for d in chain if d.sidechain and not d.bypass]
+    return out
+
+
+def _switch_is_on(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return float(v) >= 0.5
+    return str(v).strip().lower() in ("on", "in", "true", "yes", "ext", "external", "1")
+
+
+def sidechain_switch_warnings(p: Project) -> list[str]:
+    """VST3 effects whose external sidechain switch is on with no key connected: they hear silence and do nothing."""
+    out = []
+    for t in p.tracks:
+        for i, d in enumerate(t.fx):
+            if d.type == "vst3" and not d.bypass and not d.sidechain and any(
+                    plugins.is_ext_sidechain_switch(k) and _switch_is_on(v) for k, v in d.params.items()):
+                out.append(f"track '{t.name}' fx {i} ({d.label()}) has its external sidechain switch on but no "
+                           f"sidechain key, so it won't react: set sidechain=<track> or switch it off")
+    return out
 
 
 def soloed_sources(p: Project) -> set[str]:
