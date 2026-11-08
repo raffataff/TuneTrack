@@ -16,7 +16,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import analysis, config, edit, engine, generators, notation, plugins, synths, theory
+from . import analysis, config, edit, engine, eqmap, generators, notation, plugins, synths, theory
 from . import harmony as harm
 from .model import Clip, Device, Note, Project, Track, project_lock, redo as _redo, undo as _undo
 
@@ -109,7 +109,7 @@ class _Edit:
 # ---- parsing helpers ------------------------------------------------------------------------------------------
 
 def parse_device(spec, instrument: bool = True) -> Device | None:
-    """'synth:pad' | 'patch:<id>' | 'vst3:<plugin>' | 'sfz:<path>' | 'builtin:reverb' | dict | None."""
+    """'synth:pad' | 'patch:<id>' | 'vst3:<plugin>' | 'sfz:<path>' | 'builtin:reverb' | 'eq:ssl' | dict | None."""
     if spec in (None, "", "none"):
         return None
     if isinstance(spec, Device):
@@ -122,6 +122,12 @@ def parse_device(spec, instrument: bool = True) -> Device | None:
             return Device("vst3", meta["plugin"], patch=pid, params=d.get("params", {}))
         if d.get("patch") and not d.get("name"):
             d["name"] = plugins.get_patch(d["patch"])["plugin"]
+        if d.get("type") == "eq":  # {"type": "eq", "engine": "ssl", "params": {...}}
+            d.update(type="builtin", name="eq")
+        if d.get("engine"):
+            if (d.get("type"), d.get("name")) != ("builtin", "eq"):
+                raise ValueError("engine applies only to the EQ (builtin:eq): ssl, nova or builtin")
+            d["engine"] = eqmap.engine_name(d["engine"])
         return Device.from_json(d)
     s = str(spec).strip()
     if ":" in s and not re.match(r"^[A-Za-z]:[\\/]", s):
@@ -135,6 +141,8 @@ def parse_device(spec, instrument: bool = True) -> Device | None:
         return Device("vst3", meta["plugin"], patch=name)
     if kind in ("fx", "effect"):
         kind = "builtin"
+    if kind == "eq" and not instrument:  # eq:ssl / eq:nova / eq:builtin - the EQ on a chosen engine
+        return Device("builtin", "eq", engine=eqmap.engine_name(name))
     if kind not in ("synth", "sfz", "vst3", "builtin"):
         raise ValueError(f"Unknown device kind {kind!r}; use synth:, patch:, vst3:, sfz: or builtin:")
     if kind == "synth" and name not in synths.SYNTHS:
@@ -249,18 +257,29 @@ def _note_key(notes) -> list:
 # ---- project ----------------------------------------------------------------------------------------------------
 
 def project_new(name: str, folder: str | None = None, tempo: float = 120, key: str = "C major",
-                time_sig: str = "4/4", brief: dict | None = None, overwrite: bool = False) -> dict:
+                time_sig: str = "4/4", brief: dict | None = None, overwrite: bool = False,
+                eq_engine: str | None = None) -> dict:
+    """eq_engine: what builtin:eq inserts run on (builtin | ssl | nova); defaults to config.json's "eq_engine"."""
     config.ensure_dirs()
     path = Path(folder) if folder else config.PROJECTS_DIR / plugins.slug(name)
     if (path / "project.json").exists() and not overwrite:
         raise FileExistsError(f"A project already exists at {path} (open it, or pass overwrite=true)")
     num, den = (int(x) for x in str(time_sig).split("/"))
     theory.Key(key)
+    cfg = config.load_config()
     p = Project(name=name, tempo=float(tempo), key=key, time_sig=[num, den], brief=brief or {}, path=path,
-                sample_rate=int(config.load_config().get("default_sample_rate", 48000)))
+                sample_rate=int(cfg.get("default_sample_rate", 48000)),
+                eq_engine=eqmap.engine_name(eq_engine or cfg.get("eq_engine")))
     p.save(snapshot=False)
     _set_current(path)
-    return {"project": str(path), "name": name}
+    return {"project": str(path), "name": name, "eq_engine": p.eq_engine, **_eq_engine_notes(p.eq_engine)}
+
+
+def _eq_engine_notes(eng: str) -> dict:
+    if eng != "builtin" and not eqmap.plugin_entry(eng):
+        return {"notes": [f"{eqmap.ENGINES[eng]} isn't in the plugin registry (install it or run plugins_scan): "
+                          f"until it is, builtin:eq inserts use the built-in EQ"]}
+    return {}
 
 
 def project_open(path: str) -> dict:
@@ -320,6 +339,7 @@ def project_info(project: str | None = None, clips: bool = True) -> dict:
         "markers": [{"at": p.fmt_pos(m["at"]), "name": m["name"]} for m in sorted(p.markers, key=lambda m: m["at"])],
         **({"chord_track": harm.summary(p)} if p.chord_track else {}),
         "master": {k: (v if k != "fx" else [_fx_label(p, f) for f in v]) for k, v in p.master.items()},
+        "eq_engine": p.eq_engine,
         **({"tempo_changes": p.tempo_changes} if p.tempo_changes else {}),
         "tracks": tracks,
     }
@@ -329,8 +349,11 @@ def project_set(project: str | None = None, name: str | None = None, tempo: floa
                 key: str | None = None, time_sig: str | None = None, brief: dict | None = None,
                 loop: str | dict | None = None, length: str | float | None = None, tail: float | None = None,
                 target_lufs: float | None = None, ceiling_db: float | None = None,
-                master_volume_db: float | None = None, tempo_changes: list | None = None) -> dict:
+                master_volume_db: float | None = None, tempo_changes: list | None = None,
+                eq_engine: str | None = None) -> dict:
     with _Edit(project) as p:
+        if eq_engine is not None:
+            p.eq_engine = eqmap.engine_name(eq_engine)
         if name:
             p.name = name
         if tempo:
@@ -368,7 +391,8 @@ def project_set(project: str | None = None, name: str | None = None, tempo: floa
             p.master["volume_db"] = float(master_volume_db)
         if tempo_changes is not None:
             p.tempo_changes = [[p.pos(a), float(b)] for a, b in tempo_changes]
-    return project_info(project, clips=False)
+    info = project_info(project, clips=False)
+    return {**info, **_eq_engine_notes(info["eq_engine"])} if eq_engine is not None else info
 
 
 def markers(project: str | None = None, add: list | None = None, remove: list | None = None, clear: bool = False) -> dict:
@@ -541,8 +565,19 @@ def _fx_chain(p: Project, track: str) -> list[Device]:
     return p.master["fx"] if track == "master" else p.track(track).fx
 
 
+def _eq_label(p: Project, f: Device) -> str:
+    """builtin:eq's label with the plugin it runs on: "builtin:eq (TDR Nova)", "eq:ssl (built-in: ... not installed)"."""
+    eng = eqmap.engine_for(f, p)
+    if eng == "builtin":
+        return f.label()
+    entry = eqmap.plugin_entry(eng)
+    return f"{f.label()} ({entry['name']})" if entry else f"{f.label()} (built-in: {eqmap.ENGINES[eng]} not installed)"
+
+
 def _fx_label(p: Project, f: Device) -> str:
-    """An effect's label, with the track that keys its sidechain."""
+    """An effect's label, with the plugin an EQ runs on and the track that keys its sidechain."""
+    if eqmap.is_eq(f):
+        return _eq_label(p, f)
     if not f.sidechain:
         return f.label()
     key = next((t.name for t in p.tracks if t.id == f.sidechain), f"missing track {f.sidechain}")
@@ -635,10 +670,23 @@ def fx_add(track: str, device, project: str | None = None, index: int | None = N
         dev.params.update(switch)
     with _Edit(project) as p:
         dev.sidechain = _sidechain_key(p, track, sidechain)
+        notes += _eq_notes(p, dev)
         chain = _fx_chain(p, track)
         chain.insert(len(chain) if index is None else int(index), dev)
         labels = [_fx_label(p, f) for f in chain]
-    return {"track": track, "fx": labels, **({"params": dev.params, "notes": notes} if dev.sidechain else {})}
+    return {"track": track, "fx": labels, **({"params": dev.params} if dev.sidechain else {}),
+            **({"notes": notes} if notes else {})}
+
+
+def _eq_notes(p: Project, dev: Device) -> list[str]:
+    """What an EQ's settings become on its engine's plugin: values it can't reach (clamped). Raises on bad names."""
+    if not eqmap.is_eq(dev):
+        return []
+    eng = eqmap.engine_for(dev, p)
+    notes = eqmap.translate(eng, dev.params)[1]
+    if eng != "builtin" and not eqmap.plugin_entry(eng):
+        notes.append(f"{eqmap.ENGINES[eng]} isn't installed: this EQ uses the built-in one")
+    return [f"{eqmap.ENGINES[eng] or 'EQ'}: {n}" for n in notes]
 
 
 def fx_update(track: str, index: int, project: str | None = None, params: dict | None = None,
@@ -666,6 +714,7 @@ def fx_update(track: str, index: int, project: str | None = None, params: dict |
             dev.params.update(params)
         if bypass is not None:
             dev.bypass = bool(bypass)
+        notes += _eq_notes(p, dev)
         labels = [_fx_label(p, f) for f in chain]
     return {"track": track, "fx": labels, "params": dev.params, **({"notes": notes} if notes else {})}
 
@@ -1324,6 +1373,8 @@ def library_status() -> dict:
         "sfz_instruments": len(sfz),
         "builtin_synths": list(synths.SYNTHS),
         "builtin_effects": list(synths.FX),
+        "eq_engines": {k: ("built-in" if not v else v if eqmap.plugin_entry(k) else f"{v} (not installed)")
+                       for k, v in eqmap.ENGINES.items()},
         "notes": ([] if patches else ["No patches yet: VST3 instruments like HALion Sonic start empty. Ask the user to "
                                       "capture patches (patch_capture opens the plugin window to pick a sound)."])
                  + ([] if sfz else ["No SFZ libraries installed in library/instruments (see README for free ones)."]),

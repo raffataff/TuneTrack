@@ -118,6 +118,7 @@ class Device:
           "builtin" name = built-in effect (eq, compressor, reverb, delay, chorus, saturator, width, filter, gain)
     params: name -> value. For vst3, values are normalised 0..1 or a display string ("-12 dB") matched to the plugin.
     sidechain: id of the (non-bus) track whose pre-fader audio feeds this effect's sidechain input (effects only).
+    engine: for builtin eq only - what it runs on ("builtin", "ssl", "nova"; see eqmap.py). None = the project's.
     """
     type: str
     name: str
@@ -125,6 +126,7 @@ class Device:
     params: dict = field(default_factory=dict)
     bypass: bool = False
     sidechain: str | None = None
+    engine: str | None = None
 
     def to_json(self) -> dict:
         d: dict = {"type": self.type, "name": self.name}
@@ -136,6 +138,8 @@ class Device:
             d["bypass"] = True
         if self.sidechain:
             d["sidechain"] = self.sidechain
+        if self.engine:
+            d["engine"] = self.engine
         return d
 
     @classmethod
@@ -143,11 +147,14 @@ class Device:
         if not d:
             return None
         return cls(type=d["type"], name=d["name"], patch=d.get("patch"), params=dict(d.get("params", {})),
-                   bypass=bool(d.get("bypass", False)), sidechain=d.get("sidechain") or None)
+                   bypass=bool(d.get("bypass", False)), sidechain=d.get("sidechain") or None,
+                   engine=d.get("engine") or None)
 
     def label(self) -> str:
         if self.type == "sfz":
             return f"sfz:{Path(self.name).stem}"
+        if self.engine:
+            return f"{self.name}:{self.engine}"
         return f"{self.name} [{self.patch}]" if self.patch else f"{self.type}:{self.name}"
 
 
@@ -252,6 +259,7 @@ class Project:
     length: float | None = None  # explicit song end in beats
     tail: float = 4.0  # seconds rendered past the end for release/reverb tails
     tempo_changes: list[list[float]] = field(default_factory=list)
+    eq_engine: str = "builtin"  # what builtin:eq inserts run on: builtin | ssl | nova (see eqmap.py)
     next_id: int = 1
     rev: int = 0  # bumped on every save; lets editors detect that someone else changed the project
     path: Path | None = None  # project folder (not serialised)
@@ -340,6 +348,7 @@ class Project:
             "tail": self.tail, "markers": sorted(self.markers, key=lambda m: m["at"]),
             "chord_track": sorted(self.chord_track, key=lambda e: e["at"]),
             "master": {**self.master, "fx": [f.to_json() if isinstance(f, Device) else f for f in self.master.get("fx", [])]},
+            **({"eq_engine": self.eq_engine} if self.eq_engine != "builtin" else {}),
             "next_id": self.next_id, "rev": self.rev,
             "tracks": [t.to_json() for t in self.tracks],
         }
@@ -353,6 +362,7 @@ class Project:
                 markers=list(d.get("markers", [])), chord_track=[dict(e) for e in d.get("chord_track") or []],
                 loop=d.get("loop"), length=d.get("length"),
                 tail=float(d.get("tail", 4.0)), tempo_changes=list(d.get("tempo_changes", [])),
+                eq_engine=d.get("eq_engine") or "builtin",
                 next_id=int(d.get("next_id", 1)), rev=int(d.get("rev", 0)), path=path)
         m = dict(d.get("master", {}))
         p.master = {"volume_db": 0.0, "target_lufs": -16.0, "ceiling_db": -1.0, **m,

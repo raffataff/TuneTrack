@@ -19,7 +19,8 @@ Before writing a note, find out what the music is for:
   colours, existing audio folders and file naming, the engine (Godot `project.godot`, Unity `Assets/`, Unreal `.uproject`, web).
 - Settle on: **genre/palette, mood (2-3 adjectives), energy, tempo, key/mode, cue type, length, loop form, delivery format and path.**
   If the user gave intent ("dark synthwave menu, 100 bpm") it wins over your inference. Ask only if the project gives no clue.
-- Record it: `project_new(name, tempo, key, time_sig, brief={genre, mood, use, game, references, notes})`.
+- Record it: `project_new(name, tempo, key, time_sig, brief={genre, mood, use, game, references, notes}, eq_engine=...)`
+  (eq_engine: see section 6).
 
 ## 2. Check the instrument library
 
@@ -133,6 +134,23 @@ reharmonised cadence, drums opened up).
 - Add a shared reverb on a bus (`track_add("Reverb", kind="bus", fx=["builtin:reverb"])` or a VST3 such as ValhallaSupermassive with
   Mix at 100%), and send to it per track. Drier for fast or busy music, wetter for ambient.
 - High-pass everything that isn't bass or kick (`builtin:eq` hpf 100-200 Hz), cut 250-500 Hz on pads if the report says muddy.
+- EQ engine: `builtin:eq` runs on the project's `eq_engine` (`project_info` shows it; `status()` lists `eq_engines` and
+  whether each is installed). Same params on every engine: hpf, low_freq/low_gain (shelf), mid_freq/mid_gain/mid_q (bell),
+  high_freq/high_gain (shelf), lpf. When the SSL and Nova plugins are installed, set it in `project_new(eq_engine=...)`:
+  - `"nova"` (TDR Nova): clean, matches the built-in curves, wide ranges. The default choice for orchestral, ambient,
+    cozy, chiptune and anything needing surgical cuts.
+  - `"ssl"` (SSL Native Channel Strip 2): console colour. Its bells are broad (about 3.5 octaves even at mid_q 1+), its
+    high-pass is 18 dB/oct and its high shelf can't turn over above ~6 kHz. Good for rock, synthwave, action/EDM and hybrid
+    drums, bass, brass and guitars; poor for narrow mud cuts.
+  - Mix them per insert: `fx=["eq:ssl"]` on drums/bass, `"eq:nova"` on pads for a narrow 300 Hz cut. `fx_add` "notes" list
+    settings the plugin couldn't reach (clamped); act on them.
+  - For things the simple params don't cover, insert the plugin itself: Nova's dynamic EQ (a band that only cuts when
+    the build-up happens, the best fix for `listen()` masking warnings): `vst3:TDR Nova` with `{"EQ Auto Gain": "Off",
+    "Band 2 Frequency": "350", "Band 2 Q": "1.40", "Band 2 Gain": "0.0", "Band 2 Dyn": "On", "Band 2 Threshold":
+    "-30.0", "Band 2 Ratio": "2.0"}`. Gain stays a static cut/boost (0 = none while it's quiet); the dynamic cut grows
+    as the band rises above Threshold (measured: -8 dB on a loud pad, 0 on a quiet one; Ratio 4 = -11 dB). The SSL
+    strip's E/G types and its compressor/gate are also available that way. Keep Nova's "EQ Auto Gain" Off, or render
+    levels stop meaning anything.
 - Pan for width (harp left, second violins right, hats slightly off-centre). Keep bass and kick centred.
 - Loudness: the master is normalised to `target_lufs` (default -16). Background/menu cues often sit at -18 to -20; battle at -14 to -16.
 - The user's VST3 effects (SSL, TDR Nova, Waves, Valhalla) can go on tracks, buses or the master via `fx_add`; set parameters by name
