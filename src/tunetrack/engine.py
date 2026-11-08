@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from . import analysis, config, plugins
+from . import analysis, config, eqmap, plugins
 from .model import Device, Project, Track
 from .synths import fx_dsp, synth_dsp
 
@@ -26,6 +26,12 @@ def resolve_device(dev: Device, p: Project, instrument: bool) -> dict | None:
         return None
     if dev.type == "synth":
         return {"type": "synth", "dsp": synth_dsp(dev.name, dev.params), "voices": 32}
+    if dev.type == "builtin" and dev.name == "eq":
+        eng = eqmap.engine_for(dev, p)
+        entry = eqmap.plugin_entry(eng)
+        if entry:  # the same settings on SSL Channel Strip 2 / TDR Nova (eqmap.warnings reports a missing plugin)
+            return {"type": "vst3", "path": entry["path"], "host": entry["host"], "shell": entry.get("shell"),
+                    "state": None, "params": eqmap.translate(eng, dev.params)[0], "name": entry["name"]}
     if dev.type == "builtin":
         spec = {"type": "faust", "dsp": fx_dsp(dev.name, dev.params, p.tempo)}
         if dev.sidechain and not instrument:
@@ -374,7 +380,9 @@ class Renderer:
             jf = self.cache / f"{tag}-{key}.job.json"
             jf.write_text(json.dumps({**self._base(), "fx": self._job_fx(specs), "audio_in": str(inp), "out": str(out)}),
                           encoding="utf-8")
-            plugins.run_worker("render", str(jf), timeout=1800)
+            res = plugins.run_worker("render", str(jf), timeout=1800)
+            if warnings is not None:
+                warnings += [f"{owner or tag}: {w}" for w in res.get("warnings", [])]
             jf.unlink(missing_ok=True)
             inp.unlink(missing_ok=True)
         res = _read(out, self.sr)
@@ -398,6 +406,7 @@ class Renderer:
             names = {t.id: t.name for t in p.tracks}
             report["sidechains"] = [f"{o}: {d.label()} <- {names.get(kid, kid)}" for o, d, kid in keyed]
         report["warnings"] += sidechain_switch_warnings(p)
+        report["warnings"] += eqmap.warnings(p)
         specs = {}
         for t in audible + key_only:
             try:

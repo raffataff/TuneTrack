@@ -53,7 +53,17 @@ For CC-driven libraries (BBC SO, LABS, most orchestral), add `--dynamics-cc 1` s
 
 Effects work the same way: `vst3:TDR Nova`, `vst3:ValhallaSupermassive`, SSL, Waves (shell plugins are hosted through
 pedalboard) or 10 built-ins (`eq`, `compressor`, `reverb`, `delay`, `chorus`, `saturator`, `width`, `filter`, `bitcrush`,
-`gain`). Agents set VST3 parameters by name and display text: `{"Mix": "100 %", "LowCut": "200 Hz"}`.
+`gain`). Agents set VST3 parameters by name and display text: `{"Mix": "100 %", "LowCut": "200 Hz"}`. Frequencies in Hz
+also land on plugins that show kHz without a unit (SSL's "0.80"), and a value a plugin can't show is reported in the render
+warnings instead of quietly snapping to the end of its range.
+
+**EQ engines.** The built-in `eq` (hpf, low shelf, one mid bell, high shelf, lpf) can run on SSL Native Channel Strip 2 or
+TDR Nova with the same settings: `project_set(eq_engine="ssl")` (or `"nova"`, `"builtin"`) switches every `builtin:eq` insert
+in a project, and `eq:ssl` / `eq:nova` / `eq:builtin` choose for a single insert. The settings are translated and calibrated
+against the built-in EQ (Nova matches it within about 0.1 dB; SSL hits the asked gain and frequency but keeps its broad,
+console-style curves and 18 dB/oct high-pass). Settings a plugin can't reach are clamped and reported, and when the plugin
+isn't installed the built-in EQ runs, with a warning. Set `"eq_engine"` in `library/config.json` to make one the default for
+new projects.
 
 **Sidechain.** `fx_add("Bass", "vst3:SSL Native Bus Compressor 2", sidechain="Kick")` keys the compressor from the Kick track's
 own sound (before its fader, and even while it's muted, so a silent ghost-kick track works). It works with `builtin:compressor`

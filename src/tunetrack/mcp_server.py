@@ -80,10 +80,13 @@ def status() -> dict:
 
 @tool
 def project_new(name: str, tempo: float = 120, key: str = "C major", time_sig: str = "4/4",
-                brief: dict | None = None, folder: str | None = None, overwrite: bool = False) -> dict:
+                brief: dict | None = None, folder: str | None = None, overwrite: bool = False,
+                eq_engine: str | None = None) -> dict:
     """Create a project and make it current. brief: free-form intent, e.g. {"genre": "orchestral fantasy",
-    "mood": "hopeful, nostalgic", "use": "main menu loop", "game": "..."}. folder defaults to TuneTrack/projects."""
-    return api.project_new(name, folder, tempo, key, time_sig, brief, overwrite)
+    "mood": "hopeful, nostalgic", "use": "main menu loop", "game": "..."}. folder defaults to TuneTrack/projects.
+    eq_engine: what builtin:eq inserts run on - "builtin", "ssl" (SSL Native Channel Strip 2) or "nova" (TDR Nova);
+    default from the library config (builtin unless set)."""
+    return api.project_new(name, folder, tempo, key, time_sig, brief, overwrite, eq_engine)
 
 
 @tool
@@ -109,12 +112,14 @@ def project_set(name: str | None = None, tempo: float | None = None, key: str | 
                 time_sig: str | None = None, brief: dict | None = None, loop: str | None = None,
                 length: str | None = None, tail: float | None = None, target_lufs: float | None = None,
                 ceiling_db: float | None = None, master_volume_db: float | None = None,
-                tempo_changes: list | None = None, project: str | None = None) -> dict:
+                tempo_changes: list | None = None, eq_engine: str | None = None, project: str | None = None) -> dict:
     """Change project settings. loop: "1:1-17:1" (bar:beat range) or "off". length: end position "33:1",
     a length "32 bars", or "auto". target_lufs: loudness the render is normalised to (default -16; -14..-18 typical
-    for game music). ceiling_db: true-peak-ish limiter ceiling. tempo_changes: [["17:1", 90], ...]."""
+    for game music). ceiling_db: true-peak-ish limiter ceiling. tempo_changes: [["17:1", 90], ...].
+    eq_engine: what every builtin:eq insert runs on, same settings - "builtin", "ssl" (SSL Native Channel Strip 2:
+    console colour) or "nova" (TDR Nova: clean, wide ranges). Inserts added as "eq:ssl"/"eq:nova" keep theirs."""
     return api.project_set(project, name, tempo, key, time_sig, brief, loop, length, tail, target_lufs, ceiling_db,
-                           master_volume_db, tempo_changes)
+                           master_volume_db, tempo_changes, eq_engine)
 
 
 @tool
@@ -158,7 +163,7 @@ def track_add(name: str, instrument: Any = None, kind: str = "midi", volume_db: 
     """Add a track. kind: midi | audio | bus. instrument (midi): "patch:<id>", "synth:<preset>", "sfz:<path>",
     "vst3:<plugin>" or {"type","name","patch","params"}. role: instrument family used for range checks
     (violin, cello, horn, bass, pad, drums ...). layer: adaptive-music layer name for render(layers=True).
-    fx: ["builtin:eq", "vst3:TDR Nova", "patch:<fx patch id>"]. output: "master" or a bus track."""
+    fx: ["builtin:eq", "eq:ssl", "vst3:TDR Nova", "patch:<fx patch id>"]. output: "master" or a bus track."""
     return api.track_add(name, instrument, kind, project, volume_db, pan, role, layer, output, None, fx)
 
 
@@ -190,6 +195,9 @@ def fx_add(track: str, device: Any, index: int | None = None, sidechain: str | N
            project: str | None = None) -> dict:
     """Insert an effect on a track, bus, or "master". device: "builtin:<eq|compressor|reverb|delay|chorus|
     saturator|width|filter|bitcrush|gain>", "vst3:<plugin>", "patch:<id>" or {"type","name","params"}.
+    EQ: builtin:eq runs on the project's eq_engine; "eq:ssl", "eq:nova" or "eq:builtin" (or {"type": "eq",
+    "engine": "ssl", "params": {...}}) choose for this insert. Same params on every engine (hpf, low_freq/low_gain,
+    mid_freq/mid_gain/mid_q, high_freq/high_gain, lpf); values a plugin can't reach are clamped and listed in "notes".
     sidechain: a MIDI/audio track whose own sound (pre-fader, ignoring its mute/solo) drives the effect's detector,
     e.g. a compressor on the bass keyed by "Kick" for ducking/pumping. Works with builtin:compressor and VST3s with a
     sidechain input (SSL Bus Compressor 2, Channel Strip 2, G3, LMC+); their external sidechain switch is turned on

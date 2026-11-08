@@ -57,54 +57,95 @@ def _param_index(desc: list[dict], key: str) -> int:
     raise KeyError(f"No parameter {key!r}" + (f"; candidates: {[d['name'] for d in subs[:8]]}" if subs else ""))
 
 
-def _value_for_text(get_text, set_value, target: str) -> float:
-    """Find the normalised value whose display text matches `target` ("-12 dB", "On", "Hall")."""
+# Parameter values a plugin couldn't show (out of its range, between its steps), for the render's warnings.
+PARAM_NOTES: list[str] = []
+
+# Controls whose numbers are frequencies, so a target in Hz can be matched on a display that shows kHz.
+_FREQ_NAME = re.compile(r"freq|hz|pass|filter|cut|hpf|lpf|crossover|xover", re.I)
+
+
+def _shows_freq_unit(text: str) -> bool:
+    return bool(re.search(r"hz\b|\d\s*k\b", text.lower()))
+
+
+def _value_for_text(get_text, set_value, target: str, name: str = "") -> tuple[float, str | None]:
+    """The normalised value whose display text matches `target` ("-12 dB", "On", "Hall", "400 Hz"), and a note
+    when the plugin can't show it (the nearest value it can show is used).
+
+    A target in Hz on a frequency control that shows kHz without a unit (SSL Channel Strip's LMF shows "0.80" for
+    800 Hz) is matched in kHz, so "400 Hz" lands on "0.40", not on the top of the range."""
     want = target.strip().lower()
     want_n = _num(want)
-    grid = np.linspace(0, 1, 201)
-    best, best_err, samples = 0.0, float("inf"), []
-    for v in grid:
+    samples = []  # (value, display text, its number)
+    for v in np.linspace(0, 1, 201):
         set_value(float(v))
-        txt = str(get_text()).strip().lower()
-        samples.append((float(v), txt))
-        if txt == want:
-            return float(v)
-        n = _num(txt)
-        if want_n is not None and n is not None and abs(n - want_n) < best_err:
-            best, best_err = float(v), abs(n - want_n)
+        txt = str(get_text()).strip()
+        if txt.lower() == want:
+            return float(v), None
+        samples.append((float(v), txt, _num(txt)))
     if want_n is None:
-        for v, txt in samples:
-            if want in txt or txt in want:
-                return v
-        raise ValueError(f"No value shows as {target!r}; seen e.g. {[t for _, t in samples[::40]]}")
-    # refine numerically between neighbours of the best grid point (assumes local monotonicity)
-    lo, hi = max(0.0, best - 0.005), min(1.0, best + 0.005)
-    for _ in range(18):
-        mid = (lo + hi) / 2
-        set_value(mid)
-        n = _num(str(get_text()))
-        set_value(lo)
-        n_lo = _num(str(get_text()))
-        if n is None or n_lo is None:
-            break
-        if (n_lo <= want_n <= n) or (n <= want_n <= n_lo):
-            hi = mid
-        else:
-            lo = mid
-    return (lo + hi) / 2
+        for v, txt, _n in samples:
+            if want in txt.lower() or txt.lower() in want:
+                return v, None
+        raise ValueError(f"No value shows as {target!r}; seen e.g. {[t for _, t, _n in samples[::40]]}")
+    nums = [(v, t, n) for v, t, n in samples if n is not None]
+    if not nums:
+        raise ValueError(f"{name or 'The parameter'} shows no numbers (e.g. {[t for _, t, _n in samples[::40]]}): "
+                         f"set it by one of those texts")
+    lo_s, hi_s = min(nums, key=lambda s: s[2]), max(nums, key=lambda s: s[2])
+    in_range = lo_s[2] <= want_n <= hi_s[2]
+    if (not in_range and lo_s[2] <= want_n / 1000 <= hi_s[2] and (_FREQ_NAME.search(name) or "hz" in want)
+            and not any(_shows_freq_unit(t) for _, t, _n in nums)):
+        want_n /= 1000
+        in_range = True
+    best = min(nums, key=lambda s: abs(s[2] - want_n))[0]
+    val = best
+    if in_range:
+        # refine numerically between neighbours of the best grid point (assumes local monotonicity)
+        lo, hi = max(0.0, best - 0.005), min(1.0, best + 0.005)
+        for _ in range(18):
+            mid = (lo + hi) / 2
+            set_value(mid)
+            n = _num(str(get_text()))
+            set_value(lo)
+            n_lo = _num(str(get_text()))
+            if n is None or n_lo is None:
+                break
+            if (n_lo <= want_n <= n) or (n <= want_n <= n_lo):
+                hi = mid
+            else:
+                lo = mid
+
+        def err(v: float) -> float:
+            set_value(v)
+            n = _num(str(get_text()))
+            return abs(n - want_n) if n is not None else float("inf")
+
+        val = min((lo, (lo + hi) / 2, hi), key=err)  # the bracket ends can round to the neighbouring display value
+    set_value(val)
+    got = str(get_text()).strip()
+    got_n = _num(got)
+    if got_n is not None and abs(got_n - want_n) <= max(0.02 * abs(want_n), 0.05):
+        return val, None
+    return val, (f"{name or 'parameter'} can't show {target!r} (it goes from {lo_s[1]!r} to {hi_s[1]!r}); "
+                 f"set to {got!r}")
 
 
-def _apply_dd_params(p, params: dict | None) -> None:
+def _apply_dd_params(p, params: dict | None, label: str = "") -> None:
     if not params:
         return
     desc = p.get_parameters_description()
+    names = {d["index"]: d["name"] for d in desc}
     for k, v in params.items():
         idx = _param_index(desc, k)
         if isinstance(v, (int, float)):
             p.set_parameter(idx, float(v))
         else:
-            val = _value_for_text(lambda: p.get_parameter_text(idx), lambda x: p.set_parameter(idx, x), str(v))
+            val, note = _value_for_text(lambda: p.get_parameter_text(idx), lambda x: p.set_parameter(idx, x), str(v),
+                                        names.get(idx, str(k)))
             p.set_parameter(idx, val)
+            if note:
+                PARAM_NOTES.append(f"{label}: {note}" if label else note)
 
 
 def _apply_pb_params(p, params: dict | None) -> None:
@@ -156,7 +197,7 @@ def _dd_plugin(eng, name: str, dev: dict, sidechain: bool = False):
             raise RuntimeError(f"Plugin refused preset {dev['preset']}")
     if dev.get("state") or dev.get("preset"):
         _settle(SETTLE_S)
-    _apply_dd_params(p, dev.get("params"))
+    _apply_dd_params(p, dev.get("params"), dev.get("name", ""))
     return p
 
 
@@ -368,6 +409,7 @@ def cmd_render(spec_path: str) -> None:
     peak = float(np.abs(audio).max()) if audio.size else 0.0
     if peak > 8:
         warnings.append(f"output peaked at {peak:.1f} (+{20 * np.log10(peak):.0f} dBFS) - check gain staging/feedback")
+    warnings += list(dict.fromkeys(PARAM_NOTES))
     sf.write(spec["out"], audio.T, sr, subtype="FLOAT")
     _result({"ok": True, "peak": peak, "latency": latency, "warnings": warnings})
 
