@@ -46,6 +46,14 @@ def main(argv: list[str] | None = None) -> None:
     k.add_argument("fn")
     k.add_argument("args", nargs="?", default="{}")
     sub.add_parser("functions", help="list API functions for `call`")
+    w = sub.add_parser("crew", help="the studio crew: `crew detect` (which agent apps and models are installed), "
+                                    "`crew status`, `crew run [--brief \"...\"]` (let the seated agents work)")
+    w.add_argument("action", choices=["detect", "status", "run"])
+    w.add_argument("--brief", help="what to make: the Producer plans from it")
+    w.add_argument("--project")
+    w.add_argument("--parallel", type=int, default=3, help="agents working at once")
+    w.add_argument("--max-runs", type=int, default=40, help="agent runs before the crew stops and asks you")
+    w.add_argument("--refresh", action="store_true", help="detect: rescan instead of using the cached result")
     sub.add_parser("install-claude", help="install the TuneTrack skill and register the MCP server with Claude Code")
     a = ap.parse_args(argv)
 
@@ -86,15 +94,51 @@ def main(argv: list[str] | None = None) -> None:
         _print(api.patch_capture(a.plugin, a.name, tags, a.description, role=a.role, dynamics_cc=a.dynamics_cc))
     elif a.cmd == "install-claude":
         install_claude()
+    elif a.cmd == "crew":
+        from . import studio
+        from .crew import detect, floor
+        if a.action == "detect":
+            _print(detect.detect(refresh=a.refresh))
+            return
+        if a.project:
+            api.project_open(a.project)
+        if a.action == "status":
+            _print({**studio.studio_status(), **floor.crew()})
+            return
+        if a.brief:
+            floor.kickoff(a.brief)
+
+        def show(seat, ev):
+            if ev.get("type") == "tool":
+                print(f"  {seat:9} {str(ev.get('name', '')).replace('mcp__tunetrack__', '')}", flush=True)
+            elif ev.get("type") in ("text", "error") and (ev.get("text") or ev.get("message")):
+                print(f"  {seat:9} {'! ' if ev['type'] == 'error' else ''}"
+                      f"{(ev.get('text') or ev.get('message')).strip()[:300]}", flush=True)
+
+        if hasattr(sys.stdout, "reconfigure"):  # agents write arrows and curly quotes; a cp1252 console can't
+            sys.stdout.reconfigure(errors="replace")
+        problems = floor.crew().get("problems")
+        if problems:
+            print("Before the crew can work:\n  " + "\n  ".join(problems))
+        _print(floor.Floor(max_parallel=a.parallel, max_launches=a.max_runs, on_event=show).run())
     elif a.cmd == "functions":
-        for name, fn in inspect.getmembers(api, inspect.isfunction):
-            if not name.startswith("_") and fn.__module__ == api.__name__:
-                print(f"{name}{inspect.signature(fn)}")
+        for mod in _modules():
+            for name, fn in inspect.getmembers(mod, inspect.isfunction):
+                if not name.startswith("_") and fn.__module__ == mod.__name__:
+                    print(f"{name}{inspect.signature(fn)}")
     elif a.cmd == "call":
-        fn = getattr(api, a.fn, None)
-        if fn is None or a.fn.startswith("_"):
+        fn = None if a.fn.startswith("_") else next(
+            (f for f in (getattr(m, a.fn, None) for m in _modules())
+             if inspect.isfunction(f) and f.__module__.startswith("tunetrack.")), None)
+        if fn is None:
             sys.exit(f"unknown function {a.fn!r} (see `tunetrack functions`)")
         _print(fn(**json.loads(a.args)))
+
+
+def _modules() -> list:
+    """Where `call` and `functions` look: every project operation, then the studio board and takes."""
+    from . import studio, takes
+    return [api, studio, takes]
 
 
 def install_claude() -> None:

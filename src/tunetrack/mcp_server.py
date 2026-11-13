@@ -7,7 +7,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import api
+from . import api, roles, studio, takes
 
 INSTRUCTIONS = """TuneTrack is a multitrack music workstation for game soundtracks, driven by tools.
 
@@ -43,9 +43,47 @@ C4 = middle C (MIDI 60).
 Quality bar: real phrases with contour and rhythmic identity, functional bass, voice-led harmony, contrast
 between sections, dynamics (velocity + CC), instruments in their ranges, headroom. No generic filler loops.
 Never call patch_capture unless the user is at the computer - it opens a plugin window for them.
+
+The studio: a project can be worked on by a crew - seats such as producer, composer, arranger, rhythm, sound,
+mix and review, each filled by an agent or by the user. studio_status() shows the board: who sits where, open
+tasks, takes waiting, and what needs the user. Without a seat you act for the user and edit the session directly;
+seat_join("composer") makes you that seat. Seats work in takes: take_new() cuts a private copy of the project
+that all your tools then edit, take_diff() shows what you changed, take_submit(summary) hands it in, and the
+Producer or the user accepts it into the session (take_accept). Tasks carry the work (task_add / task_update),
+message_send is talkback between seats, and ask_human() puts a real choice or blocker on the user's Needs You
+list while you carry on with whatever doesn't depend on it.
 """
 
-mcp = MCPServer("tunetrack", instructions=INSTRUCTIONS, version="0.1.0")
+SEATED = """You are the {title} of this studio session ({room}).
+{purpose}
+
+How a seat works:
+1. inbox() - your tasks and messages. studio_status() - the whole board. project_info() and score() - the music.
+2. take_new(task="<task id>") - cut your take. Every tool you call then edits your take, not the session.
+   task_update(task, state="working").
+3. Do the task. Stay inside it: its tracks, its bars, your department ({owns}). If the fix belongs to another
+   seat, tell that seat (message_send) or the Producer instead of doing it yourself.
+4. Check your own work the way a listener would: score() and analyze() for notes, render() and listen() for sound.
+5. take_diff() - make sure the take holds what you meant and nothing else. take_submit(summary) - say what you
+   made, where (tracks, bars), and what the listener should check. Then inbox() again.
+A real choice only the user can make, or a blocker you cannot get past: ask_human(...), then carry on with the
+rest. Anything you could not do or verify goes in the summary - never hand in a take described as finished when
+part of it is not.
+
+"""
+
+
+def _instructions() -> str:
+    seat = studio.me()
+    if seat not in roles.ROLES:
+        return INSTRUCTIONS
+    r = roles.ROLES[seat]
+    return SEATED.format(title=r.title, room=r.room.lower(), purpose=r.purpose,
+                         owns=", ".join(sorted(r.owns)) or "you change nothing: you listen and report") + INSTRUCTIONS
+
+
+mcp = MCPServer("tunetrack", instructions=_instructions(), version="0.1.0")
+TOOLS: list[str] = []
 
 
 def tool(fn):
@@ -58,6 +96,7 @@ def tool(fn):
             raise
         except Exception as e:  # noqa: BLE001 - every failure is reported to the agent
             raise ToolError(f"{type(e).__name__}: {e}") from e
+    TOOLS.append(fn.__name__)
     return mcp.tool()(wrapper)
 
 
@@ -516,7 +555,146 @@ def ui_open(project: str | None = None) -> dict:
     return {"url": url}
 
 
+# ---- studio: seats, tasks, talkback, Needs You, takes -------------------------------------------------------------
+
+@tool
+def studio_status(session: str | None = None) -> dict:
+    """The studio board: seats and who is in them, open tasks, takes waiting for acceptance, the user's Needs You
+    list, and which seat you are. Start here in a session with a crew."""
+    out = studio.studio_status(session)
+    if studio.me() in (roles.YOU, "producer"):
+        out["departments"] = [f"{r['id']}: {r['purpose']}" for r in roles.catalog()]
+    return out
+
+
+@tool
+def seat_join(seat: str | None = None) -> dict:
+    """Take a seat in the session ("composer", "mix", ...), or stand up again (None): you then act for the user.
+    A seated client works in takes and gets that seat's tasks and messages from inbox()."""
+    return studio.seat_join(seat)
+
+
+@tool
+def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, model: str | None = None,
+                effort: str | None = None, label: str | None = None, mode: str | None = None,
+                notes: str | None = None, session: str | None = None) -> dict:
+    """Put someone in a seat or change how it works. kind: "agent" (with runner = claude | codex | kilo and a
+    model), "human" (the user takes it), "external" (an outside app sits in), "none" (empty it).
+    mode: "propose" (work in takes) or "direct". notes: standing instructions for whoever sits there."""
+    return studio.seat_assign(seat, kind, runner, model, effort, label, mode, notes, session)
+
+
+@tool
+def task_add(seat: str, title: str, detail: str = "", depends: list[str] | None = None, scope: dict | None = None,
+             session: str | None = None) -> dict:
+    """Give a seat a task. detail: enough to work from alone - what to make, which tracks and bars, what it must
+    fit with, what done looks like. depends: task ids that must be done first. scope: {"tracks": [...],
+    "bars": "9-16"}. Seats: producer, spotting, composer, arranger, rhythm, sound, tracking, mix, review."""
+    return studio.task_add(seat, title, detail, depends, scope, session)
+
+
+@tool
+def task_update(task: str, state: str | None = None, result: str | None = None, title: str | None = None,
+                detail: str | None = None, depends: list[str] | None = None, session: str | None = None) -> dict:
+    """Move a task along: state = queued | working | needs_you | done | failed | cancelled (take_submit sets
+    "submitted" for you). result: one or two sentences on what was done, or why it failed and what you tried."""
+    return studio.task_update(task, state, result, None, title, detail, depends, session)
+
+
+@tool
+def inbox(session: str | None = None) -> dict:
+    """What is waiting for your seat: unread messages (including the user's answers to your questions) and your
+    open tasks. Call it when you start and after each step you finish."""
+    return studio.inbox(None, True, session)
+
+
+@tool
+def message_send(to: str, text: str, task: str | None = None, session: str | None = None) -> dict:
+    """Talkback: say something to a seat, to "all", or to "you" (the user). task: the task it is about. Messages
+    inform and ask; work that someone must do goes on the board with task_add."""
+    return studio.message_send(to, text, task, session)
+
+
+@tool
+def ask_human(title: str, detail: str = "", kind: str = "decision", options: list[Any] | None = None,
+              task: str | None = None, blocks: list[str] | None = None, session: str | None = None) -> dict:
+    """Put something on the user's Needs You list. kind: "decision" (choose between options), "input" (they must
+    provide or pick something), "blocker" (you cannot continue). options: labels, or {"label", "take": "<take
+    id>", "audio": "<file>", "detail"} so each can be auditioned. task: the task it is about (it waits);
+    blocks: other tasks that must wait too. The answer arrives in inbox(). Keep working on what doesn't depend on
+    it. For real choices and blockers only - not progress reports."""
+    return studio.ask_human(title, detail, kind, options, task, blocks, session)
+
+
+@tool
+def needs_you(resolve: str | None = None, option: str | None = None, text: str = "",
+              session: str | None = None) -> dict:
+    """The user's Needs You list. With resolve=<item id>, answer it for the user: option = the chosen option's id
+    or label, text = anything they added. Only answer with what the user actually said."""
+    if resolve:
+        return studio.attention_resolve(resolve, option, text, session)
+    return studio.attention_list("open", session)
+
+
+@tool
+def take_new(name: str | None = None, task: str | None = None, session: str | None = None) -> dict:
+    """Cut a take: a private copy of the session's project. Your tools then edit the take, so nobody's work changes
+    under you and yours isn't heard until it is accepted. task: the task the take is for."""
+    return takes.take_new(name, task, None, True, session)
+
+
+@tool
+def take_use(take: str | None = None, session: str | None = None) -> dict:
+    """Point your tools at an existing take (to continue or audition it), or back at the session (None)."""
+    return takes.take_use(take, session)
+
+
+@tool
+def take_diff(take: str | None = None, session: str | None = None) -> dict:
+    """What a take changed (default: the one you are working in), anything outside its seat's department, and - if
+    the session has moved on since - the conflicts accepting it would hit."""
+    return takes.take_diff(take, session)
+
+
+@tool
+def take_sync(take: str | None = None, on_conflict: str = "fail", session: str | None = None) -> dict:
+    """Bring what the session has accepted since your take was cut into your take. on_conflict: "fail" (list the
+    conflicts, change nothing), "mine" or "session"."""
+    return takes.take_sync(take, on_conflict, session)
+
+
+@tool
+def take_submit(summary: str, take: str | None = None, session: str | None = None) -> dict:
+    """Hand in your take. summary: what you made, where (tracks, bars), what the listener should check, and
+    anything you could not do or verify."""
+    return takes.take_submit(summary, take, session)
+
+
+@tool
+def take_accept(take: str, on_conflict: str = "fail", session: str | None = None) -> dict:
+    """Merge a take into the session (one undo step). Listen first: take_use(take), render(), listen().
+    on_conflict: "fail" (default: list the conflicts, change nothing), "take" or "session" wins each conflict."""
+    return takes.take_accept(take, on_conflict, session)
+
+
+@tool
+def take_reject(take: str, reason: str, session: str | None = None) -> dict:
+    """Send a take back to its seat. reason: what has to change, specific enough to act on - bars, tracks, what
+    you heard. Its task goes back in the queue and the take stays open for the seat to continue."""
+    return takes.take_reject(take, reason, session)
+
+
+def apply_seat() -> list[str]:
+    """Leave a seated agent only its seat's tools (roles.py); the user and unseated clients keep them all."""
+    allowed = roles.tools_for(studio.me())
+    removed = [] if allowed is None else [n for n in TOOLS if n not in allowed]
+    for n in removed:
+        mcp.remove_tool(n)
+    return removed
+
+
 def main() -> None:
+    apply_seat()
     mcp.run()
 
 

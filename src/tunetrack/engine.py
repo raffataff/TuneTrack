@@ -8,13 +8,14 @@ import math
 import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
 from . import analysis, config, eqmap, plugins
-from .model import Device, Project, Track
+from .model import Device, Project, Track, file_lock
 from .synths import fx_dsp, synth_dsp
 
 
@@ -41,7 +42,7 @@ def resolve_device(dev: Device, p: Project, instrument: bool) -> dict | None:
     if dev.type == "sfz":
         path = Path(dev.name)
         if not path.is_absolute():
-            for base in [p.path] + [Path(d) for d in config.load_config().get("sample_dirs", [])]:
+            for base in [p.root] + [Path(d) for d in config.load_config().get("sample_dirs", [])]:
                 if base and (Path(base) / path).exists():
                     path = Path(base) / path
                     break
@@ -169,7 +170,7 @@ def audio_track_input(p: Project, t: Track, n: int) -> np.ndarray:
             continue
         f = Path(c.file)
         if not f.is_absolute():
-            f = p.path / f
+            f = p.root / f
         data = _read(f, sr)
         a = int(round(c.offset * sr))
         start = int(round(tm.sec(c.start) * sr))
@@ -275,6 +276,31 @@ def loop_wrap(audio: np.ndarray, ls: int, le: int, keep_intro: bool) -> np.ndarr
 
 # ---- main render --------------------------------------------------------------------------------------------
 
+@contextmanager
+def _cache_entry(out: Path):
+    """Render one cache file safely when several processes share the cache (agents working in takes, the editor).
+
+    Yields the path to write to, or None when someone else finished the same render while we waited for the lock.
+    The file gets its real name only once it is complete, so a killed worker never leaves a half-written entry
+    that later looks like a finished render."""
+    lock = out.with_suffix(".lock")
+    with file_lock(lock, timeout=1900.0):
+        if out.exists():
+            yield None
+        else:
+            part = out.with_name(f"{out.stem}.part{out.suffix}")
+            try:
+                yield part
+                if part.exists():
+                    part.replace(out)
+            finally:
+                part.unlink(missing_ok=True)
+    try:
+        lock.unlink()
+    except OSError:  # another process is waiting on it
+        pass
+
+
 class Renderer:
     def __init__(self, p: Project, progress=None):
         self.p = p
@@ -286,7 +312,7 @@ class Renderer:
         self.render_end_beat = math.ceil(end / cache_bars - 1e-9) * cache_bars
         self.duration = self.tm.sec(self.render_end_beat) + p.tail
         self.n = int(round(self.duration * self.sr))
-        self.cache = p.path / "cache"
+        self.cache = p.root / "cache"
         self.cache.mkdir(parents=True, exist_ok=True)
         self.key_fp: dict[str, str] = {}  # track id -> render fingerprint, for tracks that key a sidechain
         self.failed: set[str] = set()
@@ -331,8 +357,8 @@ class Renderer:
             clips = [c for c in t.clips if not c.muted and c.kind == "audio"]
             if not clips:
                 return None
-            spec["clips"] = [{**c.to_json(), "mtime": (self.p.path / c.file).stat().st_mtime_ns
-                              if c.file and (self.p.path / c.file).exists() else None} for c in clips]
+            spec["clips"] = [{**c.to_json(), "mtime": (self.p.root / c.file).stat().st_mtime_ns
+                              if c.file and (self.p.root / c.file).exists() else None} for c in clips]
         return spec
 
     def render_track(self, t: Track, spec: dict) -> tuple[np.ndarray, dict]:
@@ -340,25 +366,31 @@ class Renderer:
         out = self.cache / f"{key}.wav"
         info = {"cached": out.exists(), "key": key}
         if not out.exists():
-            job = {k: v for k, v in spec.items() if k not in ("clips",)}
-            job["fx"] = self._job_fx(spec.get("fx", []))
-            job["out"] = str(out)
-            if t.kind == "midi":
-                midi = self.cache / f"{key}.mid"
-                write_midi(self.p, t, midi, (spec.get("instrument") or {}).get("channel", 1) - 1)
-                job["midi"] = str(midi)
-            else:
-                inp = self.cache / f"{key}.in.wav"
-                sf.write(str(inp), audio_track_input(self.p, t, self.n).T, self.sr, subtype="FLOAT")
-                job["audio_in"] = str(inp)
-                job.pop("instrument", None)
-            jf = self.cache / f"{key}.job.json"
-            jf.write_text(json.dumps(job), encoding="utf-8")
-            t0 = time.time()
-            res = plugins.run_worker("render", str(jf), timeout=1800)
-            info.update(seconds=round(time.time() - t0, 1), warnings=res.get("warnings", []))
-            jf.unlink(missing_ok=True)
-            (self.cache / f"{key}.in.wav").unlink(missing_ok=True)
+            with _cache_entry(out) as part:
+                if part is None:  # another process (a second agent's take, the editor) rendered it while we waited
+                    info["cached"] = True
+                else:
+                    job = {k: v for k, v in spec.items() if k not in ("clips",)}
+                    job["fx"] = self._job_fx(spec.get("fx", []))
+                    job["out"] = str(part)
+                    if t.kind == "midi":
+                        midi = self.cache / f"{key}.mid"
+                        write_midi(self.p, t, midi, (spec.get("instrument") or {}).get("channel", 1) - 1)
+                        job["midi"] = str(midi)
+                    else:
+                        inp = self.cache / f"{key}.in.wav"
+                        sf.write(str(inp), audio_track_input(self.p, t, self.n).T, self.sr, subtype="FLOAT")
+                        job["audio_in"] = str(inp)
+                        job.pop("instrument", None)
+                    jf = self.cache / f"{key}.job.json"
+                    jf.write_text(json.dumps(job), encoding="utf-8")
+                    t0 = time.time()
+                    try:
+                        res = plugins.run_worker("render", str(jf), timeout=1800)
+                    finally:
+                        jf.unlink(missing_ok=True)
+                        (self.cache / f"{key}.in.wav").unlink(missing_ok=True)
+                    info.update(seconds=round(time.time() - t0, 1), warnings=res.get("warnings", []))
         audio = _read(out, self.sr)
         if audio.shape[1] < self.n:
             audio = np.pad(audio, ((0, 0), (0, self.n - audio.shape[1])))
@@ -375,16 +407,20 @@ class Renderer:
         key = _fingerprint({**self._base(), "fx": specs, "in": hashlib.sha1(audio.tobytes()).hexdigest()})
         out = self.cache / f"{tag}-{key}.wav"
         if not out.exists():
-            inp = self.cache / f"{tag}-{key}.in.wav"
-            sf.write(str(inp), audio.T, self.sr, subtype="FLOAT")
-            jf = self.cache / f"{tag}-{key}.job.json"
-            jf.write_text(json.dumps({**self._base(), "fx": self._job_fx(specs), "audio_in": str(inp), "out": str(out)}),
-                          encoding="utf-8")
-            res = plugins.run_worker("render", str(jf), timeout=1800)
-            if warnings is not None:
-                warnings += [f"{owner or tag}: {w}" for w in res.get("warnings", [])]
-            jf.unlink(missing_ok=True)
-            inp.unlink(missing_ok=True)
+            with _cache_entry(out) as part:
+                if part is not None:
+                    inp = self.cache / f"{tag}-{key}.in.wav"
+                    sf.write(str(inp), audio.T, self.sr, subtype="FLOAT")
+                    jf = self.cache / f"{tag}-{key}.job.json"
+                    jf.write_text(json.dumps({**self._base(), "fx": self._job_fx(specs), "audio_in": str(inp),
+                                              "out": str(part)}), encoding="utf-8")
+                    try:
+                        res = plugins.run_worker("render", str(jf), timeout=1800)
+                    finally:
+                        jf.unlink(missing_ok=True)
+                        inp.unlink(missing_ok=True)
+                    if warnings is not None:
+                        warnings += [f"{owner or tag}: {w}" for w in res.get("warnings", [])]
         res = _read(out, self.sr)
         if res.shape[1] < self.n:
             res = np.pad(res, ((0, 0), (0, self.n - res.shape[1])))

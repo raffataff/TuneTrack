@@ -322,6 +322,12 @@ class Project:
         for t in self.tracks:
             if t.id == ref or t.name.lower() == ref_l:
                 return t
+        # "t1 Pad", "t1:Pad", "t1 (Pad)": the id with the name beside it, as listings and task texts write it
+        m = re.match(r"(t\d+)\b[\s:(\-]+(.*?)\)?$", ref_l)
+        if m:
+            for t in self.tracks:
+                if t.id == m.group(1) and (not m.group(2) or m.group(2) in t.name.lower()):
+                    return t
         matches = [t for t in self.tracks if ref_l in t.name.lower()]
         if len(matches) == 1:
             return matches[0]
@@ -374,6 +380,12 @@ class Project:
         assert self.path is not None, "project has no folder"
         return self.path / "project.json"
 
+    @property
+    def root(self) -> Path:
+        """Where this project's audio files and render cache live: its own folder, or its session's for a take."""
+        assert self.path is not None, "project has no folder"
+        return session_root(self.path)
+
     @classmethod
     def load(cls, path: str | Path) -> "Project":
         path = Path(path)
@@ -387,13 +399,23 @@ class Project:
     def save(self, snapshot: bool = True) -> None:
         assert self.path is not None
         self.path.mkdir(parents=True, exist_ok=True)
-        for sub in ("audio", "cache", "renders", "history"):
+        take = session_root(self.path) != self.path
+        for sub in ("renders", "history") if take else ("audio", "cache", "renders", "history"):
             (self.path / sub).mkdir(exist_ok=True)
         with project_lock(self.path):
             if snapshot and self.file.exists():
                 _push_history(self.path)
             self.rev = max(self.rev, read_rev(self.path)) + 1
             _atomic_write(self.file, json.dumps(self.to_json(), indent=1))
+
+
+def session_root(path: Path) -> Path:
+    """The session folder a project folder belongs to. A take (<session>/takes/<id>/, see takes.py) is a working
+    copy of a session's project.json: it reads the session's audio files and shares its render cache."""
+    path = Path(path)
+    if path.parent.name == "takes" and (path.parent.parent / "project.json").exists():
+        return path.parent.parent
+    return path
 
 
 def read_rev(path: Path) -> int:
@@ -462,6 +484,21 @@ def project_lock(path: Path, timeout: float = 60.0):
         tl.release()
 
 
+@contextmanager
+def file_lock(file: Path, timeout: float = 60.0):
+    """Cross-process lock on one file (created if missing). Not re-entrant."""
+    Path(file).parent.mkdir(parents=True, exist_ok=True)
+    fh = open(file, "a+b")  # noqa: SIM115 - held for the duration of the lock
+    try:
+        _os_lock(fh, timeout, file)
+        try:
+            yield
+        finally:
+            _os_unlock(fh)
+    finally:
+        fh.close()
+
+
 def _os_lock(fh, timeout: float, path) -> None:
     deadline = time.monotonic() + timeout
     while True:
@@ -476,7 +513,7 @@ def _os_lock(fh, timeout: float, path) -> None:
             return
         except OSError:
             if time.monotonic() > deadline:
-                raise LockTimeout(f"Project {path} is busy (another process holds its lock)") from None
+                raise LockTimeout(f"{path} is busy (another process holds its lock)") from None
             time.sleep(0.02)
 
 

@@ -7,6 +7,7 @@ Hardening against other web pages in the user's browser reaching this local serv
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import secrets
@@ -19,10 +20,11 @@ from pathlib import Path
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import api, config
+from . import api, config, studio, takes
+from .crew import detect, host
 
 PORT = 7373
 WEB = Path(__file__).parent / "web"
@@ -33,6 +35,31 @@ CALLABLE = {
     "project_set", "redo", "render", "sfz_list", "synths_list", "track_add", "track_duplicate", "track_move",
     "track_remove", "track_update", "undo",
 }
+
+
+def crew_detect(refresh: bool = False) -> dict:
+    """The agent CLIs on this computer and the models each offers (what can sit in a seat)."""
+    return detect.detect(refresh=bool(refresh))
+
+
+def studio_view() -> dict:
+    """The open session's board and crew state in one call (what the rack redraws from)."""
+    cur = _current()
+    if not cur:
+        return {"board": None, "crew": None}
+    return {"board": studio.board(str(cur)), "crew": host.crew_state(str(cur))}
+
+
+# The studio board, as the user (this server never speaks for a seat). Read-only calls and the user's own
+# decisions: assigning seats, handing out tasks, talkback, answering Needs You, accepting or returning takes,
+# and starting or stopping the crew.
+STUDIO = {f.__name__: f for f in (
+    studio.studio_status, studio.board, studio.seat_assign, studio.task_add, studio.task_update, studio.task_list,
+    studio.message_send, studio.inbox, studio.attention_list, studio.attention_resolve, studio.events,
+    takes.take_list, takes.take_diff, takes.take_accept, takes.take_reject, takes.take_discard,
+    takes.take_audition, host.crew_start, host.crew_stop, host.crew_state, host.seat_hold, crew_detect,
+    studio_view,
+)}
 TOKEN = secrets.token_urlsafe(32)
 _HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
@@ -113,7 +140,8 @@ async def state(_req: Request):
     last = cur / "renders" / "last.json"
     return JSONResponse({"project": str(cur), "version": v,
                          "doc": json.loads(text),
-                         "last_render": json.loads(last.read_text(encoding="utf-8")) if last.exists() else None})
+                         "last_render": json.loads(last.read_text(encoding="utf-8")) if last.exists() else None,
+                         "board": studio.board(str(cur)), "crew": host.crew_state(str(cur))})
 
 
 async def call(req: Request):
@@ -130,8 +158,9 @@ async def call(req: Request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
     fn = body.get("fn")
-    if fn not in CALLABLE:
+    if fn not in CALLABLE and fn not in STUDIO:
         return JSONResponse({"error": f"unknown function {fn!r}"}, status_code=400)
+    target = STUDIO.get(fn) or getattr(api, fn)
     args = body.get("args") or {}
     if not isinstance(args, dict):
         return JSONResponse({"error": "args must be an object"}, status_code=400)
@@ -140,7 +169,7 @@ async def call(req: Request):
     def run():
         tok = api.expected_rev.set(int(rev) if rev is not None else None)
         try:
-            return getattr(api, fn)(**args)
+            return target(**args)
         finally:
             api.expected_rev.reset(tok)
 
@@ -151,6 +180,47 @@ async def call(req: Request):
         return JSONResponse({"error": str(e), "conflict": True}, status_code=409)
     except Exception as e:  # noqa: BLE001 - surface the message in the UI
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=400)
+
+
+def _pulse(cur: Path | None, seq: int) -> tuple[dict, int]:
+    """What changed since the last look: the project file's version and any new board events."""
+    if not cur:
+        return {"project": None, "version": 0, "events": []}, 0
+    ev = studio.events(seq, 500, str(cur))
+    return {"project": str(cur), "version": _version(cur), "events": ev["events"]}, ev["last"]
+
+
+async def events(req: Request):
+    """Server-sent events: one message whenever the open project, its file, or its studio board changes, so the
+    editor follows agents live without polling. ?since=<event number> resumes the board's activity log."""
+    try:
+        seq = int(req.query_params.get("since", 0))
+    except ValueError:
+        seq = 0
+
+    async def stream():
+        nonlocal seq
+        last = None
+        idle = 0.0
+        while not await req.is_disconnected():
+            cur = await run_in_threadpool(_current)
+            try:
+                msg, seq = await run_in_threadpool(_pulse, cur, seq)
+            except OSError:  # the file is mid-write: look again in a moment
+                await asyncio.sleep(0.2)
+                continue
+            mark = (msg["project"], msg["version"])
+            if mark != last or msg["events"]:
+                last, idle = mark, 0.0
+                yield f"id: {seq}\ndata: {json.dumps(msg)}\n\n"
+            elif idle >= 15.0:  # keep proxies and the browser from dropping a quiet connection
+                idle = 0.0
+                yield ": keep-alive\n\n"
+            await asyncio.sleep(0.25)
+            idle += 0.25
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 async def audio(req: Request):
@@ -167,6 +237,7 @@ async def audio(req: Request):
 app = _HostGuard(Starlette(routes=[
     Route("/", index), Route("/web/{name}", static), Route("/api/ping", ping), Route("/api/version", version),
     Route("/api/state", state), Route("/api/call", call, methods=["POST"]), Route("/api/audio", audio),
+    Route("/api/events", events),
 ]))
 
 
@@ -200,7 +271,10 @@ def ensure_running() -> str:
 def main(port: int = PORT) -> None:
     import uvicorn
     config.ensure_dirs()
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    finally:
+        host.stop_all()  # agents the editor started don't outlive it
 
 
 if __name__ == "__main__":
