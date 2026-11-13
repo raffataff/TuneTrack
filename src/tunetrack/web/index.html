@@ -56,7 +56,7 @@
     </section>
     <section id="monitor" class="bay">
       <h2>MONITOR · TALKBACK
-        <span class="h2tools"><button id="tbFilter" class="mini toggle" title="Show only what was said (hide activity)">TALK ONLY</button></span></h2>
+        <span class="h2tools"><button id="repBtn" class="mini" title="Reports the crew has filed, and the scorecard of how each agent did">REPORTS</button> <button id="tbFilter" class="mini toggle" title="Show only what was said (hide activity)">TALK ONLY</button></span></h2>
       <div id="tbLog" class="bayBody"></div>
       <div id="tbTargets" title="Who hears you"></div>
       <form id="tbForm" autocomplete="off">
@@ -68,6 +68,19 @@
 </main>
 
 <div id="desk">
+  <div id="takeBar" class="hidden" title="What the desk is editing: the session itself, or a take of it">
+    <span class="legend">EDITING</span>
+    <i id="takeLamp" class="lamp green"></i>
+    <select id="takeSel" title="Switch between the session and its takes"></select>
+    <span id="takeRead" class="vfd small"></span>
+    <span id="takeTags"></span>
+    <span class="spacer"></span>
+    <button id="takeNew" class="key" title="Work in a private copy of the session and hand it in when it is ready">CUT A TAKE…</button>
+    <button id="takeChanges" class="key hidden" title="What this take changes compared with the session it was cut from">CHANGES</button>
+    <button id="takeSync" class="key hidden" title="Bring what the session has accepted since this take was cut into the take">SYNC</button>
+    <button id="takeSubmit" class="key go hidden" title="Hand the take in to be auditioned and accepted">HAND IN…</button>
+    <button id="takeLeave" class="key hidden" title="Leave the take as it is and show the session">BACK TO SESSION</button>
+  </div>
   <main id="arr">
     <div id="headers">
       <div id="rulerCorner">
@@ -75,10 +88,15 @@
         <button id="addAudio" class="ghost small" title="Add audio track">+ Audio</button>
         <button id="addBus" class="ghost small" title="Add bus (shared FX)">+ Bus</button>
       </div>
+      <div id="chordCorner" title="The chord track: the harmony every part is checked against. Double-click a bar to write its chord.">
+        <span class="legend">CHORDS</span>
+        <button id="chordSet" class="ghost small" title="Write a progression over a section, the loop, or from the playhead">Write…</button>
+      </div>
       <div id="trackHeaders"></div>
     </div>
     <div id="timeline">
       <canvas id="ruler"></canvas>
+      <div id="chordLane"><canvas id="chords"></canvas><input id="chordEdit" class="hidden" spellcheck="false" autocomplete="off" aria-label="Chord"></div>
       <div id="lanesWrap"><canvas id="lanes"></canvas></div>
     </div>
   </main>

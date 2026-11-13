@@ -23,7 +23,12 @@ SCHEMA = 1
 TASK_STATES = ("queued", "working", "submitted", "needs_you", "done", "failed", "cancelled")
 OPEN = {"queued", "working", "submitted", "needs_you"}
 ATTENTION_KINDS = ("decision", "input", "blocker")
+REPORT_KINDS = ("report", "review", "note", "scorecard")
+# How much of a message, result or summary an event carries. The monitor draws from events, so anything shorter
+# than what people write cuts their text off on screen (240 did: a Producer's end-of-session review was unreadable).
+EVENT_TEXT = 20000
 MODES = ("propose", "direct")  # propose: work in a take and submit it; direct: edit the session itself
+ASKS_PER_TASK = 2  # questions a seat may put to the user on one task (blockers are not counted)
 
 # Which seat this process speaks for. A launched agent gets it from its environment; an outside app can take a
 # seat with seat_join(); anything else acts for the user.
@@ -52,8 +57,9 @@ def session_path(session: str | None = None) -> Path:
 
 
 def _fresh() -> dict:
-    return {"studio": SCHEMA, "rev": 0, "seq": 0, "next": {"T": 1, "M": 1, "N": 1, "tk": 1},
-            "seats": {}, "tasks": [], "messages": [], "attention": []}
+    return {"studio": SCHEMA, "rev": 0, "seq": 0, "next": {"T": 1, "M": 1, "N": 1, "tk": 1, "R": 1},
+            "seats": {}, "tasks": [], "messages": [], "attention": [], "reports": [],
+            "routed": {}}  # take id -> the hand-in (its "submitted" time) someone has been asked to audition
 
 
 def _seat_default(seat: str = "") -> dict:
@@ -139,6 +145,27 @@ class _Board:
                 return a
         raise KeyError(f"No Needs You item {ref!r}")
 
+    def release(self, a: dict, cancel: bool = False, not_before: float | None = None) -> list[str]:
+        """A Needs You item was answered: the tasks that waited on it go back in the queue (or, with cancel, the
+        item's own task is cancelled). not_before: do not start them until then."""
+        out, now = [], round(time.time(), 3)
+        for tid in dict.fromkeys(([a["task"]] if a.get("task") else []) + list(a.get("blocks") or [])):
+            t = self.task(tid)
+            still = any(x["state"] == "open" and (x.get("task") == tid or tid in (x.get("blocks") or []))
+                        for x in self.st["attention"])
+            if t["state"] != "needs_you" or still:
+                continue
+            t["state"], t["updated"] = ("cancelled" if cancel and tid == a.get("task") else "queued"), now
+            t["attempts"] = 0  # waiting for an answer is not a failed try (seen live: three asks became "tried 3 times")
+            if not_before and t["state"] == "queued":
+                t["not_before"] = not_before
+            else:
+                t.pop("not_before", None)
+            out.append(tid)
+            self.emit("task", id=tid, seat=t["seat"], state=t["state"], title=t["title"], by=roles.YOU,
+                      reason=time.strftime("starts again at %H:%M", time.localtime(not_before)) if not_before and t["state"] == "queued" else None)
+        return out
+
     def close_auditions(self, take: str, outcome: str) -> None:
         """The take was accepted, returned or discarded: any request to audition it is answered."""
         for a in self.st["attention"]:
@@ -151,7 +178,7 @@ class _Board:
         m = {"id": self.new_id("M"), "from": sender, "to": to, "text": text, "task": task,
              "at": round(time.time(), 3), "read": []}
         self.st["messages"].append(m)
-        self.emit("message", id=m["id"], sender=sender, to=to, task=task, text=text[:240])
+        self.emit("message", id=m["id"], sender=sender, to=to, task=task, text=text[:EVENT_TEXT])
         return m
 
 
@@ -254,9 +281,41 @@ def seat_presence(seat: str, state: str | None, session: str | None = None, **in
 
 # ---- tasks ---------------------------------------------------------------------------------------------------------
 
+def auditioner(st: dict, take: str) -> str | None:
+    """Who has been asked to audition a handed-in take: "the Producer" (an open audition task), "you" (an open
+    Needs You item), or None when nobody has."""
+    if any(a["state"] == "open" and a.get("take") == take for a in st["attention"]):
+        return roles.YOU
+    if any(t["state"] in OPEN and (t.get("audition") == take or t["title"].startswith(f"Audition take {take}:"))
+           for t in st["tasks"]):
+        return "the Producer"
+    return None
+
+
+def _take_in_the_way(b: "_Board", t: dict) -> tuple[str, str] | None:
+    """A seat is closing its own task: (take id, its state) when that task's take still holds work that is not in
+    the session (handed in, or open with changes)."""
+    if not t.get("take"):
+        return None
+    d = b.path / "takes" / t["take"]
+    try:
+        meta = json.loads((d / "take.json").read_text(encoding="utf-8"))
+        if meta.get("state") == "submitted":
+            return meta["id"], "submitted"
+        if meta.get("state") != "open":
+            return None
+        from . import takes
+        changed = takes.changes(json.loads((d / "base.json").read_text(encoding="utf-8")),
+                                json.loads((d / "project.json").read_text(encoding="utf-8")))
+        return (meta["id"], "open") if changed else None
+    except (OSError, ValueError):
+        return None
+
+
 def _ready(st: dict, t: dict) -> bool:
     done = {x["id"] for x in st["tasks"] if x["state"] == "done"}
-    return t["state"] == "queued" and all(d in done for d in t.get("depends", []))
+    return (t["state"] == "queued" and all(d in done for d in t.get("depends", []))
+            and float(t.get("not_before") or 0) <= time.time())  # "try again in 15 minutes"
 
 
 def _task_view(st: dict, t: dict, detail: bool = False) -> dict:
@@ -266,6 +325,8 @@ def _task_view(st: dict, t: dict, detail: bool = False) -> dict:
         d["ready"] = not waiting
         if waiting:
             d["waiting_for"] = waiting
+        if float(t.get("not_before") or 0) > time.time():
+            d["ready"], d["not_before"] = False, t["not_before"]
     for k in ("scope", "take", "result"):
         if t.get(k):
             d[k] = t[k]
@@ -310,6 +371,17 @@ def task_update(task: str, state: str | None = None, result: str | None = None, 
         if state is not None:
             if state not in TASK_STATES:
                 raise ValueError(f"state must be one of {TASK_STATES}")
+            if state == "done" and who == t["seat"] and not _lead(who):
+                # The seat's work is in a take, and a take is not in the session until it is accepted. A task
+                # closed here would never reach anyone's ears (seen live: an export went out without the part).
+                held = _take_in_the_way(b, t)
+                if held and held[1] == "submitted":
+                    return {**_task_view(b.st, t), "note": f"{held[0]} is handed in, and this task is finished when "
+                            "it is accepted - that is not yours to set. Nothing more to do: end your turn."}
+                if held:
+                    raise ValueError(f"Your take {held[0]} holds changes that are not in the session yet. Hand it in "
+                                     f"with take_submit(summary): the task is finished when the take is accepted. "
+                                     f"If the task needed no change after all, undo() the changes first.")
             if state == "working" and t["state"] != "working":
                 t["attempts"] = t.get("attempts", 0) + 1
             t["state"] = state
@@ -320,7 +392,7 @@ def task_update(task: str, state: str | None = None, result: str | None = None, 
             t["depends"] = [b.task(d)["id"] for d in depends if b.task(d)["id"] != t["id"]]
         t["updated"] = round(time.time(), 3)
         b.emit("task", id=t["id"], seat=t["seat"], state=t["state"], title=t["title"], by=who,
-               result=(t["result"] or "")[:240] or None, take=t.get("take"))
+               result=(t["result"] or "")[:EVENT_TEXT] or None, take=t.get("take"))
         out = _task_view(b.st, t)
         if t["state"] == "done":
             freed = [x["id"] for x in b.st["tasks"] if t["id"] in x.get("depends", []) and _ready(b.st, x)]
@@ -391,6 +463,13 @@ def inbox(seat: str | None = None, mark_read: bool = True, session: str | None =
 
 # ---- Needs You -----------------------------------------------------------------------------------------------------
 
+def _answer_text(a: dict) -> str:
+    """What the user answered to a Needs You item, in words: the option they chose and anything they wrote."""
+    ans = a.get("answer") or {}
+    label = next((o["label"] for o in a.get("options") or [] if o["id"] == ans.get("option")), "")
+    return "; ".join(s for s in (label, ans.get("text")) if s) or "answered"
+
+
 def ask_human(title: str, detail: str = "", kind: str = "decision", options: list | None = None,
               task: str | None = None, blocks: list | None = None, session: str | None = None) -> dict:
     """Put something on the user's Needs You list and keep working on whatever doesn't depend on it.
@@ -413,6 +492,17 @@ def ask_human(title: str, detail: str = "", kind: str = "decision", options: lis
     with _Board(session) as b:
         tid = b.task(task)["id"] if task else None
         blocked = [b.task(x)["id"] for x in blocks or []]
+        if tid and kind != "blocker" and me() != roles.YOU:
+            # Every answer starts the seat again (one agent run), and a seat that asks, is answered and asks again
+            # re-checks the same work each time (seen live: three rounds on one accepted take).
+            had = [x for x in b.st["attention"] if x["from"] == me() and x.get("task") == tid
+                   and x["kind"] != "blocker" and x["state"] == "resolved"]
+            if len(had) >= ASKS_PER_TASK:
+                said = "; ".join(f"{x['id']} \"{x['title']}\": {_answer_text(x)}" for x in had[-ASKS_PER_TASK:])
+                raise ValueError(f"You have asked the user {len(had)} times on {tid} and were answered each time "
+                                 f"({said}). Take those answers as settled and finish the task with what you have; "
+                                 f"put what is still open in its result. Only kind=\"blocker\" (something you "
+                                 f"cannot get past) goes on Needs You for this task now.")
         a = {"id": b.new_id("N"), "kind": kind, "from": me(), "task": tid, "title": str(title).strip(),
              "detail": detail or "", "options": opts, "blocks": blocked, "state": "open", "answer": None,
              "created": round(time.time(), 3), "resolved": None}
@@ -425,6 +515,68 @@ def ask_human(title: str, detail: str = "", kind: str = "decision", options: lis
         b.emit("attention", id=a["id"], state="open", what=kind, sender=me(), title=a["title"], task=tid)
     return {"needs_you": a["id"], "options": [o["id"] for o in opts],
             "note": "The answer arrives in your inbox. Carry on with anything that doesn't depend on it."}
+
+
+# ---- reports -------------------------------------------------------------------------------------------------------
+# Anything longer than talkback: a session review, a mix report, notes on what a seat found. Kept as markdown
+# files in <session>/studio/reports/ with an index on the board, and read in the studio's REPORTS.
+
+def report_write(title: str, body: str, kind: str = "report", report: str | None = None,
+                 session: str | None = None, by: str | None = None) -> dict:
+    """File a document for the user to read in the studio's REPORTS: a review, a report, notes too long for
+    talkback. body: markdown. kind: "report", "review" or "note". report: the id of one to replace (yours, or any
+    for the Producer and the user); omit it to file a new one."""
+    if kind not in REPORT_KINDS:
+        raise ValueError(f"kind must be one of {REPORT_KINDS}")
+    if not str(title).strip() or not str(body).strip():
+        raise ValueError("A report needs a title and a body")
+    who = by or me()
+    with _Board(session) as b:
+        now = round(time.time(), 3)
+        r = None
+        if report:
+            r = next((x for x in b.st["reports"] if x["id"].lower() == str(report).strip().lower()), None)
+            if not r:
+                raise KeyError(f"No report {report!r}")
+            if who != r["by"] and not _lead(who) and who != "floor":
+                raise PermissionError(f"{r['id']} was filed by {r['by']}")
+        if not r:
+            r = {"id": b.new_id("R"), "by": who, "created": now}
+            b.st["reports"].append(r)
+        r.update(title=str(title).strip(), kind=kind, updated=now, chars=len(str(body)))
+        d = b.path / "studio" / "reports"
+        d.mkdir(parents=True, exist_ok=True)
+        _atomic_write(d / f"{r['id']}.md", str(body))
+        b.emit("report", id=r["id"], title=r["title"], what=kind, sender=who)
+    return {"report": r["id"], "title": r["title"], "note": "Filed. The user reads it under REPORTS in the studio."}
+
+
+def report_list(session: str | None = None) -> dict:
+    """The reports filed in this session, oldest first."""
+    return {"reports": list(read(session)["reports"])}
+
+
+def report_read(report: str, session: str | None = None) -> dict:
+    """One report in full."""
+    r = next((x for x in read(session)["reports"] if x["id"].lower() == str(report).strip().lower()), None)
+    if not r:
+        raise KeyError(f"No report {report!r}")
+    f = session_path(session) / "studio" / "reports" / f"{r['id']}.md"
+    return {**r, "body": f.read_text(encoding="utf-8") if f.exists() else ""}
+
+
+def attention_close(item: str, text: str, session: str | None = None) -> dict:
+    """The floor manager closes one of its own items because the situation it described is over (every seat that
+    was out of usage now has another model). The tasks that waited on it go back in the queue."""
+    with _Board(session) as b:
+        a = b.item(item)
+        if a["state"] != "open":
+            return {"resolved": a["id"], "requeued": []}
+        a["state"], a["resolved"] = "resolved", round(time.time(), 3)
+        a["answer"] = {"option": None, "text": str(text)}
+        requeued = b.release(a)
+        b.emit("attention", id=a["id"], state="resolved", title=a["title"], answer=str(text))
+    return {"resolved": a["id"], "requeued": requeued}
 
 
 def attention_list(state: str = "open", session: str | None = None) -> dict:
@@ -475,18 +627,13 @@ def attention_resolve(item: str, option: str | None = None, text: str = "", sess
         a["answer"] = {"option": chosen["id"] if chosen else None, "text": str(text).strip()}
         said = "; ".join(x for x in ((f"chose {chosen['label']}" + (f" (take {chosen['take']})" if chosen.get("take") else ""))
                                      if chosen else "", str(text).strip()) if x)
-        requeued = []
-        for tid in dict.fromkeys(([a["task"]] if a["task"] else []) + a["blocks"]):
-            t = b.task(tid)
-            still = any(x["state"] == "open" and (x["task"] == tid or tid in x["blocks"]) for x in b.st["attention"])
-            if t["state"] == "needs_you" and not still:
-                t["state"], t["updated"] = "queued", a["resolved"]
-                requeued.append(tid)
-                b.emit("task", id=tid, seat=t["seat"], state="queued", title=t["title"], by=roles.YOU)
+        do = (chosen or {}).get("do")  # what the floor manager's own options mean (an agent's options carry none)
+        requeued = b.release(a, cancel=do == "cancel",
+                             not_before=round(time.time() + 60 * float(chosen.get("minutes") or 15), 3) if do == "wait" else None)
         if a["from"] != roles.YOU and not carried:  # a returned take already carries its reason to the seat
             b.message(roles.YOU, a["from"], f"Answer to {a['id']} \"{a['title']}\": {said}", a["task"])
         if not closed:
-            b.emit("attention", id=a["id"], state="resolved", title=a["title"], answer=said[:240])
+            b.emit("attention", id=a["id"], state="resolved", title=a["title"], answer=said[:EVENT_TEXT])
     return {"resolved": a["id"], "answer": a["answer"], "requeued": requeued}
 
 
@@ -561,6 +708,7 @@ def board(session: str | None = None, finished: int = 12, messages: int = 80) ->
             "tasks": [_task_view(st, t, detail=True) for t in st["tasks"] if t["state"] in OPEN]
                      + [_task_view(st, t, detail=True) for t in closed[-int(finished):]],
             "needs_you": [a for a in st["attention"] if a["state"] == "open"],
+            "reports": st["reports"],
             "takes": [t for t in take_index(path) if t.get("state") in ("open", "submitted")],
             "messages": [{k: m.get(k) for k in ("id", "from", "to", "text", "task", "at")}
                          for m in st["messages"][-int(messages):]]}

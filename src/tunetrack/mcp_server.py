@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import functools
+import os
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -73,13 +74,20 @@ part of it is not.
 """
 
 
+def _launched() -> bool:
+    """True in a crew agent the floor manager started (it sets TUNETRACK_SEAT). Such an agent has the studio's
+    tools and nothing else: it cannot open a file. An outside app that took a seat with seat_join() can."""
+    return bool(os.environ.get("TUNETRACK_SEAT"))
+
+
 def _instructions() -> str:
     seat = studio.me()
     if seat not in roles.ROLES:
         return INSTRUCTIONS
     r = roles.ROLES[seat]
+    rest = INSTRUCTIONS.replace(" + piano_roll_png - view it", "") if _launched() else INSTRUCTIONS
     return SEATED.format(title=r.title, room=r.room.lower(), purpose=r.purpose,
-                         owns=", ".join(sorted(r.owns)) or "you change nothing: you listen and report") + INSTRUCTIONS
+                         owns=", ".join(sorted(r.owns)) or "you change nothing: you listen and report") + rest
 
 
 mcp = MCPServer("tunetrack", instructions=_instructions(), version="0.1.0")
@@ -516,9 +524,11 @@ def score(start: Any = None, end: Any = None, section: str | None = None, tracks
 
 @tool
 def analyze(images: bool = True, start: Any = None, end: Any = None, project: str | None = None) -> dict:
-    """Note checks (out-of-key, out-of-range, overlaps, low-register mud), harmony_warnings (as in score()) +
-    piano-roll PNG and spectrogram PNG of the last render. Read the PNG files to see the arrangement."""
-    return api.analyze(project, images, start, end)
+    """Note checks (out-of-key, out-of-range, overlaps, low-register mud) and harmony_warnings (as in score()).
+    images=True also writes a piano-roll PNG and a spectrogram PNG of the last render and returns their paths:
+    open them to see the arrangement. A crew agent launched by the studio cannot open files, so it gets the checks
+    only - score() is its view of the notes and listen() of the sound."""
+    return api.analyze(project, images and not _launched(), start, end)
 
 
 @tool
@@ -616,13 +626,36 @@ def message_send(to: str, text: str, task: str | None = None, session: str | Non
 
 
 @tool
+def report_write(title: str, body: str, kind: str = "report", report: str | None = None,
+                 session: str | None = None) -> dict:
+    """File a document for the user to read in the studio's REPORTS: a session review, a mix or listening report,
+    findings too long for talkback (which is for short messages). body: markdown, complete in itself. kind:
+    "report", "review" or "note". report: the id of an earlier one to replace instead of filing a new one."""
+    return studio.report_write(title, body, kind, report, session)
+
+
+@tool
+def report_list(session: str | None = None) -> dict:
+    """The reports filed in this session (id, title, kind, who filed it)."""
+    return studio.report_list(session)
+
+
+@tool
+def report_read(report: str, session: str | None = None) -> dict:
+    """One report in full, by id."""
+    return studio.report_read(report, session)
+
+
+@tool
 def ask_human(title: str, detail: str = "", kind: str = "decision", options: list[Any] | None = None,
               task: str | None = None, blocks: list[str] | None = None, session: str | None = None) -> dict:
     """Put something on the user's Needs You list. kind: "decision" (choose between options), "input" (they must
     provide or pick something), "blocker" (you cannot continue). options: labels, or {"label", "take": "<take
     id>", "audio": "<file>", "detail"} so each can be auditioned. task: the task it is about (it waits);
     blocks: other tasks that must wait too. The answer arrives in inbox(). Keep working on what doesn't depend on
-    it. For real choices and blockers only - not progress reports."""
+    it. For real choices and blockers only - not progress reports, and not "please listen for me": listen() and
+    render() are how you hear. When taste has to decide between versions, pass their takes as options so the user
+    gets a play key for each."""
     return studio.ask_human(title, detail, kind, options, task, blocks, session)
 
 
@@ -682,6 +715,14 @@ def take_reject(take: str, reason: str, session: str | None = None) -> dict:
     """Send a take back to its seat. reason: what has to change, specific enough to act on - bars, tracks, what
     you heard. Its task goes back in the queue and the take stays open for the seat to continue."""
     return takes.take_reject(take, reason, session)
+
+
+@tool
+def take_discard(take: str, session: str | None = None) -> dict:
+    """Close a take without merging it: its work is left out of the session for good (the files stay on disk).
+    For a take that is not wanted - superseded, cut by mistake, or left over when its task was closed. A take
+    that needs changes is returned with take_reject instead."""
+    return takes.take_discard(take, session)
 
 
 def apply_seat() -> list[str]:

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import inspect
 import json
+import re
 import secrets
 import subprocess
 import sys
@@ -23,14 +25,14 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import api, config, studio, takes
-from .crew import detect, host
+from . import api, bench, config, studio, takes
+from .crew import detect, host, scorecard
 
 PORT = 7373
 WEB = Path(__file__).parent / "web"
 # Only what the editor UI uses. Imports, patch deletion, opening files/apps etc. stay agent/CLI-only.
 CALLABLE = {
-    "audition", "clip_create", "clip_edit", "clip_set", "fx_add", "fx_remove", "fx_update", "library_status",
+    "audition", "clip_create", "clip_edit", "clip_set", "fx_add", "fx_remove", "fx_update", "harmony", "library_status",
     "markers", "patch_capture", "plugin_params", "preview", "project_list", "project_new", "project_open",
     "project_set", "redo", "render", "sfz_list", "synths_list", "track_add", "track_duplicate", "track_move",
     "track_remove", "track_update", "undo",
@@ -50,15 +52,39 @@ def studio_view() -> dict:
     return {"board": studio.board(str(cur)), "crew": host.crew_state(str(cur))}
 
 
+def take_cut(seat: str | None = None, task: str | None = None, name: str | None = None) -> dict:
+    """Cut a take for the user to work in on the Desk, or pick up the open take a task already has (one that came
+    back, or one cut earlier). seat: the seat the take is for (default: the task's seat, else the user with no
+    seat). A queued task is marked working, as it is when an agent starts on it."""
+    cur = _current()
+    if not cur:
+        raise RuntimeError("No project open")
+    session = str(cur)
+    t = None
+    if task:
+        ref = str(task).strip().lower()
+        t = next((x for x in studio.read(session)["tasks"] if x["id"].lower() == ref), None)
+        if not t:
+            raise KeyError(f"No task {task!r}")
+        seat = seat or t["seat"]
+    have = t and next((k for k in studio.take_index(cur) if k["id"] == t.get("take") and k.get("state") == "open"), None)
+    tid = have["id"] if have else takes.take_new(name or None, t["id"] if t else None, seat or None, use=False,
+                                                 session=session)["take"]
+    if t and t["state"] == "queued":
+        studio.task_update(t["id"], state="working", session=session)
+    return {"take": tid, "continued": bool(have)}
+
+
 # The studio board, as the user (this server never speaks for a seat). Read-only calls and the user's own
 # decisions: assigning seats, handing out tasks, talkback, answering Needs You, accepting or returning takes,
-# and starting or stopping the crew.
+# cutting and handing in a take of their own, and starting or stopping the crew.
 STUDIO = {f.__name__: f for f in (
     studio.studio_status, studio.board, studio.seat_assign, studio.task_add, studio.task_update, studio.task_list,
     studio.message_send, studio.inbox, studio.attention_list, studio.attention_resolve, studio.events,
     takes.take_list, takes.take_diff, takes.take_accept, takes.take_reject, takes.take_discard,
-    takes.take_audition, host.crew_start, host.crew_stop, host.crew_state, host.seat_hold, crew_detect,
-    studio_view,
+    takes.take_audition, takes.take_submit, takes.take_sync, take_cut, host.crew_start, host.crew_stop, host.crew_state, host.seat_hold, crew_detect,
+    studio_view, bench.seat_bench, studio.report_list, studio.report_read,
+    scorecard.crew_scorecard, scorecard.crew_review, scorecard.crew_history,
 )}
 TOKEN = secrets.token_urlsafe(32)
 _HOSTS = {"127.0.0.1", "localhost", "[::1]"}
@@ -126,22 +152,64 @@ def _version(cur: Path) -> str:
     return f"{st.st_mtime_ns}:{st.st_size}"
 
 
-async def version(_req: Request):
+_TAKE_ID = re.compile(r"tk\d+")
+
+
+def _take_dir(cur: Path, take) -> Path:
+    """The folder of one of the open session's takes. The Desk names a take by id only ("tk3"), never by path."""
+    tid = str(take or "").strip().lower()
+    d = cur / "takes" / tid
+    if not _TAKE_ID.fullmatch(tid) or not (d / "take.json").is_file() or not (d / "project.json").is_file():
+        raise KeyError(f"No take {take!r} in this session")
+    return d
+
+
+def _view(cur: Path, take) -> tuple[Path, str]:
+    """What the Desk is showing - the session, or one of its takes - and a version that changes when it does."""
+    if not take:
+        return cur, _version(cur)
+    d = _take_dir(cur, take)
+    return d, f"{d.name}@{_version(d)}"
+
+
+async def version(req: Request):
     cur = _current()
-    return JSONResponse({"project": str(cur) if cur else None, "version": _version(cur) if cur else 0})
+    if not cur:
+        return JSONResponse({"project": None, "version": 0, "session_version": 0})
+    try:
+        v = _view(cur, req.query_params.get("take"))[1]
+    except (KeyError, OSError):
+        v = None  # the take is gone: the Desk's next state load puts it back on the session
+    return JSONResponse({"project": str(cur), "version": v, "session_version": _version(cur)})
 
 
-async def state(_req: Request):
+def _take_view(cur: Path, d: Path) -> dict:
+    """What the Desk's take bar shows about the take it has open."""
+    meta = takes._meta(d)
+    doc, base = takes._read_json(d / "project.json"), takes._read_json(d / "base.json")
+    return {**{k: meta.get(k) for k in ("id", "name", "seat", "task", "state", "summary", "returns", "reason", "base_rev")},
+            "changes": len(takes.changes(base, doc)),
+            "session_moved": takes._read_json(cur / "project.json").get("rev") != meta.get("base_rev")}
+
+
+async def state(req: Request):
     cur = _current()
     if not cur:
         return JSONResponse({"project": None, "recent": api._state().get("recent", [])})
-    v = _version(cur)
-    text = (cur / "project.json").read_text(encoding="utf-8")
-    last = cur / "renders" / "last.json"
-    return JSONResponse({"project": str(cur), "version": v,
-                         "doc": json.loads(text),
-                         "last_render": json.loads(last.read_text(encoding="utf-8")) if last.exists() else None,
-                         "board": studio.board(str(cur)), "crew": host.crew_state(str(cur))})
+    out = {"project": str(cur), "session_version": _version(cur), "take": None}
+    d, v = cur, out["session_version"]
+    want = req.query_params.get("take")
+    if want:
+        try:
+            d, v = _view(cur, want)
+            out["take"] = _take_view(cur, d)
+        except (KeyError, OSError, ValueError) as e:  # not a take of this session: show the session and say so
+            d, v, out["take_error"] = cur, out["session_version"], str(e.args[0] if e.args else e)
+    last = d / "renders" / "last.json"
+    out.update(version=v, doc=json.loads((d / "project.json").read_text(encoding="utf-8")),
+               last_render=json.loads(last.read_text(encoding="utf-8")) if last.exists() else None,
+               board=studio.board(str(cur)), crew=host.crew_state(str(cur)))
+    return JSONResponse(out)
 
 
 async def call(req: Request):
@@ -165,6 +233,17 @@ async def call(req: Request):
     if not isinstance(args, dict):
         return JSONResponse({"error": "args must be an object"}, status_code=400)
     rev = body.get("rev")
+    if body.get("take") and fn in CALLABLE:
+        # The Desk has a take open: its edits, undo, playback and export go to that take, not to the session.
+        cur = _current()
+        if not cur or (body.get("session") and Path(str(body["session"])).resolve() != cur.resolve()):
+            return JSONResponse({"error": "The open project changed; reloading", "conflict": True}, status_code=409)
+        try:
+            d = _take_dir(cur, body["take"])
+        except KeyError as e:
+            return JSONResponse({"error": str(e.args[0]), "conflict": True}, status_code=409)
+        if "project" in inspect.signature(target).parameters:
+            args = {**args, "project": str(d)}
 
     def run():
         tok = api.expected_rev.set(int(rev) if rev is not None else None)
@@ -182,21 +261,30 @@ async def call(req: Request):
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=400)
 
 
-def _pulse(cur: Path | None, seq: int) -> tuple[dict, int]:
-    """What changed since the last look: the project file's version and any new board events."""
+def _pulse(cur: Path | None, seq: int, take: str | None = None) -> tuple[dict, int]:
+    """What changed since the last look: the project file's version, any new board events, and the version of
+    the take the Desk has open (None once that take is gone)."""
     if not cur:
         return {"project": None, "version": 0, "events": []}, 0
     ev = studio.events(seq, 500, str(cur))
-    return {"project": str(cur), "version": _version(cur), "events": ev["events"]}, ev["last"]
+    msg = {"project": str(cur), "version": _version(cur), "events": ev["events"]}
+    if take:
+        try:
+            msg["take"] = {"id": take, "version": _view(cur, take)[1]}
+        except KeyError:
+            msg["take"] = {"id": take, "version": None}
+    return msg, ev["last"]
 
 
 async def events(req: Request):
     """Server-sent events: one message whenever the open project, its file, or its studio board changes, so the
-    editor follows agents live without polling. ?since=<event number> resumes the board's activity log."""
+    editor follows agents live without polling. ?since=<event number> resumes the board's activity log;
+    ?take=<id> also follows the take the Desk has open."""
     try:
         seq = int(req.query_params.get("since", 0))
     except ValueError:
         seq = 0
+    take = (req.query_params.get("take") or "").strip().lower() or None
 
     async def stream():
         nonlocal seq
@@ -205,11 +293,11 @@ async def events(req: Request):
         while not await req.is_disconnected():
             cur = await run_in_threadpool(_current)
             try:
-                msg, seq = await run_in_threadpool(_pulse, cur, seq)
+                msg, seq = await run_in_threadpool(_pulse, cur, seq, take)
             except OSError:  # the file is mid-write: look again in a moment
                 await asyncio.sleep(0.2)
                 continue
-            mark = (msg["project"], msg["version"])
+            mark = (msg["project"], msg["version"], (msg.get("take") or {}).get("version"))
             if mark != last or msg["events"]:
                 last, idle = mark, 0.0
                 yield f"id: {seq}\ndata: {json.dumps(msg)}\n\n"

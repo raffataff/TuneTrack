@@ -292,6 +292,8 @@ def test_returning_a_take_requeues_its_task(song):
     studio.seat_join("composer")
     assert "keep the D-F-A rise" in studio.inbox()["messages"][0]["text"]
     assert takes.take_list()["takes"][0]["state"] == "open"  # still there to continue
+    # and the reason stays on the take, where the board (and so a person's task card and the Desk) reads it
+    assert studio.board()["takes"][0]["reason"] == "Bar 1 loses the motif: keep the D-F-A rise"
 
 
 def test_an_empty_take_cannot_be_submitted(song):
@@ -382,6 +384,18 @@ def test_a_seated_mcp_server_offers_only_its_seats_tools(song):
     studio.seat_join(None)
     assert mcp_server.apply_seat() == []  # the user's own assistant keeps everything
     assert "You are the Review" not in mcp_server.INSTRUCTIONS and "seat_join" in mcp_server.INSTRUCTIONS
+
+
+def test_a_launched_agent_is_not_sent_pictures_it_cannot_open(song, monkeypatch):
+    from tunetrack import mcp_server
+    assert "piano_roll_png" in mcp_server.analyze()  # the user's own assistant can open the file
+    studio.seat_join("composer")
+    assert "piano_roll_png" in mcp_server.analyze()  # so can an outside app that took a seat
+    assert "piano_roll_png" in mcp_server._instructions()
+    monkeypatch.setenv("TUNETRACK_SEAT", "composer")  # what the floor manager sets for the agents it starts
+    rep = mcp_server.analyze()
+    assert "piano_roll_png" not in rep and "spectrogram_png" not in rep and "out_of_key" in json.dumps(rep)
+    assert "piano_roll_png" not in mcp_server._instructions() and "You are the Composer" in mcp_server._instructions()
 
 
 def test_the_editor_feed_reports_file_changes_and_new_activity(song):

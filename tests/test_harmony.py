@@ -354,7 +354,7 @@ def test_infer_splits_a_bar_with_two_chords():
 def test_mcp_tools_end_to_end(song):
     from tunetrack import mcp_server
     names = {t.name for t in asyncio.run(mcp_server.mcp.list_tools())}
-    assert {"harmony", "score"} <= names and len(names) == 66
+    assert {"harmony", "score"} <= names and len(names) == 70
 
     def call(name, args):
         r = asyncio.run(mcp_server.mcp.call_tool(name, args))

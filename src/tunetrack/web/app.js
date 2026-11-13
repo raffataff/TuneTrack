@@ -8,6 +8,7 @@ const PALETTE = ["#5e9cec", "#ec785e", "#78c878", "#d296e6", "#f0c850", "#5ac8c8
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const S = {
   doc: null, version: 0, path: null, lastRender: null, library: null, catalog: null, sfz: null,
+  take: null, takeMeta: null, sessionVersion: 0,  // the take the desk has open (null: the session itself)
   sel: { track: null, clip: null, notes: new Set() },
   zoom: 22, rollZoom: 64, rowH: 12, snap: 1, playhead: 0, loopOn: false, lastLen: 1,
   pendingSave: null, busy: false, tab: "roll",
@@ -16,15 +17,18 @@ const S = {
 
 // ---------------------------------------------------------------- api
 const TOKEN = document.querySelector('meta[name="tt-token"]')?.content || "";
+// With a take open on the desk, the server points the desk's own calls (edits, undo, playback, export) at that
+// take. Board calls ignore it.
 async function api(fn, args = {}) {
-  const r = await fetch("/api/call", { method: "POST", headers: { "Content-Type": "application/json", "X-TuneTrack-Token": TOKEN }, body: JSON.stringify({ fn, args }) });
+  const body = S.take ? { fn, args, take: S.take, session: S.path } : { fn, args };
+  const r = await fetch("/api/call", { method: "POST", headers: { "Content-Type": "application/json", "X-TuneTrack-Token": TOKEN }, body: JSON.stringify(body) });
   const j = await r.json();
   if (j.error) { const e = new Error(j.error); e.conflict = !!j.conflict; throw e; }
   return j.result;
 }
 async function act(fn, args, msg) {
   try { status(msg || "", "busy"); const r = await api(fn, args); status(""); await loadState(); return r; }
-  catch (e) { toast(e.message); status("error", "err"); throw e; }
+  catch (e) { toast(e.message); status("error", "err"); if (e.conflict) loadState().catch(() => {}); throw e; }
 }
 function status(text, cls = "") { const el = $("#status"); el.textContent = text; el.className = "status " + cls; }
 let toastTimer;
@@ -56,10 +60,21 @@ const songEnd = () => {
 const findClip = (id) => { for (const t of S.doc.tracks) for (const c of t.clips) if (c.id === id) return [t, c]; return [null, null]; };
 
 // ---------------------------------------------------------------- load / poll
+const TAKE_LIVE = ["open", "submitted"];
 async function loadState() {
-  const st = await (await fetch("/api/state")).json();
-  if (!st.project) { S.doc = null; S.path = null; renderAll(); window.Studio?.set(null, null); openProjectModal(st.recent || []); return; }
-  S.doc = st.doc; S.version = st.version; S.path = st.project;
+  const asked = S.take;
+  const st = await (await fetch("/api/state" + (asked ? "?take=" + encodeURIComponent(asked) : ""))).json();
+  if (asked !== S.take) return;  // the desk moved to another take while this was in flight; that load wins
+  if (!st.project) { S.doc = null; S.path = null; leaveTake(); renderAll(); window.Studio?.set(null, null); openProjectModal(st.recent || []); return; }
+  if (asked) {
+    // A take id only means something inside its own session, and only while the take is still in play.
+    const moved = S.path && st.project !== S.path, gone = !st.take || !TAKE_LIVE.includes(st.take.state);
+    if (moved || gone) {
+      if (!moved) toast(st.take ? `${asked} was ${st.take.state === "accepted" ? "accepted into the session" : "closed"}. The desk is back on the session.` : `${asked} is not a take of this session. The desk is back on the session.`, true);
+      leaveTake(); return loadState();
+    }
+  }
+  S.doc = st.doc; S.version = st.version; S.sessionVersion = st.session_version; S.path = st.project; S.takeMeta = st.take;
   window.Studio?.set(st.board, st.crew);
   // notes as last loaded, per clip: whole-list saves send these so the server can refuse a stale overwrite
   S.base = {}; for (const t of S.doc.tracks) for (const c of t.clips) if (c.notes) S.base[c.id] = c.notes.map((n) => [...n]);
@@ -71,14 +86,143 @@ async function loadState() {
 setInterval(async () => {
   if (S.pendingSave || S.drag || S.live) return;
   try {
-    const v = await (await fetch("/api/version")).json();
-    if (v.version !== S.version || v.project !== S.path) await loadState();
+    const v = await (await fetch("/api/version" + (S.take ? "?take=" + encodeURIComponent(S.take) : ""))).json();
+    if (v.version !== S.version || v.project !== S.path || v.session_version !== S.sessionVersion) await loadState();
   } catch { /* server restarting */ }
 }, 1000);
 
+// ---------------------------------------------------------------- takes on the desk
+// The desk shows the session, or one take of it. In a take, every edit, undo, playback and export is the take's;
+// the session does not change until the take is accepted.
+function leaveTake() {
+  if (!S.take && !S.takeMeta) return;
+  S.take = null; S.takeMeta = null; switchedView();
+}
+function switchedView() {
+  stop(false); S.audio.buf = null; S.audio.version = -1; S.lastRender = null;
+  S.sel.notes.clear(); clearTimeout(S.pendingSave); S.pendingSave = null;
+  window.Studio?.listen();  // the event stream follows the take the desk has open
+}
+async function openTake(id, room = true) {
+  if (S.pendingSave) { toast("Still saving your last edit: try again in a moment."); return; }
+  S.take = id || null; S.takeMeta = null; switchedView();
+  if (room) window.Studio?.room("desk");
+  await loadState();
+}
+async function cutTake(args) {
+  try {
+    status("cutting a take…", "busy");
+    const r = await api("take_cut", args); status("");
+    await openTake(r.take);
+    toast(r.continued ? `Picked up ${r.take} where it was left.` : `${r.take} cut. The desk now edits the take; the session stays as it is until the take is accepted.`, true);
+  } catch (e) { status(""); toast(e.message); }
+}
+function renderTakeBar() {
+  const bar = $("#takeBar"), board = window.Studio?.board(), m = S.takeMeta;
+  document.body.classList.toggle("intake", !!m);
+  bar.classList.toggle("hidden", !S.doc);
+  if (!S.doc) return;
+  const takes = (board && board.takes) || [], seatName = (id) => (board && (board.seats.find((s) => s.seat === id) || {}).title) || (id === "you" ? "You" : id || "");
+  const sel = $("#takeSel"), opts = [["", "SESSION"], ...takes.map((t) => [t.id, `${t.id.toUpperCase()} · ${seatName(t.seat)} · ${t.state === "submitted" ? "handed in" : "in progress"}${t.name && t.name !== t.id ? " · " + t.name : ""}`])];
+  if (m && !takes.some((t) => t.id === m.id)) opts.push([m.id, m.id.toUpperCase()]);
+  const sig = JSON.stringify(opts);
+  if (sel.dataset.sig !== sig) { sel.dataset.sig = sig; sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join(""); }
+  if (document.activeElement !== sel) sel.value = S.take || "";
+  $("#takeLamp").className = "lamp " + (m ? "cyan" : "green");
+  $("#takeRead").innerHTML = m
+    ? `${esc(seatName(m.seat).toUpperCase())}${m.task ? ` · <span class="amb">${esc(m.task)}</span>` : ""} · ${m.changes} CHANGE${m.changes === 1 ? "" : "S"}`
+    : `LIVE · REV ${S.doc.rev ?? "?"}`;
+  $("#takeRead").title = m ? "Whose take this is, the task it is for, and how many things it changes" : "You are editing the session itself: every change is the music everyone hears";
+  $("#takeTags").innerHTML = m ? `${m.state === "submitted" ? `<span class="tag cy" title="${esc(m.summary || "")}">HANDED IN</span>` : ""}${m.returns ? `<span class="tag stale ${m.reason ? "why" : ""}" id="takeWhy" title="${esc(m.reason || "")}">RETURNED ${m.returns}×${m.reason ? " · WHY" : ""}</span>` : ""}${m.session_moved ? `<span class="tag stale" title="The session has changed since this take was cut. SYNC brings those changes into the take.">SESSION MOVED ON</span>` : ""}` : "";
+  if (m && m.reason && $("#takeWhy")) $("#takeWhy").onclick = () => { modal(`<h2>${esc(m.id)} was sent back</h2><div class="reader">${esc(m.reason)}</div><div class="row"><button class="ghost" id="twClose">Close</button></div>`); $("#twClose").onclick = closeModal; };
+  for (const id of ["takeChanges", "takeSync", "takeSubmit", "takeLeave"]) $("#" + id).classList.toggle("hidden", !m);
+  $("#takeNew").classList.toggle("hidden", !!m);
+  if (m) { $("#takeSync").disabled = !m.session_moved; $("#takeSubmit").textContent = m.state === "submitted" ? "HAND IN AGAIN…" : "HAND IN…"; $("#takeSubmit").disabled = !m.changes; }
+}
+$("#takeSel").onchange = (e) => openTake(e.target.value, false);
+$("#takeLeave").onclick = () => openTake(null, false);
+$("#takeNew").onclick = () => {
+  const board = window.Studio?.board(); if (!board) return;
+  const mine = board.seats.filter((s) => s.occupant && s.occupant.kind === "human");
+  const tasksOf = (seat) => board.tasks.filter((t) => t.seat === seat && ["queued", "working", "needs_you"].includes(t.state));
+  const box = modal(`<h2>Cut a take</h2>
+    <p class="hint">A take is a private copy of the session. The desk edits the copy, nobody hears it until you hand it in, and accepting it merges only what you changed.</p>
+    <div class="formgrid"><span>For seat</span><select id="ctSeat"><option value="">No seat (your own take)</option>${board.seats.map((s) => `<option value="${s.seat}" ${mine[0] && mine[0].seat === s.seat ? "selected" : ""}>${esc(s.title)}${s.occupant && s.occupant.kind === "human" ? " · you sit here" : s.occupant ? " · " + esc(s.label || s.occupant.kind) : ""}</option>`).join("")}</select>
+      <span>For task</span><select id="ctTask"></select>
+      <span>Name</span><input id="ctName" placeholder="What this take tries, e.g. “Busier bass in the B section” (optional)"></div>
+    <div class="row"><button class="ghost" id="ctCancel">Cancel</button><button class="key go" id="ctOk">CUT THE TAKE</button></div>`);
+  const fill = () => { $("#ctTask").innerHTML = `<option value="">No task</option>` + tasksOf($("#ctSeat").value).map((t) => `<option value="${esc(t.id)}">${esc(t.id)} · ${esc(t.title)}${t.take ? " (continues " + esc(t.take) + ")" : ""}</option>`).join(""); };
+  $("#ctSeat").onchange = fill; fill();
+  $("#ctCancel").onclick = closeModal;
+  $("#ctOk").onclick = () => { const args = { seat: $("#ctSeat").value || null, task: $("#ctTask").value || null, name: $("#ctName").value.trim() || null }; closeModal(); cutTake(args); };
+};
+function changeList(d) {
+  const board = window.Studio?.board(), seat = board && board.seats.find((s) => s.seat === d.seat);
+  const conf = (d.session_moved && d.session_moved.conflicts) || [];
+  return `<ul class="changes">${d.changes.map((c) => `<li class="${seat && !seat.owns.includes(c.kind) ? "out" : ""}"><b>${esc(c.where)}</b> ${esc(c.what)}</li>`).join("") || `<li>No changes yet.</li>`}
+    ${conf.map((c) => `<li class="conf">conflict · ${esc(c.where)}: ${esc(c.why || "")}</li>`).join("")}</ul>
+    ${d.session_moved ? `<p class="hint" style="margin-top:10px">The session has moved on since this take was cut (${d.session_moved.changes} change${d.session_moved.changes === 1 ? "" : "s"}); ${conf.length ? `${conf.length} of them collide with this take.` : "they merge cleanly."}</p>` : ""}`;
+}
+$("#takeChanges").onclick = async () => {
+  const id = S.take; if (!id) return;
+  try {
+    const d = await api("take_diff", { take: id });
+    modal(`<h2>${esc(id)} · what it changes</h2>${changeList(d)}<div class="row"><button class="ghost" id="tcClose">Close</button></div>`);
+    $("#tcClose").onclick = closeModal;
+  } catch (e) { toast(e.message); }
+};
+$("#takeSync").onclick = () => syncTake("fail");
+async function syncTake(on_conflict) {
+  const id = S.take; if (!id) return;
+  try {
+    status("bringing in the session's changes…", "busy");
+    const r = await api("take_sync", { take: id, on_conflict }); status("");
+    if (!r.synced) {
+      const box = modal(`<h2>${esc(id)} · the session changed the same things</h2>
+        <p class="hint">Nothing was changed. Choose which version the take keeps where they collide; everything else comes in either way.</p>
+        <ul class="changes">${r.conflicts.map((c) => `<li class="conf">${esc(c.where)}: ${esc(c.why || "")}</li>`).join("")}</ul>
+        <div class="row"><button class="ghost" id="syCancel">Cancel</button><button class="key" data-w="session">TAKE THE SESSION'S</button><button class="key go" data-w="mine">KEEP MINE</button></div>`);
+      $("#syCancel").onclick = closeModal;
+      box.querySelectorAll("[data-w]").forEach((b) => b.onclick = () => { closeModal(); syncTake(b.dataset.w); });
+      return;
+    }
+    await loadState();
+    toast(r.brought_in && r.brought_in.length ? `${id} now has the session's ${r.brought_in.length} change${r.brought_in.length === 1 ? "" : "s"}.` : `${id} is up to date.`, true);
+  } catch (e) { status(""); toast(e.message); }
+}
+$("#takeSubmit").onclick = async () => {
+  const id = S.take, m = S.takeMeta; if (!id || !m) return;
+  if (S.pendingSave) { toast("Still saving your last edit: try again in a moment."); return; }
+  let d; try { d = await api("take_diff", { take: id }); } catch (e) { toast(e.message); return; }
+  modal(`<h2>Hand in ${esc(id)}</h2>
+    <p class="hint">It goes to whoever accepts takes (the Producer, or you on Needs You and the seat's TAKES tab). Say what you made and what to listen for.</p>
+    ${changeList(d)}
+    <textarea id="hiText" rows="3" placeholder="What you made and anything the listener should check">${esc(m.summary || "")}</textarea>
+    <div class="row"><button class="ghost" id="hiCancel">Cancel</button><button class="key go" id="hiOk">HAND IT IN</button></div>`);
+  $("#hiText").focus();
+  $("#hiCancel").onclick = closeModal;
+  $("#hiOk").onclick = async () => {
+    const summary = $("#hiText").value.trim(); if (!summary) { toast("Say what you made, so whoever auditions it knows what to listen for"); return; }
+    closeModal();
+    try {
+      await api("take_submit", { take: id, summary });
+      await openTake(null, false);
+      toast(`${id} handed in. The desk is back on the session.`, true);
+    } catch (e) { toast(e.message); }
+  };
+};
+
+// Show the desk on one of its panels with a track in front (a seat's bench sends you here).
+function deskShow(tab, trackId) {
+  const t = trackId && S.doc && S.doc.tracks.find((x) => x.id === trackId);
+  if (t) { S.sel.track = t.id; if (tab === "roll" && t.clips.length) { S.sel.clip = t.clips[0].id; S.sel.notes.clear(); } }
+  const b = document.querySelector(`#tabs button[data-tab="${tab}"]`); if (b) b.click();
+  renderAll(); if (tab === "roll") focusRoll();
+}
 function renderAll() {
   const d = S.doc;
-  $("#projName").textContent = d ? d.name : "No project";
+  $("#projName").textContent = d ? d.name + (S.takeMeta ? " › " + S.takeMeta.id : "") : "No project";
+  renderTakeBar();
   if (d) {
     if (document.activeElement !== $("#tempo")) $("#tempo").value = d.tempo;
     if (document.activeElement !== $("#key")) $("#key").value = d.key;
@@ -92,9 +236,10 @@ function renderAll() {
 // Playback is a render of the project, not a live engine: say whether what you hear is the current revision.
 function audioTag() {
   const el = $("#audioState"), a = S.audio;
-  if (!S.doc || !a.buf) { el.textContent = "NO RENDER"; el.className = "tag"; }
-  else if (a.version === S.version) { el.textContent = `RENDER = REV ${S.doc.rev ?? "?"}`; el.className = "tag ok"; }
-  else { el.textContent = `RENDER REV ${a.rev ?? "?"} · NOW ${S.doc.rev ?? "?"}`; el.className = "tag stale"; }
+  const what = S.take ? S.take.toUpperCase() + " · " : "";  // playback is of what the desk shows
+  if (!S.doc || !a.buf) { el.textContent = what + "NO RENDER"; el.className = "tag"; }
+  else if (a.version === S.version) { el.textContent = `${what}RENDER = REV ${S.doc.rev ?? "?"}`; el.className = "tag ok"; }
+  else { el.textContent = `${what}RENDER REV ${a.rev ?? "?"} · NOW ${S.doc.rev ?? "?"}`; el.className = "tag stale"; }
 }
 
 // ---------------------------------------------------------------- top bar
@@ -237,6 +382,140 @@ function drawRuler() {
   for (const m of S.doc.markers) { const x = m.at * S.zoom - sx; g.fillStyle = "#ffb000"; g.fillRect(x, 6, 2, H - 6); g.fillText(m.name, x + 4, 16); }
   const px = S.playhead * S.zoom - sx; g.fillStyle = "#ff4a3a";
   g.beginPath(); g.moveTo(px - 5, H - 9); g.lineTo(px + 5, H - 9); g.lineTo(px, H); g.fill();
+  drawChords();
+}
+
+// ---------------------------------------------------------------- chord track
+// One lane under the ruler. Double-click a bar to write its chord (symbols or roman numerals in the key; several
+// in one slot share it), Tab moves on to the next slot, drag a chord's right edge to make it longer or shorter.
+// Every change is one harmony() call, so it lands in the take when the desk has one open.
+const chordCv = $("#chords"), chordEdit = $("#chordEdit");
+let chordEditing = null;  // the slot the box is open on ({chord, at, end}); not kept on the element, where "slot" is the browser's
+const chordList = () => [...(S.doc.chord_track || [])].sort((a, b) => a.at - b.at);
+function drawChords() {
+  const W = lanesWrap.clientWidth, H = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--chordH")) - 1;
+  const g = fitCanvas(chordCv, W, H), sx = lanesWrap.scrollLeft;
+  g.fillStyle = "#0d1110"; g.fillRect(0, 0, W, H);
+  if (!S.doc) return;
+  for (let bar = Math.floor(sx / (bpb() * S.zoom)); bar * bpb() * S.zoom < sx + W; bar++) {
+    g.fillStyle = bar % 4 ? "#161c1b" : "#202927"; g.fillRect(Math.round(bar * bpb() * S.zoom - sx), 0, 1, H);
+  }
+  const list = chordList(), d = S.drag && S.drag.kind === "chord" ? S.drag : null;
+  g.font = "12px Cascadia Mono, Consolas, ui-monospace, monospace"; g.textBaseline = "middle";
+  if (!list.length) { g.fillStyle = "#4d6660"; g.fillText("No chords yet: double-click a bar to write its chord, or Write… for a whole progression", 8, H / 2 + 1); }
+  for (const c of list) {
+    const len = d && d.chord === c ? d.end - c.at : c.len, x = c.at * S.zoom - sx, w = len * S.zoom;
+    if (x + w < 0 || x > W) continue;
+    g.fillStyle = "#12302b"; g.fillRect(x + 1, 3, Math.max(2, w - 2), H - 6);
+    g.fillStyle = c.key ? "#ffb000" : "#74f0d6"; g.fillRect(x + 1, 3, 2, H - 6);  // amber edge: this chord is in another key
+    g.save(); g.beginPath(); g.rect(x + 3, 0, Math.max(0, w - 5), H); g.clip();
+    g.fillStyle = "#74f0d6"; g.fillText(c.chord + (c.key ? "  (" + c.key + ")" : ""), x + 7, H / 2 + 1);
+    g.restore();
+  }
+  g.fillStyle = "#ff4a3a"; g.fillRect(S.playhead * S.zoom - sx, 0, 1.5, H);
+}
+// What is under the pointer: a chord, or the empty slot there (the bar, cut short by its neighbours).
+function chordHit(e) {
+  const r = chordCv.getBoundingClientRect(), beat = Math.max(0, (e.clientX - r.left + lanesWrap.scrollLeft) / S.zoom);
+  return chordSlot(beat, (e.clientX - r.left + lanesWrap.scrollLeft));
+}
+function chordSlot(beat, x = null) {
+  const list = chordList(), c = list.find((k) => beat >= k.at - 1e-9 && beat < k.at + k.len - 1e-9);
+  if (c) return { chord: c, at: c.at, end: c.at + c.len, edge: x !== null && (c.at + c.len) * S.zoom - x < 7 };
+  let at = Math.floor(beat / bpb() + 1e-9) * bpb(), end = at + bpb();
+  for (const k of list) { if (k.at + k.len <= beat + 1e-9) at = Math.max(at, k.at + k.len); else if (k.at > beat) { end = Math.min(end, k.at); break; } }
+  return { chord: null, at, end, edge: false };
+}
+function editChord(slot) {
+  const sx = lanesWrap.scrollLeft;
+  if (slot.at * S.zoom < sx || slot.at * S.zoom > sx + lanesWrap.clientWidth - 90) { lanesWrap.scrollLeft = Math.max(0, slot.at * S.zoom - 120); drawRuler(); }
+  chordEditing = slot; chordEdit.value = slot.chord ? slot.chord.chord : ""; chordEdit.classList.remove("hidden", "bad");
+  chordEdit.style.left = slot.at * S.zoom - lanesWrap.scrollLeft + "px"; chordEdit.style.width = Math.max(84, (slot.end - slot.at) * S.zoom) + "px";
+  chordEdit.placeholder = "Am7 · iv · F/A"; chordEdit.title = `Chord for ${fmtPos(slot.at)} to ${fmtPos(slot.end)}. Enter sets it, Tab sets it and moves on, empty clears it, Esc leaves it.`;
+  chordEdit.focus(); chordEdit.select();
+}
+function closeChordEdit() { chordEdit.classList.add("hidden"); chordEditing = null; }
+// Returns false when the server refused the text (a chord it cannot read): the box stays open and says why.
+async function commitChord() {
+  const slot = chordEditing, text = chordEdit.value.trim();
+  if (!slot) return true;
+  if (text === (slot.chord ? slot.chord.chord : "")) { closeChordEdit(); return true; }
+  const args = { at: slot.at, end: slot.end };
+  if (!text) args.clear = true;
+  else {
+    args.progression = text;
+    if (!text.includes(":")) args.chord_length = (slot.end - slot.at) / text.split(/\s+/).length;  // several chords share the slot
+    if (slot.chord && slot.chord.key) args.key = slot.chord.key;
+  }
+  try { await act("harmony", args); closeChordEdit(); return true; }
+  catch { chordEdit.classList.add("bad"); chordEdit.focus(); return false; }
+}
+chordEdit.addEventListener("keydown", async (e) => {
+  e.stopPropagation();  // the desk's own keys (space, delete, undo) are not for a text box
+  if (e.key === "Escape") { closeChordEdit(); return; }
+  if (e.key !== "Enter" && e.key !== "Tab") { chordEdit.classList.remove("bad"); return; }
+  e.preventDefault();
+  const slot = chordEditing, next = e.key === "Tab" && slot ? (e.shiftKey ? slot.at - 1e-3 : slot.end) : null;
+  if (await commitChord() && next !== null && next >= 0) editChord(chordSlot(next));
+});
+chordEdit.addEventListener("blur", closeChordEdit);
+chordCv.addEventListener("dblclick", (e) => { if (S.doc) editChord(chordHit(e)); });
+chordCv.addEventListener("mousemove", (e) => { if (S.doc && !S.drag) chordCv.style.cursor = chordHit(e).edge ? "ew-resize" : "text"; });
+chordCv.addEventListener("mousedown", (e) => {
+  if (!S.doc || e.button !== 0) return;
+  const h = chordHit(e);
+  if (h.edge) { e.preventDefault(); S.drag = { kind: "chord", chord: h.chord, end: h.end, moved: false }; }
+});
+function chordDrag(e) {
+  const d = S.drag, r = chordCv.getBoundingClientRect(), b = (e.clientX - r.left + lanesWrap.scrollLeft) / S.zoom;
+  const end = Math.max(d.chord.at + (S.snap || 0.25), snapB(b, S.snap || 0.25));
+  if (end !== d.end) { d.end = end; d.moved = true; drawChords(); }
+}
+async function chordDrop(d) {
+  const c = d.chord, was = c.at + c.len;
+  if (!d.moved || Math.abs(d.end - was) < 1e-6) { drawChords(); return; }
+  // longer: the chord is written again over the new range (what it covers is replaced); shorter: its tail is cleared
+  if (d.end > was) await act("harmony", { progression: c.chord, at: c.at, end: d.end, chord_length: d.end - c.at, ...(c.key ? { key: c.key } : {}) });
+  else await act("harmony", { clear: true, at: d.end, end: was });
+}
+chordCv.addEventListener("contextmenu", (e) => {
+  e.preventDefault(); if (!S.doc) return;
+  const h = chordHit(e);
+  menu(e, [
+    [h.chord ? `Change ${h.chord.chord}…` : `Write a chord at ${fmtPos(h.at)}…`, () => editChord(h)],
+    ...(h.chord ? [[`Clear ${h.chord.chord}`, () => act("harmony", { clear: true, at: h.at, end: h.end })]] : []),
+    ["Write a progression…", () => openProgression(h.at)],
+    ...(chordList().length ? [["Clear the whole chord track", () => confirm("Clear every chord? The parts stay as they are.") && act("harmony", { clear: true })]] : []),
+  ]);
+});
+$("#chordSet").onclick = () => S.doc && openProgression(floorB(S.playhead, bpb()));
+function openProgression(at) {
+  const barOf = (b) => Math.floor(b / bpb() + 1e-9) + 1, secs = [...S.doc.markers].sort((a, b) => a.at - b.at), ranges = [];
+  secs.forEach((m, i) => ranges.push([`Section ${m.name} (from bar ${barOf(m.at)}${secs[i + 1] ? " to " + (barOf(secs[i + 1].at) - 1) : ""})`, { section: m.name }]));
+  if (S.doc.loop) ranges.push([`The loop (bars ${barOf(S.doc.loop.start)} to ${barOf(S.doc.loop.end) - 1})`, { at: S.doc.loop.start, end: S.doc.loop.end }]);
+  ranges.push([`From bar ${barOf(at)}, for as long as it is written`, { at }]);
+  const box = modal(`<h2>Chord track</h2>
+    <p class="hint">The harmony the parts are checked against, and what chords() and pattern() follow. One chord per bar unless you
+      give a length in beats (<code>Dm:2 G7:2</code>). Chord symbols or roman numerals in the key, <code>%</code> repeats the last
+      chord, <code>N.C.</code> leaves a gap. Over a section or the loop, the progression repeats until it is full.</p>
+    <div class="grid2">
+      <span>Where</span><select id="cpRange">${ranges.map((r, i) => `<option value="${i}">${esc(r[0])}</option>`).join("")}</select>
+      <span>Progression</span><input id="cpProg" spellcheck="false" autocomplete="off" placeholder="i VI III VII   ·   Am7 F/A G   ·   i:2 iv:2 V7:4">
+      <span>Key here</span><input id="cpKey" spellcheck="false" placeholder="${esc(S.doc.key)} (the project key) - fill in for a modulation">
+    </div>
+    <p class="hint">Notes already written do not move when the chords change: score() and the Render report show what no longer fits.</p>
+    <div class="row"><button id="cpCancel" class="ghost">Close</button><button id="cpClear" class="ghost danger">Clear this range</button><button id="cpSet">Set</button></div>`);
+  const args = () => ({ ...ranges[+$("#cpRange").value][1] });
+  const done = (r) => { closeModal(); const said = [r.repeated && "repeated " + r.repeated, ...(r.warnings || [])].filter(Boolean).join(" · "); if (said) toast(said, true); };
+  $("#cpCancel").onclick = closeModal;
+  $("#cpClear").onclick = async () => { const a = args(); if (a.end === undefined && !a.section) a.end = songEnd() + bpb(); try { done(await act("harmony", { clear: true, ...a })); } catch { /* shown */ } };
+  $("#cpSet").onclick = async () => {
+    const prog = $("#cpProg").value.trim(), key = $("#cpKey").value.trim();
+    if (!prog) { $("#cpProg").focus(); return; }
+    try { done(await act("harmony", { progression: prog, ...args(), ...(key ? { key } : {}) })); } catch { /* the toast says what was wrong */ }
+  };
+  $("#cpProg").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#cpSet").click(); });
+  $("#cpProg").focus();
 }
 lanesWrap.addEventListener("scroll", () => { $("#trackHeaders").scrollTop = lanesWrap.scrollTop; drawRuler(); });
 window.addEventListener("resize", () => { drawArrangement(); drawRoll(); });
@@ -274,6 +553,7 @@ window.addEventListener("mousemove", (e) => {
     else { d.ghost.start = Math.max(0, snapB(d.clip.start + dx)); d.ghost.row = Math.max(0, Math.min(S.doc.tracks.length - 1, h.row)); }
     drawArrangement();
   } else if (S.drag.kind === "ruler") rulerDrag(e);
+  else if (S.drag.kind === "chord") chordDrag(e);
   else rollDrag(e);
 });
 window.addEventListener("mouseup", async (e) => {
@@ -286,7 +566,8 @@ window.addEventListener("mouseup", async (e) => {
     else await act("clip_set", { clip: d.clip.id, start: d.ghost.start, track: dest.id !== d.t.id ? dest.id : null });
   } else if (d.kind === "ruler") {
     if (d.loop && d.b1 !== d.b0) await act("project_set", { loop: { start: Math.min(d.b0, d.b1), end: Math.max(d.b0, d.b1) } });
-  } else rollUp(e);
+  } else if (d.kind === "chord") await chordDrop(d);
+  else rollUp(e);
 });
 lanes.addEventListener("dblclick", async (e) => {
   const h = laneHit(e);
@@ -757,10 +1038,11 @@ function openProjectModal(recent) {
       <span>Use</span><input id="npUse" placeholder="main menu loop, battle, ambience…">
     </div></div>
     <div class="row"><button id="npCancel" class="ghost">Close</button><button id="npCreate">Create</button></div>`);
-  box.querySelectorAll("[data-open]").forEach((a) => a.onclick = async (e) => { e.preventDefault(); await act("project_open", { path: a.dataset.open }); closeModal(); });
+  box.querySelectorAll("[data-open]").forEach((a) => a.onclick = async (e) => { e.preventDefault(); leaveTake(); await act("project_open", { path: a.dataset.open }); closeModal(); });
   $("#npCancel").onclick = closeModal;
   $("#npCreate").onclick = async () => {
     const brief = {}; [["genre", "#npGenre"], ["mood", "#npMood"], ["use", "#npUse"]].forEach(([k, s]) => { if ($(s).value) brief[k] = $(s).value; });
+    leaveTake();
     await act("project_new", { name: $("#npName").value, tempo: +$("#npTempo").value, key: $("#npKey").value, time_sig: $("#npSig").value, brief });
     closeModal();
   };

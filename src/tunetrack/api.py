@@ -55,6 +55,8 @@ def set_default_project(path: str | Path | None) -> None:
 
 
 def _path(project: str | None) -> Path:
+    if isinstance(project, str) and project.strip().lower() in ("none", "null", ""):
+        project = None  # agents write project="none" when they mean "the one I am working in"
     if not project and _default_project:
         if not (_default_project / "project.json").exists():
             raise FileNotFoundError(f"No TuneTrack project at {_default_project}")
@@ -1547,6 +1549,24 @@ def audition(instrument, phrase: str = "auto", out: str | None = None, tempo: fl
 
 # ---- render & review ---------------------------------------------------------------------------------------------------
 
+def _takes_left_out(path: Path, rep: dict) -> None:
+    """An export of the session does not contain work that is still in takes (seen live: a final mix went out
+    without a part that had been handed in and never auditioned). Say so where the caller reads warnings."""
+    try:
+        from . import takes
+        left = [t for t in takes.take_pending(str(path))["takes"] if t["changes"]]
+    except Exception:  # noqa: BLE001 - a board that cannot be read must not fail a render
+        return
+    if not left:
+        return
+    rep["not_in_this_render"] = [f"{t['take']} ({t['seat']}) {t['name']}: {t['status']}" for t in left]
+    n = len(left)
+    rep.setdefault("warnings", []).append(
+        f"{n} take{'s' if n != 1 else ''} with work in {'them' if n != 1 else 'it'} "
+        f"{'are' if n != 1 else 'is'} not in this export ({', '.join(t['take'] for t in left)}): accept, return or "
+        f"discard {'each' if n != 1 else 'it'} first, or leave {'them' if n != 1 else 'it'} out on purpose.")
+
+
 def render(project: str | None = None, out: str | None = None, format: str = "wav", bits: int = 24,
            loop: str = "auto", normalize: bool = True, stems: bool = False, layers: bool = False,
            midi: bool = False) -> dict:
@@ -1559,6 +1579,8 @@ def render(project: str | None = None, out: str | None = None, format: str = "wa
     rep = engine.render_project(p, out, format, int(bits), loop, normalize, stems, layers, midi)
     rep.pop("renderer", None)
     rep["seconds"] = round(time.time() - t0, 1)
+    if out and session_root(p.path) == p.path:
+        _takes_left_out(p.path, rep)
     (p.path / "renders").mkdir(exist_ok=True)
     (p.path / "renders" / "last.json").write_text(json.dumps(rep, indent=1), encoding="utf-8")
     return rep

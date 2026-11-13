@@ -391,8 +391,9 @@ def test_take_audition_renders_session_and_take(song):
 
 def _asgi(app, method, path, headers=None, body=b"", port=7373):
     hdrs = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    path, _, query = path.partition("?")
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method, "scheme": "http",
-             "path": path, "raw_path": path.encode(), "query_string": b"", "headers": hdrs,
+             "path": path, "raw_path": path.encode(), "query_string": query.encode(), "headers": hdrs,
              "server": ("127.0.0.1", port), "client": ("127.0.0.1", 5555), "root_path": ""}
     sent = []
     done = False
@@ -431,3 +432,138 @@ def test_server_serves_the_board_and_crew(song):
     want = {"board", "crew_start", "crew_stop", "crew_state", "seat_hold", "crew_detect", "take_audition"}
     assert want <= set(server.STUDIO)
     assert not set(server.STUDIO) & set(server.CALLABLE)
+
+
+# ---- 10. a take open on the Desk --------------------------------------------------------------------------------------
+
+GET = {"host": "127.0.0.1:7373"}
+
+
+def _call(fn, args=None, **body):
+    from tunetrack import server
+    good = {**GET, "content-type": "application/json", "x-tunetrack-token": server.TOKEN}
+    status, data = _asgi(server.app, "POST", "/api/call", good, json.dumps({"fn": fn, "args": args or {}, **body}).encode())
+    return status, json.loads(data)
+
+
+def _state(query=""):
+    from tunetrack import server
+    status, data = _asgi(server.app, "GET", "/api/state" + query, GET)
+    assert status == 200
+    return json.loads(data)
+
+
+def test_take_cut_is_for_the_desk_and_picks_up_where_a_task_left_off(song):
+    studio.seat_assign("composer", "human")
+    t = studio.task_add("composer", "Write the hook", "Piano, bar 2")["id"]
+    status, res = _call("take_cut", {"task": t})
+    assert status == 200 and res["result"] == {"take": "tk1", "continued": False}
+    meta = json.loads((Path(song) / "takes" / "tk1" / "take.json").read_text(encoding="utf-8"))
+    assert (meta["seat"], meta["task"], meta["state"]) == ("composer", t, "open")
+    assert task(t)["state"] == "working" and task(t)["take"] == "tk1"
+    assert api._default_project is None  # the server's own tools still point at the session
+
+    assert _call("take_cut", {"task": t})[1]["result"] == {"take": "tk1", "continued": True}
+    assert _call("take_cut", {"name": "Sketch"})[1]["result"] == {"take": "tk2", "continued": False}
+    assert json.loads((Path(song) / "takes" / "tk2" / "take.json").read_text(encoding="utf-8"))["seat"] == roles.YOU
+    assert _call("take_cut", {"task": "T99"})[0] == 400
+
+
+def test_the_desk_edits_plays_and_undoes_the_take_it_has_open(song):
+    _call("take_cut", {"seat": "composer"})
+    before = piano(song)
+    session = _state()
+    assert session["take"] is None and session["version"] == session["session_version"]
+
+    status, res = _call("clip_create", {"track": "Piano", "start": 16, "length": 4}, take="tk1", session=song)
+    assert status == 200, res
+    clip = res["result"]["clip"]
+    assert _call("clip_set", {"clip": clip, "notes": [[77, 0, 1, 90]]}, take="tk1")[0] == 200
+    take_dir = Path(song) / "takes" / "tk1"
+    assert piano(song) == before and (77, 16.0) in piano(take_dir)
+
+    st = _state("?take=tk1")
+    assert st["take"]["id"] == "tk1" and st["take"]["seat"] == "composer" and st["take"]["state"] == "open"
+    assert st["take"]["changes"] == 1 and st["take"]["session_moved"] is False
+    assert st["version"].startswith("tk1@") and st["version"] != st["session_version"]
+    assert any(c["id"] == clip for t in st["doc"]["tracks"] for c in t["clips"])
+    assert Path(st["project"]).resolve() == Path(song).resolve() and st["board"]["takes"][0]["id"] == "tk1"
+
+    assert _call("undo", take="tk1")[0] == 200  # the take's own history, not the session's
+    assert (77, 16.0) not in piano(take_dir) and piano(song) == before
+    assert _call("redo", take="tk1")[0] == 200
+    status, res = _call("preview", take="tk1")
+    assert status == 200 and Path(res["result"]["files"][0]).resolve().is_relative_to(take_dir.resolve())
+
+    api.write("Piano", "G4:w", at="3:1")  # the session moves on under the take
+    assert _state("?take=tk1")["take"]["session_moved"] is True
+    assert _call("take_sync", {"take": "tk1"})[1]["result"]["synced"] is True
+    assert _state("?take=tk1")["take"]["session_moved"] is False
+
+    status, res = _call("take_submit", {"take": "tk1", "summary": "A high F in bar 5"})
+    assert status == 200 and res["result"]["state"] == "submitted"
+    assert _state("?take=tk1")["take"]["state"] == "submitted"
+    assert _call("take_accept", {"take": "tk1"})[1]["result"]["accepted"] is True
+    assert (77, 16.0) in piano(song)
+
+
+def test_the_desk_writes_the_chord_track_in_the_session_or_in_its_take(song):
+    # What the chord lane sends: one harmony() call per edit, positions in beats.
+    def chords(d):
+        doc = json.loads((Path(d) / "project.json").read_text(encoding="utf-8"))
+        return [(c["chord"], c["at"], c["len"]) for c in doc["chord_track"]]
+
+    assert _call("harmony", {"progression": "Dm", "at": 0, "end": 4, "chord_length": 4})[0] == 200
+    assert _call("harmony", {"progression": "Gm A7", "at": 4, "end": 8, "chord_length": 2})[0] == 200  # two share a bar
+    assert chords(song) == [("Dm", 0, 4), ("Gm", 4, 2), ("A7", 6, 2)]
+    assert _call("harmony", {"progression": "A7", "at": 6, "end": 12, "chord_length": 6})[0] == 200    # edge dragged out
+    assert _call("harmony", {"clear": True, "at": 8, "end": 12})[0] == 200                             # and back in
+    assert chords(song) == [("Dm", 0, 4), ("Gm", 4, 2), ("A7", 6, 2)]
+    status, res = _call("harmony", {"progression": "Xq9z", "at": 0, "end": 4})
+    assert status == 400 and "Xq9z" in res["error"] and chords(song)[0] == ("Dm", 0, 4)  # refused, nothing changed
+
+    _call("take_cut", {"seat": "composer"})
+    assert _call("harmony", {"progression": "Bb", "at": 0, "end": 4, "chord_length": 4}, take="tk1", session=song)[0] == 200
+    assert chords(Path(song) / "takes" / "tk1")[0] == ("Bb", 0, 4) and chords(song)[0] == ("Dm", 0, 4)
+    diff = takes.take_diff("tk1")
+    assert [c["kind"] for c in diff["changes"]] == ["form"] and "outside_seat" not in diff  # the Composer's to change
+
+
+def test_the_desk_names_a_take_of_the_open_session_by_id_only(song, tmp_path):
+    _call("take_cut")
+    before = piano(song)
+    for bad in ("tk9", "../tk1", "takes/tk1", str(Path(song) / "takes" / "tk1"), "tk1/..", "TK1 "):
+        status, res = _call("track_update", {"track": "Piano", "volume_db": -3}, take=bad)
+        if bad == "TK1 ":  # ids are case-blind, as everywhere else
+            assert status == 200, res
+            continue
+        assert status == 409 and res["conflict"], (bad, res)
+        st = _state("?take=" + bad.replace("\\", "/"))
+        assert st["take"] is None and "take_error" in st and st["version"] == st["session_version"]
+    assert piano(song) == before
+    doc = json.loads((Path(song) / "project.json").read_text(encoding="utf-8"))
+    assert doc["tracks"][0].get("volume_db", 0) == 0
+
+    # the page still thinks another project is open: refuse instead of editing this session's take of the same id
+    status, res = _call("track_update", {"track": "Piano", "volume_db": -6}, take="tk1", session=str(tmp_path / "other"))
+    assert status == 409 and res["conflict"]
+    # board calls ignore the desk's take; calls with no project (the library) pass through
+    assert _call("board", take="tk1")[0] == 200 and _call("synths_list", take="tk1")[0] == 200
+
+
+def test_the_event_stream_follows_the_open_take(song):
+    from tunetrack import server
+    _call("take_cut")
+    msg, seq = server._pulse(Path(song), 0, "tk1")
+    assert msg["take"]["id"] == "tk1" and msg["take"]["version"].startswith("tk1@")
+    _call("track_update", {"track": "Piano", "volume_db": -3}, take="tk1")
+    again, _ = server._pulse(Path(song), seq, "tk1")
+    assert again["take"]["version"] != msg["take"]["version"] and again["version"] == msg["version"]
+    assert server._pulse(Path(song), seq, "tk7")[0]["take"] == {"id": "tk7", "version": None}
+    assert "take" not in server._pulse(Path(song), seq)[0]
+
+    status, data = _asgi(server.app, "GET", "/api/version?take=tk1", GET)
+    v = json.loads(data)
+    assert status == 200 and v["version"] == again["take"]["version"] and v["session_version"] == again["version"]
+    assert json.loads(_asgi(server.app, "GET", "/api/version?take=nope", GET)[1])["version"] is None
+
