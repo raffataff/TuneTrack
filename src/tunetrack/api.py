@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import analysis, config, edit, engine, eqmap, generators, notation, plugins, synths, theory
 from . import harmony as harm
-from .model import Clip, Device, Note, Project, Track, project_lock, redo as _redo, undo as _undo
+from .model import Clip, Device, Note, Project, Track, project_lock, redo as _redo, session_root, undo as _undo
 
 STATE_FILE = config.HOME / "state.json"
 
@@ -35,6 +35,7 @@ def _state() -> dict:
 
 
 def _set_current(path: Path) -> None:
+    set_default_project(None)  # opening a project leaves whatever take this process was working in
     config.HOME.mkdir(parents=True, exist_ok=True)
     st = _state()
     st["current"] = str(path)
@@ -43,9 +44,31 @@ def _set_current(path: Path) -> None:
     STATE_FILE.write_text(json.dumps(st, indent=1), encoding="utf-8")
 
 
+# This process's own default project. A crew agent's tools work in its take (takes.py) without passing project=
+# on every call, and without moving the editor's "current project" under the user.
+_default_project: Path | None = Path(os.environ["TUNETRACK_PROJECT"]) if os.environ.get("TUNETRACK_PROJECT") else None
+
+
+def set_default_project(path: str | Path | None) -> None:
+    global _default_project
+    _default_project = Path(path).resolve() if path else None
+
+
 def _path(project: str | None) -> Path:
+    if not project and _default_project:
+        if not (_default_project / "project.json").exists():
+            raise FileNotFoundError(f"No TuneTrack project at {_default_project}")
+        return _default_project
     if project:
         p = Path(project)
+        if not p.exists() and not p.is_absolute() and _default_project:
+            # a crew agent naming a take of its own session: "tk2", "takes/tk2"
+            root = session_root(_default_project)
+            take = root / "takes" / Path(str(project).strip().lower()).name
+            if (take / "project.json").exists():
+                p = take
+            elif str(project).strip().lower() in ("session", "."):
+                p = root
         if not p.exists() and not p.is_absolute():
             cand = config.PROJECTS_DIR / project
             if cand.exists():
@@ -1257,7 +1280,7 @@ def audio_import(track: str, file: str, at=0, project: str | None = None, copy: 
             raise FileNotFoundError(file)
         rel = src
         if copy:
-            dst = _audio_dest(p.path / "audio", src)
+            dst = _audio_dest(p.root / "audio", src)
             if not dst.exists():
                 shutil.copy2(src, dst)
             rel = Path("audio") / dst.name
@@ -1527,8 +1550,11 @@ def audition(instrument, phrase: str = "auto", out: str | None = None, tempo: fl
 def render(project: str | None = None, out: str | None = None, format: str = "wav", bits: int = 24,
            loop: str = "auto", normalize: bool = True, stems: bool = False, layers: bool = False,
            midi: bool = False) -> dict:
-    """Render the mix. out = a folder or a file path (extension picks the format). Returns files + analysis."""
+    """Render the mix. out = a folder or a file path (extension picks the format); a relative out is inside the
+    project's folder (the session's, for a take). Returns files + analysis."""
     p = load(project)
+    if out and not Path(out).is_absolute():
+        out = str(session_root(p.path) / out)  # not wherever the calling process happens to run
     t0 = time.time()
     rep = engine.render_project(p, out, format, int(bits), loop, normalize, stems, layers, midi)
     rep.pop("renderer", None)

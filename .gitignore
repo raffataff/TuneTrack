@@ -25,6 +25,10 @@ library/.params_*
 projects/*/cache/
 projects/*/history/
 projects/*/renders/
+# studio session state: the board (seats, tasks, messages) and agents' working copies
+projects/*/studio/
+projects/*/takes/
+library/agents.json
 
 # per-project edit lock (held while an operation edits project.json)
 .lock

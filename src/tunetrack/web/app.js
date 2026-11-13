@@ -1,5 +1,6 @@
-// TuneTrack editor. Every edit goes through /api/call (the same API the agent uses); the project file is the
-// source of truth and is polled, so agent edits show up live.
+// TuneTrack desk (arrangement, piano roll, mixer) and the shared header. Every edit goes through /api/call (the
+// same API the agents use); the project file is the source of truth. studio.js draws the crew rack and follows
+// /api/events, so agent edits show up live; the 1 s poll below is only the fallback when that stream is down.
 "use strict";
 
 const $ = (s) => document.querySelector(s);
@@ -57,8 +58,9 @@ const findClip = (id) => { for (const t of S.doc.tracks) for (const c of t.clips
 // ---------------------------------------------------------------- load / poll
 async function loadState() {
   const st = await (await fetch("/api/state")).json();
-  if (!st.project) { S.doc = null; renderAll(); openProjectModal(st.recent || []); return; }
+  if (!st.project) { S.doc = null; S.path = null; renderAll(); window.Studio?.set(null, null); openProjectModal(st.recent || []); return; }
   S.doc = st.doc; S.version = st.version; S.path = st.project;
+  window.Studio?.set(st.board, st.crew);
   // notes as last loaded, per clip: whole-list saves send these so the server can refuse a stale overwrite
   S.base = {}; for (const t of S.doc.tracks) for (const c of t.clips) if (c.notes) S.base[c.id] = c.notes.map((n) => [...n]);
   if (st.last_render && !S.lastRender) S.lastRender = st.last_render;
@@ -67,7 +69,7 @@ async function loadState() {
   renderAll();
 }
 setInterval(async () => {
-  if (S.pendingSave || S.drag) return;
+  if (S.pendingSave || S.drag || S.live) return;
   try {
     const v = await (await fetch("/api/version")).json();
     if (v.version !== S.version || v.project !== S.path) await loadState();
@@ -83,7 +85,16 @@ function renderAll() {
     if (document.activeElement !== $("#sig")) $("#sig").value = d.time_sig.join("/");
   }
   $("#loopBtn").classList.toggle("on", S.loopOn);
+  audioTag();
+  if (document.body.dataset.room !== "desk") return;  // canvases have no size while the desk is hidden
   drawHeaders(); drawArrangement(); drawRoll(); renderPanel();
+}
+// Playback is a render of the project, not a live engine: say whether what you hear is the current revision.
+function audioTag() {
+  const el = $("#audioState"), a = S.audio;
+  if (!S.doc || !a.buf) { el.textContent = "NO RENDER"; el.className = "tag"; }
+  else if (a.version === S.version) { el.textContent = `RENDER = REV ${S.doc.rev ?? "?"}`; el.className = "tag ok"; }
+  else { el.textContent = `RENDER REV ${a.rev ?? "?"} · NOW ${S.doc.rev ?? "?"}`; el.className = "tag stale"; }
 }
 
 // ---------------------------------------------------------------- top bar
@@ -165,15 +176,15 @@ function drawArrangement() {
   const L = laneH(), n = S.doc.tracks.length, endB = songEnd() + bpb() * 8;
   const W = Math.max(lanesWrap.clientWidth, endB * S.zoom), H = Math.max(lanesWrap.clientHeight - 2, n * L);
   const g = fitCanvas(lanes, W, H);
-  g.fillStyle = "#16181c"; g.fillRect(0, 0, W, H);
-  if (S.doc.loop) { g.fillStyle = "rgba(63,191,138,0.06)"; g.fillRect(S.doc.loop.start * S.zoom, 0, (S.doc.loop.end - S.doc.loop.start) * S.zoom, H); }
+  g.fillStyle = "#101011"; g.fillRect(0, 0, W, H);
+  if (S.doc.loop) { g.fillStyle = "rgba(95,224,122,0.06)"; g.fillRect(S.doc.loop.start * S.zoom, 0, (S.doc.loop.end - S.doc.loop.start) * S.zoom, H); }
   for (let b = 0, bar = 0; b <= endB; b += bpb(), bar++) {
-    g.fillStyle = bar % 4 ? "#22262c" : "#2c313a"; g.fillRect(Math.round(b * S.zoom), 0, 1, H);
+    g.fillStyle = bar % 4 ? "#1b1b1d" : "#27272a"; g.fillRect(Math.round(b * S.zoom), 0, 1, H);
   }
   S.doc.tracks.forEach((t, i) => {
     const y = i * L;
-    if (S.sel.track === t.id) { g.fillStyle = "rgba(94,156,236,0.05)"; g.fillRect(0, y, W, L); }
-    g.fillStyle = "#262a31"; g.fillRect(0, y + L - 1, W, 1);
+    if (S.sel.track === t.id) { g.fillStyle = "rgba(255,176,0,0.05)"; g.fillRect(0, y, W, L); }
+    g.fillStyle = "#202022"; g.fillRect(0, y + L - 1, W, 1);
     const col = trackColor(t, i);
     for (const c of t.clips) drawClip(g, t, c, y, L, col);
   });
@@ -181,8 +192,8 @@ function drawArrangement() {
     const d = S.drag.ghost; g.strokeStyle = "#fff"; g.setLineDash([4, 3]);
     g.strokeRect(d.start * S.zoom + 0.5, d.row * L + 3.5, d.length * S.zoom - 1, L - 8); g.setLineDash([]);
   }
-  for (const m of S.doc.markers) { g.fillStyle = "rgba(227,179,65,.5)"; g.fillRect(m.at * S.zoom, 0, 1, H); }
-  g.fillStyle = "#e5534b"; g.fillRect(S.playhead * S.zoom, 0, 1.5, H);
+  for (const m of S.doc.markers) { g.fillStyle = "rgba(255,176,0,.45)"; g.fillRect(m.at * S.zoom, 0, 1, H); }
+  g.fillStyle = "#ff4a3a"; g.fillRect(S.playhead * S.zoom, 0, 1.5, H);
   drawRuler();
 }
 function drawClip(g, t, c, y, L, col) {
@@ -191,7 +202,7 @@ function drawClip(g, t, c, y, L, col) {
   g.fillStyle = col + "33"; g.fillRect(x + 1, y + 3, w - 2, L - 8);
   g.fillStyle = col; g.fillRect(x + 1, y + 3, w - 2, 14);
   g.strokeStyle = sel ? "#ffffff" : col; g.lineWidth = sel ? 2 : 1; g.strokeRect(x + 1.5, y + 3.5, w - 3, L - 9); g.lineWidth = 1;
-  g.fillStyle = "#101216"; g.font = "11px Segoe UI";
+  g.fillStyle = "#0c0c0d"; g.font = "11px Segoe UI, system-ui, sans-serif";
   g.save(); g.beginPath(); g.rect(x + 2, y + 3, w - 4, L - 8); g.clip();
   g.fillText(c.name || (c.kind === "audio" ? (c.file || "").split("/").pop() : ""), x + 5, y + 14);
   if (c.kind === "midi" && c.notes.length) {
@@ -210,21 +221,21 @@ function drawClip(g, t, c, y, L, col) {
 }
 function drawRuler() {
   const W = lanesWrap.clientWidth, H = 30, g = fitCanvas(ruler, W, H), sx = lanesWrap.scrollLeft;
-  g.fillStyle = "#1d2025"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "#171718"; g.fillRect(0, 0, W, H);
   if (!S.doc) return;
   if (S.doc.loop) {
-    g.fillStyle = S.loopOn ? "rgba(63,191,138,.55)" : "rgba(63,191,138,.22)";
+    g.fillStyle = S.loopOn ? "rgba(95,224,122,.55)" : "rgba(95,224,122,.22)";
     g.fillRect(S.doc.loop.start * S.zoom - sx, 0, (S.doc.loop.end - S.doc.loop.start) * S.zoom, 6);
   }
-  g.font = "11px Segoe UI";
+  g.font = "11px Segoe UI, system-ui, sans-serif";
   const every = Math.max(1, Math.round(40 / (bpb() * S.zoom)));
   for (let bar = 0; bar * bpb() * S.zoom < sx + W; bar++) {
     const x = bar * bpb() * S.zoom - sx; if (x < -40) continue;
-    g.fillStyle = "#3b414b"; g.fillRect(x, H - 10, 1, 10);
-    if (bar % every === 0) { g.fillStyle = "#8b919b"; g.fillText(bar + 1, x + 3, H - 12); }
+    g.fillStyle = "#3b3b40"; g.fillRect(x, H - 10, 1, 10);
+    if (bar % every === 0) { g.fillStyle = "#8f897c"; g.fillText(bar + 1, x + 3, H - 12); }
   }
-  for (const m of S.doc.markers) { const x = m.at * S.zoom - sx; g.fillStyle = "#e3b341"; g.fillRect(x, 6, 2, H - 6); g.fillText(m.name, x + 4, 16); }
-  const px = S.playhead * S.zoom - sx; g.fillStyle = "#e5534b";
+  for (const m of S.doc.markers) { const x = m.at * S.zoom - sx; g.fillStyle = "#ffb000"; g.fillRect(x, 6, 2, H - 6); g.fillText(m.name, x + 4, 16); }
+  const px = S.playhead * S.zoom - sx; g.fillStyle = "#ff4a3a";
   g.beginPath(); g.moveTo(px - 5, H - 9); g.lineTo(px + 5, H - 9); g.lineTo(px, H); g.fill();
 }
 lanesWrap.addEventListener("scroll", () => { $("#trackHeaders").scrollTop = lanesWrap.scrollTop; drawRuler(); });
@@ -346,23 +357,23 @@ function drawRoll() {
   const info = $("#rollInfo");
   const g = fitCanvas(roll, Math.max(rollWrap.clientWidth, c ? KEYW + (c.length + bpb()) * S.rollZoom : 0), 128 * S.rowH);
   const W = roll.clientWidth, sx = rollWrap.scrollLeft;
-  g.fillStyle = "#16181c"; g.fillRect(0, 0, W, 128 * S.rowH);
+  g.fillStyle = "#101011"; g.fillRect(0, 0, W, 128 * S.rowH);
   if (!c || c.kind !== "midi") {
     info.textContent = "Select a MIDI clip (double-click empty lane space to create one)";
-    g.fillStyle = "#8b919b"; g.font = "13px Segoe UI"; g.fillText("No MIDI clip selected", 20 + sx, rollWrap.scrollTop + 30);
+    g.fillStyle = "#8f897c"; g.font = "13px Segoe UI"; g.fillText("No MIDI clip selected", 20 + sx, rollWrap.scrollTop + 30);
     drawVel(null); return;
   }
   info.textContent = `${t.name} · ${c.name || c.id} · starts ${fmtPos(c.start)} · ${c.notes.length} notes · click: add  drag: move  edge: resize  dbl-click: delete  ctrl+wheel: zoom`;
   for (let p = 0; p < 128; p++) {
     const y = (127 - p) * S.rowH, black = [1, 3, 6, 8, 10].includes(p % 12);
-    g.fillStyle = black ? "#1a1d22" : "#1f2228"; g.fillRect(KEYW, y, W, S.rowH);
-    if (p % 12 === 0) { g.fillStyle = "#2f343c"; g.fillRect(KEYW, y + S.rowH - 1, W, 1); }
+    g.fillStyle = black ? "#131314" : "#18181a"; g.fillRect(KEYW, y, W, S.rowH);
+    if (p % 12 === 0) { g.fillStyle = "#2a2a2d"; g.fillRect(KEYW, y + S.rowH - 1, W, 1); }
   }
   const len = c.length, X = (b) => KEYW + b * S.rollZoom;
   const step = S.snap > 0 && S.snap * S.rollZoom >= 6 ? S.snap : 0.25;
   for (let b = 0; b <= len + bpb(); b += step) {
     const isBar = Math.abs(b / bpb() - Math.round(b / bpb())) < 1e-6, isBeat = Math.abs(b - Math.round(b)) < 1e-6;
-    g.fillStyle = isBar ? "#3b414b" : isBeat ? "#2a2e35" : "#22262b"; g.fillRect(Math.round(X(b)), 0, 1, 128 * S.rowH);
+    g.fillStyle = isBar ? "#3b3b40" : isBeat ? "#232325" : "#1c1c1e"; g.fillRect(Math.round(X(b)), 0, 1, 128 * S.rowH);
   }
   g.fillStyle = "rgba(0,0,0,.35)"; g.fillRect(X(len), 0, W, 128 * S.rowH);
   const col = trackColor(t, S.doc.tracks.indexOf(t));
@@ -370,25 +381,25 @@ function drawRoll() {
     const y = (127 - n[0]) * S.rowH, sel = S.sel.notes.has(i);
     g.fillStyle = sel ? "#ffffff" : col; g.globalAlpha = 0.45 + 0.55 * n[3] / 127;
     g.fillRect(X(n[1]) + 0.5, y + 1, Math.max(3, n[2] * S.rollZoom - 1), S.rowH - 2); g.globalAlpha = 1;
-    g.strokeStyle = sel ? "#5e9cec" : "#101216"; g.strokeRect(X(n[1]) + 0.5, y + 1.5, Math.max(3, n[2] * S.rollZoom - 1), S.rowH - 3);
+    g.strokeStyle = sel ? "#ffb000" : "#0c0c0d"; g.strokeRect(X(n[1]) + 0.5, y + 1.5, Math.max(3, n[2] * S.rollZoom - 1), S.rowH - 3);
   });
   if (S.drag && S.drag.kind === "box") {
-    const d = S.drag; g.strokeStyle = "#5e9cec"; g.setLineDash([3, 3]);
+    const d = S.drag; g.strokeStyle = "#ffb000"; g.setLineDash([3, 3]);
     g.strokeRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0)); g.setLineDash([]);
   }
-  const ph = S.playhead - c.start; if (ph >= 0 && ph <= len) { g.fillStyle = "#e5534b"; g.fillRect(X(ph), 0, 1.5, 128 * S.rowH); }
+  const ph = S.playhead - c.start; if (ph >= 0 && ph <= len) { g.fillStyle = "#ff4a3a"; g.fillRect(X(ph), 0, 1.5, 128 * S.rowH); }
   // sticky keyboard
   for (let p = 0; p < 128; p++) {
     const y = (127 - p) * S.rowH, black = [1, 3, 6, 8, 10].includes(p % 12);
-    g.fillStyle = black ? "#2a2d33" : "#cfd3da"; g.fillRect(sx, y, KEYW, S.rowH - 0.5);
-    if (p % 12 === 0) { g.fillStyle = "#16181c"; g.font = "9px Segoe UI"; g.fillText(noteName(p), sx + 18, y + S.rowH - 2); }
+    g.fillStyle = black ? "#252527" : "#cfcabd"; g.fillRect(sx, y, KEYW, S.rowH - 0.5);
+    if (p % 12 === 0) { g.fillStyle = "#101011"; g.font = "9px Segoe UI"; g.fillText(noteName(p), sx + 18, y + S.rowH - 2); }
   }
   drawVel(c, col);
 }
 function drawVel(c, col) {
   const W = rollWrap.clientWidth, H = 64, g = fitCanvas(velCv, W, H), sx = rollWrap.scrollLeft;
-  g.fillStyle = "#1a1d22"; g.fillRect(0, 0, W, H);
-  g.fillStyle = "#8b919b"; g.font = "10px Segoe UI"; g.fillText("vel", 8, 14);
+  g.fillStyle = "#131314"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "#8f897c"; g.font = "10px Segoe UI"; g.fillText("vel", 8, 14);
   if (!c) return;
   c.notes.forEach((n, i) => {
     const x = KEYW + n[1] * S.rollZoom - sx; if (x < KEYW - 2 || x > W) return;
@@ -475,6 +486,7 @@ document.addEventListener("keydown", (e) => {
   if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
   const [, c] = selClip();
   if (e.code === "Space") { e.preventDefault(); S.audio.playing ? stop(false) : play(); return; }
+  if (document.body.dataset.room !== "desk") return;  // editing keys belong to the desk
   if (e.ctrlKey && e.key.toLowerCase() === "z") { e.preventDefault(); act("undo"); return; }
   if (e.ctrlKey && e.key.toLowerCase() === "y") { e.preventDefault(); act("redo"); return; }
   if (S.tab === "roll" && c && c.kind === "midi") {
@@ -502,6 +514,7 @@ document.addEventListener("keydown", (e) => {
 // ---------------------------------------------------------------- transport (Web Audio)
 async function play() {
   if (!S.doc || S.busy) return;
+  window.Studio?.hush();
   try {
     if (S.audio.version !== S.version || !S.audio.buf) {
       S.busy = true; status("rendering…", "busy");
@@ -510,7 +523,7 @@ async function play() {
       const file = rep.files[0];
       S.audio.ctx = S.audio.ctx || new AudioContext();
       const data = await (await fetch("/api/audio?file=" + encodeURIComponent(file) + "&t=" + Date.now())).arrayBuffer();
-      S.audio.buf = await S.audio.ctx.decodeAudioData(data); S.audio.version = S.version;
+      S.audio.buf = await S.audio.ctx.decodeAudioData(data); S.audio.version = S.version; S.audio.rev = S.doc.rev; audioTag();
       status(rep.warnings.length ? `${rep.warnings.length} warning(s) - see Render report` : "", rep.warnings.length ? "busy" : "");
       if (S.tab === "report") renderPanel();
     }

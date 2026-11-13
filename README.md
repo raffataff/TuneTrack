@@ -90,6 +90,17 @@ a Sidechain picker on each effect.
 uv run tunetrack ui
 ```
 
+The editor has two rooms, switched in the header.
+
+**Studio** is the crew: a rack with one unit per seat (who is in it, what it is working on, its activity), SEAT to
+choose an agent app and model or to sit in it yourself, HOLD to pause one seat, OPEN for the seat's tasks, takes
+and log. RUN starts the seated agents and BRIEF gives the Producer a new brief; the crew keeps running in the
+editor's server until you press STOP. **Needs You** lists what is waiting on you: a handed-in take can be heard
+against the session (A/B), accepted, or returned with a reason. The **monitor** shows what every seat does and
+says, and you can talk to a seat or to everyone from it.
+
+**Desk** is the arrangement, piano roll and mixer:
+
 - **Arrangement**: drag clips to move (Alt-drag copies), drag the right edge to resize, double-click empty space for a new clip,
   right-click for rename/duplicate/split/mute/delete. Click the ruler to move the playhead, shift-drag it (or drag its top
   strip) to set the loop region, right-click it for markers. Ctrl+wheel zooms.
@@ -99,10 +110,11 @@ uv run tunetrack ui
 - **Track**: instrument picker, built-in synth/FX parameters, VST3 parameter browser, patch capture, audition.
 - **Render report**: loudness, true peak, band balance, per-track levels, warnings, output files.
 - **Space** renders the changed tracks and plays (unchanged tracks come from cache). The Loop button loops the loop region.
+  Playback is a render, not a live engine: the tag beside the transport says whether the audio is the current revision.
 - Ctrl+Z / Ctrl+Y undo/redo (shared with the agent's edits).
 
-Everything goes through the same API the agent uses, and the editor polls the project file, so you can watch an agent work and
-take over at any point.
+Everything goes through the same API the agents use, and the editor follows the project and the studio board live, so you
+can watch an agent work and take over at any point.
 
 ## Rendering and delivery
 
@@ -135,6 +147,60 @@ on. The full report is also saved to `renders/listen.json`.
 
 The drum and pitch readings are heuristics (spectral features, harmonic matching). They're tuned on the built-in synths,
 Groove Agent SE, MODO DRUM and HALion, and they only warn on clear mismatches. Your ears still decide.
+
+## The studio: a crew of agents
+
+A project can be worked on by a crew. Each seat is a standing job; who fills it - an agent, an outside app, or
+you - can change at any time.
+
+| Seat | Does |
+|---|---|
+| Producer | Plans from the brief, hands out tasks, auditions what comes back, accepts or returns it |
+| Spotting | Reads the picture or the game: cue sheet, hit points, tempo map (picture work only) |
+| Composer | Themes, harmony, structure |
+| Arranger | Who plays what: voicings, doublings, articulations, dynamics |
+| Rhythm | Drums, percussion, bass, feel |
+| Sound | Chooses and shapes the instruments |
+| Tracking | Recorded audio: takes, comping, placing clips (live recording only) |
+| Mix | Balance, EQ, dynamics, space, automation, master |
+| Review | Independent ears: listens against the brief and sends located problems back |
+
+```bash
+uv run tunetrack crew detect
+```
+```bash
+uv run tunetrack call seat_assign '{"seat": "producer", "kind": "agent", "runner": "codex", "model": "gpt-5.6-luna"}'
+```
+```bash
+uv run tunetrack crew run --brief "A hopeful 16-bar menu theme, piano and strings, loops cleanly"
+```
+
+`crew detect` lists the agent apps on this machine (Claude Code, Codex, Kilo) with their models; any of them can
+fill any seat, and `kind: "human"` puts you in it. `crew run` starts the seated agents on whatever is ready and
+stops when nothing more can happen without you.
+
+- **Takes.** A seat works in a take: a private copy of the project that every tool then edits. Nothing is heard
+  until the take is accepted, so several seats work at once. Accepting is a three-way merge by department: a
+  Composer's notes and a Mix engineer's fader moves on the same track combine, two takes that changed different
+  bars of one clip combine note by note, and two that changed the same bars are a conflict that is reported, not
+  guessed. A take that strays outside its seat's department is flagged. Accepting is one undo step. Takes share
+  the session's render cache, so auditioning one renders only what it changed.
+- **Tasks and talkback.** The Producer splits the brief into tasks with dependencies (`task_add`); seats report
+  with `task_update` and talk with `message_send`.
+- **Needs You.** `ask_human` puts a decision, an input or a blocker on your list while the rest of the crew
+  carries on; your answer goes back to the seat that asked. A handed-in take lands there for audition when no
+  Producer agent is seated. An agent that cannot start (not logged in, wrong model) or keeps failing becomes a
+  blocker there instead of a lamp that says "working" forever.
+- **From another app.** Claude Desktop, Claude Code or Codex connected to the MCP server acts for you by default;
+  `seat_join("composer")` makes it that seat, working in takes like any other.
+- **Limits you can set.** `--parallel` agents at once, `--max-runs` agent runs before the crew stops and asks.
+  Launched agents get only their seat's studio tools: no shell, no file access.
+
+The board lives in `projects/<name>/studio/` (state, activity log, per-run logs) and takes in
+`projects/<name>/takes/`.
+
+Where this is heading (live engine, rack UI, recording, scoring to picture) and what is built so far:
+[docs/STUDIO_PLAN.md](docs/STUDIO_PLAN.md).
 
 ## Harmony: the chord track and the score
 
@@ -179,7 +245,7 @@ bar 11
 
 ## For agents
 
-50 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
+66 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
 The skill (`skill/SKILL.md`) is the composition playbook: understanding the project, forms per cue type, melody/harmony/bass/
 arrangement craft, genre palettes, mixing targets, the review loop and delivery per engine.
 
@@ -207,6 +273,11 @@ src/tunetrack/
   harmony.py    chord track, chord inference, score() text view, harmony check (clashes, parallels, crossings)
   listening.py  listen(): per-section measurements, masking, probe renders that verify each instrument, reference compare
   api.py        every operation (shared by MCP, CLI and editor)
+  roles.py      the seats: what each is for, what it may change, which tools it gets
+  studio.py     the board: seats, tasks, messages, Needs You, activity log
+  takes.py      working copies and the three-way merge that accepts them
+  crew/         detect.py (installed agent apps + models), runners.py (launch them headless),
+                briefs.py (what each seat is told), floor.py (start agents on ready tasks, route takes, handle failures)
   mcp_server.py MCP tools    server.py + web/  editor    cli.py  command line
 library/        plugins.json, patches/, instruments/ (SFZ), config.json
 projects/<name>/project.json, audio/, renders/, cache/, history/
