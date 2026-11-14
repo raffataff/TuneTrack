@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 
 from .. import roles, studio
-from . import floor
+from . import floor, scorecard
 
 _hosts: dict[str, dict] = {}  # session folder -> {"floor", "thread", "error"}
 _lock = threading.RLock()
@@ -57,6 +57,7 @@ def crew_start(brief: str | None = None, parallel: int = 3, max_runs: int = 40, 
                 h["error"] = f"{type(e).__name__}: {e}"
             finally:
                 try:
+                    scorecard.remember(key)  # how each agent did, kept for the next time seats are filled
                     studio.log("crew", key, what="stop", error=h["error"])
                 except Exception:  # noqa: BLE001 - the session folder may be gone
                     pass

@@ -292,6 +292,8 @@ def test_returning_a_take_requeues_its_task(song):
     studio.seat_join("composer")
     assert "keep the D-F-A rise" in studio.inbox()["messages"][0]["text"]
     assert takes.take_list()["takes"][0]["state"] == "open"  # still there to continue
+    # and the reason stays on the take, where the board (and so a person's task card and the Desk) reads it
+    assert studio.board()["takes"][0]["reason"] == "Bar 1 loses the motif: keep the D-F-A rise"
 
 
 def test_an_empty_take_cannot_be_submitted(song):
@@ -384,6 +386,92 @@ def test_a_seated_mcp_server_offers_only_its_seats_tools(song):
     assert "You are the Review" not in mcp_server.INSTRUCTIONS and "seat_join" in mcp_server.INSTRUCTIONS
 
 
+def test_a_launched_agent_is_not_sent_pictures_it_cannot_open(song, monkeypatch):
+    from tunetrack import mcp_server
+    assert "piano_roll_png" in mcp_server.analyze()  # the user's own assistant can open the file
+    studio.seat_join("composer")
+    assert "piano_roll_png" in mcp_server.analyze()  # so can an outside app that took a seat
+    assert "piano_roll_png" in mcp_server._instructions()
+    monkeypatch.setenv("TUNETRACK_SEAT", "composer")  # what the floor manager sets for the agents it starts
+    rep = mcp_server.analyze()
+    assert "piano_roll_png" not in rep and "spectrogram_png" not in rep and "out_of_key" in json.dumps(rep)
+    told = mcp_server._instructions()
+    assert "piano_roll_png" not in told and "TTN notation" in told
+    assert "You are the Composer" not in told and "The studio:" not in told  # its brief says both: not paid for twice
+
+
+def test_a_launched_mix_agent_is_told_which_listening_pass_it_is_on(song, monkeypatch):
+    from tunetrack import mcp_server
+    monkeypatch.setattr(api, "render", lambda *a, **k: {"mix": {"lufs": -16.0}, "warnings": []})
+    monkeypatch.setattr(mcp_server, "_passes", 0)
+    assert "mix_pass" not in mcp_server.render()  # the user's own assistant renders as often as it likes
+    studio.seat_join("mix")
+    assert "mix_pass" not in mcp_server.render()  # so does an outside app in the Mix seat
+    monkeypatch.setenv("TUNETRACK_SEAT", "composer")  # what the floor manager sets for the agents it starts
+    studio.seat_join("composer")
+    assert "mix_pass" not in mcp_server.render()  # and a launched agent in another seat
+    monkeypatch.setenv("TUNETRACK_SEAT", "mix")
+    studio.seat_join("mix")
+    notes = [mcp_server.render() for _ in range(4)]
+    assert all(next(iter(r)) == "mix_pass" and r["mix"] == {"lufs": -16.0} for r in notes)  # first thing it reads
+    assert notes[0]["mix_pass"].startswith("Listening pass 1 of 3") and "take_submit" not in notes[0]["mix_pass"]
+    assert "the last one" in notes[2]["mix_pass"] and "take_submit" in notes[2]["mix_pass"]
+    assert notes[3]["mix_pass"].startswith("This is render 4") and "take_submit" in notes[3]["mix_pass"]
+    assert "mix_pass" not in mcp_server.render(out="renders/final.wav")  # an export is not a listening pass
+    assert mcp_server.render()["mix_pass"].startswith("This is render 5")
+
+
+def test_tools_are_listed_without_schema_labels_and_still_check_their_arguments(song):
+    import asyncio
+
+    from tunetrack import mcp_server
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    assert len(tools) == len(mcp_server.TOOLS) == 70
+
+    def labels(o):
+        if isinstance(o, dict):
+            return sum(k == "title" and isinstance(v, str) for k, v in o.items()) + sum(labels(v) for v in o.values())
+        return sum(labels(v) for v in o) if isinstance(o, list) else 0
+
+    assert sum(labels(t.input_schema) for t in tools.values()) == 0
+    props = tools["task_add"].input_schema["properties"]
+    assert {"seat", "title"} <= set(props) and props["title"] == {"type": "string"}  # a parameter, not a label
+    assert tools["track_update"].input_schema["required"] == ["track"]
+    assert sum(len(json.dumps(t.input_schema)) for t in tools.values()) < 27000  # it was 34,500 with the labels
+
+    async def call(name, args):
+        return await mcp_server.mcp.call_tool(name, args)
+
+    asyncio.run(call("track_update", {"track": "Piano", "volume_db": -3, "pan": None}))  # null still means "leave it"
+    assert api.project_info()["tracks"][0]["volume_db"] == -3
+    with pytest.raises(Exception, match="volume_db"):
+        asyncio.run(call("track_update", {"track": "Piano", "volume_db": "loud"}))
+
+
+def test_a_launched_agent_that_asks_for_a_take_gets_the_one_cut_for_it(song, monkeypatch):
+    from tunetrack import mcp_server, takes
+    t1 = studio.task_add("composer", "Write the hook")["id"]
+    t2 = studio.task_add("composer", "Write the bridge")["id"]
+    monkeypatch.setenv("TUNETRACK_SEAT", "composer")  # as the floor manager starts it: seated, its take already cut
+    studio.seat_join("composer")
+    cut = takes.take_new(None, t1, "composer", True)
+    try:
+        again = mcp_server.take_new()
+        assert again["take"] == cut["take"] == "tk1" and "already" in again["note"] and t1 in again["note"]
+        assert mcp_server.take_new(task=t1.lower())["take"] == "tk1"
+        assert [t["id"] for t in studio.take_index(Path(song))] == ["tk1"]  # nothing left open and empty beside it
+        assert mcp_server.take_new(task=t2)["take"] == "tk2"  # another task is another take
+        takes.take_use("tk1")
+        api.write("Piano", "F5:w", at="5:1")
+        takes.take_submit("A high F")
+        assert mcp_server.take_new()["take"] == "tk3"  # the one in hand is handed in: a new one is what it means
+        monkeypatch.delenv("TUNETRACK_SEAT")
+        assert mcp_server.take_new()["take"] == "tk4"  # an outside app in a seat decides for itself
+    finally:
+        api.set_default_project(None)
+        studio.seat_join(None)
+
+
 def test_the_editor_feed_reports_file_changes_and_new_activity(song):
     from tunetrack import server
     msg, seq = server._pulse(Path(song), 0)
@@ -425,3 +513,62 @@ def test_a_relative_render_path_lands_in_the_session(song, tmp_path, monkeypatch
     assert rep["files"] and all(Path(f).resolve().is_relative_to(Path(song).resolve() / "renders" / "final")
                                 for f in rep["files"])
     assert not (tmp_path / "renders").exists()
+
+
+# ---- what an agent is sent is read by a model, and paid for on every later step of its run ---------------------------
+
+def test_tools_answer_in_json_on_one_line():
+    import asyncio
+    from tunetrack import mcp_server
+    res = asyncio.run(mcp_server.mcp.call_tool("theory", {"scale": "D dorian"}))
+    assert res.content[0].text == '{"scale":{"key":"D dorian","notes":["D","E","F","G","A","B","C"]}}'
+    assert mcp_server.theory(scale="D dorian")["scale"]["key"] == "D dorian"  # in Python it is still the dict
+
+
+def test_a_launched_agent_gets_the_short_board(song, monkeypatch):
+    from tunetrack import mcp_server
+    studio.seat_assign("composer", "agent", runner="script", model="x.py")
+    studio.seat_assign("mix", "human")
+    studio.task_add("composer", "Write the hook", "Piano, bars 1-4", scope={"tracks": ["Piano"]})
+    studio.task_add("composer", "Write the bridge")
+    studio.task_update("T2", state="done", result="A long account of the bridge. " * 20)
+    full = mcp_server.studio_status()
+    assert "departments" in full and len(full["seats"]) >= 6  # the user's own assistant sees every seat and role
+    studio.seat_join("producer")
+    monkeypatch.setenv("TUNETRACK_SEAT", "producer")  # as the floor manager starts it
+    lean = mcp_server.studio_status()
+    assert lean["seats"] == {"composer": "agent", "mix": "user"}  # nothing about seats nobody sits in
+    assert lean["tasks"] == [{"id": "T1", "seat": "composer", "title": "Write the hook", "state": "queued", "ready": True}]
+    assert lean["recently_finished"] == ["T2 composer done: Write the bridge"]
+    assert "departments" not in lean and "session" not in lean
+    assert len(json.dumps(lean)) * 4 < len(json.dumps(full))
+
+
+def test_a_launched_agent_gets_the_library_without_the_padding(song, monkeypatch):
+    from tunetrack import mcp_server
+    assert "current_project" in mcp_server.status()
+    studio.seat_join("sound")
+    monkeypatch.setenv("TUNETRACK_SEAT", "sound")
+    lib = mcp_server.status()
+    assert "current_project" not in lib and isinstance(lib["patches"], dict) and "builtin_synths" in lib
+    assert all(isinstance(p, str) for ids in lib["patches"].values() for p in ids)
+
+
+def test_several_instruments_are_auditioned_in_one_call(song):
+    from tunetrack import mcp_server
+    out = mcp_server.audition(["synth:pad", "synth:no-such-preset"])["auditions"]
+    assert out[0]["silent"] is False and "file" not in out[0]
+    assert out[1]["instrument"] == "synth:no-such-preset" and "error" in out[1]  # one failure does not lose the rest
+    assert "file" in mcp_server.audition("synth:pad")
+    with pytest.raises(Exception, match="1 to 12"):
+        mcp_server.audition([])
+
+
+def test_taking_the_tools_back_to_the_session_means_the_agent_s_own_session(song, monkeypatch, tmp_path):
+    # A launched agent's session is the one it was started for, whatever the editor has open by now.
+    tk = takes.take_new("idea", None, "composer")["take"]
+    api.project_new("Something Else", folder=str(tmp_path / "other"))  # the user opens another project
+    monkeypatch.setenv("TUNETRACK_SESSION", song)
+    takes.take_use(tk, session=song)
+    assert takes.take_use(None)["editing"] == "session" and api.project_info()["name"] == "Night Drive"
+

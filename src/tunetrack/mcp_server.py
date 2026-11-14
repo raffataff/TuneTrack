@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import functools
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -73,13 +76,24 @@ part of it is not.
 """
 
 
+def _launched() -> bool:
+    """True in a crew agent the floor manager started (it sets TUNETRACK_SEAT). Such an agent has the studio's
+    tools and nothing else: it cannot open a file. An outside app that took a seat with seat_join() can."""
+    return bool(os.environ.get("TUNETRACK_SEAT"))
+
+
 def _instructions() -> str:
     seat = studio.me()
     if seat not in roles.ROLES:
         return INSTRUCTIONS
     r = roles.ROLES[seat]
+    if _launched():
+        # Its brief (crew/briefs.py) already says how a seat and the studio work; said twice it is paid for on
+        # every step. What is left is how the tools fit together, the notation and the quality bar.
+        return INSTRUCTIONS.replace(" + piano_roll_png - view it", "").split("\nThe studio:")[0]
+    rest = INSTRUCTIONS
     return SEATED.format(title=r.title, room=r.room.lower(), purpose=r.purpose,
-                         owns=", ".join(sorted(r.owns)) or "you change nothing: you listen and report") + INSTRUCTIONS
+                         owns=", ".join(sorted(r.owns)) or "you change nothing: you listen and report") + rest
 
 
 mcp = MCPServer("tunetrack", instructions=_instructions(), version="0.1.0")
@@ -87,7 +101,8 @@ TOOLS: list[str] = []
 
 
 def tool(fn):
-    """Register a tool whose failures reach the model with their real message (the SDK hides other exceptions)."""
+    """Register a tool whose failures reach the model with their real message (the SDK hides other exceptions).
+    What is registered answers in compact JSON (_wire); the name in this module still returns the dict."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
@@ -96,8 +111,42 @@ def tool(fn):
             raise
         except Exception as e:  # noqa: BLE001 - every failure is reported to the agent
             raise ToolError(f"{type(e).__name__}: {e}") from e
+
+    @functools.wraps(fn)
+    def wire(*args, **kwargs):
+        return _wire(wrapper(*args, **kwargs))
+
     TOOLS.append(fn.__name__)
-    return mcp.tool()(wrapper)
+    mcp.tool()(wire)
+    _trim_schema(fn.__name__)
+    return wrapper
+
+
+def _wire(result):
+    """A tool's answer as the model receives it: JSON on one line. The SDK writes a dict indented, one value per
+    line, and only a model reads it: on a real session that was two fifths of every answer (a listen() report of
+    25,000 characters is 15,000 like this), and an answer is paid for again on every later step of the run."""
+    if isinstance(result, (dict, list)):
+        return json.dumps(result, separators=(",", ":"), ensure_ascii=False, default=str)
+    return result
+
+
+def _no_titles(o):
+    """A JSON schema without its "title" labels ("Volume Db" beside volume_db): a quarter of every tool's schema,
+    sent with each step an agent takes, and it says nothing the parameter's name does not. A parameter that is
+    itself called title is a schema, not a label, and stays."""
+    if isinstance(o, dict):
+        return {k: _no_titles(v) for k, v in o.items() if not (k == "title" and isinstance(v, str))}
+    return [_no_titles(v) for v in o] if isinstance(o, list) else o
+
+
+def _trim_schema(name: str) -> None:
+    """Shorten the schema a tool is listed with. Arguments are still checked against the function's own signature."""
+    try:
+        t = mcp._tool_manager.get_tool(name)
+        t.parameters = _no_titles(t.parameters)
+    except Exception:  # noqa: BLE001 - a different SDK layout: the tool is listed as the SDK wrote it
+        pass
 
 
 def _clean(d: dict) -> dict:
@@ -108,13 +157,28 @@ def _clean(d: dict) -> dict:
 
 @tool
 def status() -> dict:
-    """Library overview (VST3 instruments/effects, patches, built-in synths/effects, SFZ count) + current project."""
+    """Library overview (VST3 instruments/effects, patches, built-in synths/effects, SFZ count) + current project.
+    One call is enough for a session: it does not change while you work."""
     out = api.library_status()
+    if _launched():
+        return _status_lean(out)
     try:
         out["current_project"] = api.project_info(clips=False)
     except Exception as e:  # noqa: BLE001
         out["current_project"] = str(e)
     return out
+
+
+def _status_lean(out: dict) -> dict:
+    """The library for a launched agent: patches as "id [tags]" under their plugin (124 patches were 16,000
+    characters as objects, 7,000 like this), and no project summary - project_info() is that."""
+    by_plugin: dict[str, list[str]] = {}
+    for p in out.pop("patches", []):
+        tags = " ".join(dict.fromkeys(p.get("tags") or []))
+        by_plugin.setdefault(p["plugin"], []).append(p["id"] + (f" [{tags}]" if tags else ""))
+    out.pop("library", None)
+    return {**out, "patches": by_plugin,
+            "patches_note": "Use as patch:<id>. patches_list(query) has names and descriptions."}
 
 
 @tool
@@ -153,8 +217,9 @@ def project_set(name: str | None = None, tempo: float | None = None, key: str | 
                 ceiling_db: float | None = None, master_volume_db: float | None = None,
                 tempo_changes: list | None = None, eq_engine: str | None = None, project: str | None = None) -> dict:
     """Change project settings. loop: "1:1-17:1" (bar:beat range) or "off". length: end position "33:1",
-    a length "32 bars", or "auto". target_lufs: loudness the render is normalised to (default -16; -14..-18 typical
-    for game music). ceiling_db: true-peak-ish limiter ceiling. tempo_changes: [["17:1", 90], ...].
+    a length "32 bars", or "auto". tail: the most seconds a one-shot render may run past the end while releases and
+    reverb die away; it stops sooner once they are silent (to hold silence after the end, extend length instead).
+    target_lufs: loudness the render is normalised to (default -16; -14..-18 typical for game music). ceiling_db: true-peak-ish limiter ceiling. tempo_changes: [["17:1", 90], ...].
     eq_engine: what every builtin:eq insert runs on, same settings - "builtin", "ssl" (SSL Native Channel Strip 2:
     console colour) or "nova" (TDR Nova: clean, wide ranges). Inserts added as "eq:ssl"/"eq:nova" keep theirs."""
     return api.project_set(project, name, tempo, key, time_sig, brief, loop, length, tail, target_lufs, ceiling_db,
@@ -212,7 +277,8 @@ def track_update(track: str, name: str | None = None, instrument: Any = None, in
                  solo: bool | None = None, output: str | None = None, sends: list[dict] | None = None,
                  role: str | None = None, layer: str | None = None, project: str | None = None) -> dict:
     """Change a track. sends: [{"to": "Reverb", "db": -10}] (replaces sends). instrument_params merge into the
-    instrument (built-in synth params like {"cutoff": 900, "release": 1.2}, or VST3 params by name)."""
+    instrument (built-in synth params like {"cutoff": 900, "release": 1.2}, or VST3 params by name). Effects are
+    not set here: fx_add, then fx_update."""
     return api.track_update(track, project, name, instrument, volume_db, pan, mute, solo, output, sends, role,
                             layer, None, instrument_params)
 
@@ -484,10 +550,23 @@ def sfz_info(path: str) -> dict:
 
 
 @tool
-def audition(instrument: str, phrase: str = "auto") -> dict:
+def audition(instrument: str | list[str], phrase: str = "auto") -> dict:
     """Render a short test phrase through an instrument to check it makes sound and how bright it is.
-    phrase: auto | chords | melody | bass | drums | any TTN text."""
-    return api.audition(instrument, phrase)
+    instrument: one, or a list to compare candidates in one call (up to 12; each answers with its own figures or
+    its own error). phrase: auto | chords | melody | bass | drums | any TTN text."""
+    if isinstance(instrument, str):
+        return api.audition(instrument, phrase)
+    if not instrument or len(instrument) > 12:
+        raise ValueError("Pass 1 to 12 instruments")
+    out = []
+    for name in instrument:
+        try:
+            r = api.audition(name, phrase)
+            r.pop("file", None)  # the list is for comparing figures; audition one alone for its file
+            out.append(r)
+        except Exception as e:  # noqa: BLE001 - one that fails must not lose the others
+            out.append({"instrument": name, "error": f"{type(e).__name__}: {e}"})
+    return {"auditions": out}
 
 
 # ---- render & review -------------------------------------------------------------------------------------------
@@ -498,8 +577,36 @@ def render(out: str | None = None, format: str = "wav", bits: int = 24, loop: st
     """Render and analyse. out: folder or file path (extension sets format: .wav .ogg .flac .mp3); default
     <project>/renders. loop: auto (use project loop) | off | loop (loop body only) | intro+loop (with loop points).
     stems: per-track files; layers: one file per track layer (adaptive music); midi: also export .mid.
-    Report: lufs, true peak, band balance %, per-track levels, warnings to act on."""
-    return api.render(project, out, format, bits, loop, normalize, stems, layers, midi)
+    Report: lufs, true peak, band balance %, per-track levels, warnings to act on, and file_format (sample rate,
+    channels, bit depth of what was written: enough to check a delivery spec; the rate is the project's)."""
+    rep = api.render(project, out, format, bits, loop, normalize, stems, layers, midi)
+    return _mix_pass(rep) if out is None else rep
+
+
+MIX_PASSES = 3  # briefs.MIX: two listening passes, three at most
+_passes = 0     # working renders by this process; a launched agent's server lives for one run
+
+
+def _mix_pass(rep: dict) -> dict:
+    """Tell a launched Mix agent which listening pass this working render starts, first in the report. A brief
+    that says "three at most" was read once and forgotten by the sixth render; the count arrives with each one.
+    Nothing is refused: a take that came back may need another round, and that is a new run."""
+    global _passes
+    if not _launched() or studio.me() != "mix" or not isinstance(rep, dict):
+        return rep
+    _passes += 1
+    n = _passes
+    if n < MIX_PASSES:
+        note = (f"Listening pass {n} of {MIX_PASSES}. Fix the two or three things a listener would notice first; "
+                f"leave the rest.")
+    elif n == MIX_PASSES:
+        note = (f"Listening pass {n} of {MIX_PASSES}: the last one. If this render shows what you just changed did "
+                f"harm, undo() that; otherwise change nothing more. Hand in now with take_submit(summary) and put "
+                f"what is still off in the summary, with bars and tracks.")
+    else:
+        note = (f"This is render {n}; your brief allows {MIX_PASSES} listening passes. Stop here: take_submit(summary) "
+                f"with what is still off, and let the Producer decide whether it is worth another round.")
+    return {"mix_pass": note, **rep}
 
 
 @tool
@@ -516,9 +623,11 @@ def score(start: Any = None, end: Any = None, section: str | None = None, tracks
 
 @tool
 def analyze(images: bool = True, start: Any = None, end: Any = None, project: str | None = None) -> dict:
-    """Note checks (out-of-key, out-of-range, overlaps, low-register mud), harmony_warnings (as in score()) +
-    piano-roll PNG and spectrogram PNG of the last render. Read the PNG files to see the arrangement."""
-    return api.analyze(project, images, start, end)
+    """Note checks (out-of-key, out-of-range, overlaps, low-register mud) and harmony_warnings (as in score()).
+    images=True also writes a piano-roll PNG and a spectrogram PNG of the last render and returns their paths:
+    open them to see the arrangement. A crew agent launched by the studio cannot open files, so it gets the checks
+    only - score() is its view of the notes and listen() of the sound."""
+    return api.analyze(project, images and not _launched(), start, end)
 
 
 @tool
@@ -560,7 +669,10 @@ def ui_open(project: str | None = None) -> dict:
 @tool
 def studio_status(session: str | None = None) -> dict:
     """The studio board: seats and who is in them, open tasks, takes waiting for acceptance, the user's Needs You
-    list, and which seat you are. Start here in a session with a crew."""
+    list, and which seat you are. Start here when you join a session from outside. A crew agent the studio
+    started has what it needs in its task message: this is for looking something up mid-task."""
+    if _launched():
+        return studio.studio_status(session, lean=True)
     out = studio.studio_status(session)
     if studio.me() in (roles.YOU, "producer"):
         out["departments"] = [f"{r['id']}: {r['purpose']}" for r in roles.catalog()]
@@ -597,22 +709,47 @@ def task_add(seat: str, title: str, detail: str = "", depends: list[str] | None 
 def task_update(task: str, state: str | None = None, result: str | None = None, title: str | None = None,
                 detail: str | None = None, depends: list[str] | None = None, session: str | None = None) -> dict:
     """Move a task along: state = queued | working | needs_you | done | failed | cancelled (take_submit sets
-    "submitted" for you). result: one or two sentences on what was done, or why it failed and what you tried."""
+    "submitted" for you; a task a crew agent was started on is already "working"). result: one or two sentences on
+    what was done, or why it failed and what you tried."""
     return studio.task_update(task, state, result, None, title, detail, depends, session)
 
 
 @tool
 def inbox(session: str | None = None) -> dict:
     """What is waiting for your seat: unread messages (including the user's answers to your questions) and your
-    open tasks. Call it when you start and after each step you finish."""
+    open tasks. A crew agent the studio started gets both in its task message; call this only to look for
+    something new mid-task."""
     return studio.inbox(None, True, session)
 
 
 @tool
 def message_send(to: str, text: str, task: str | None = None, session: str | None = None) -> dict:
-    """Talkback: say something to a seat, to "all", or to "you" (the user). task: the task it is about. Messages
-    inform and ask; work that someone must do goes on the board with task_add."""
+    """Talkback: say something to a seat, to "all", or to "you" (the user), in a line or two. task: the task it is
+    about. Send one when the receiver has to act on it or decide differently because of it - not to say that
+    something is done or passed, which the board shows. Work that someone must do goes on the board with task_add."""
     return studio.message_send(to, text, task, session)
+
+
+@tool
+def report_write(title: str, body: str, kind: str = "report", report: str | None = None,
+                 session: str | None = None) -> dict:
+    """File a document in the studio's REPORTS when your task asks for one: a review, or findings someone will act
+    on. Not a record of what you did - a hand-in summary or a task result is that. body: markdown, findings first,
+    one line each (where: bars, tracks | what you measured | who should fix it). kind: "report", "review" or "note".
+    report: the id of an earlier one to replace instead of filing a new one."""
+    return studio.report_write(title, body, kind, report, session)
+
+
+@tool
+def report_list(session: str | None = None) -> dict:
+    """The reports filed in this session (id, title, kind, who filed it)."""
+    return studio.report_list(session)
+
+
+@tool
+def report_read(report: str, session: str | None = None) -> dict:
+    """One report in full, by id."""
+    return studio.report_read(report, session)
 
 
 @tool
@@ -622,7 +759,9 @@ def ask_human(title: str, detail: str = "", kind: str = "decision", options: lis
     provide or pick something), "blocker" (you cannot continue). options: labels, or {"label", "take": "<take
     id>", "audio": "<file>", "detail"} so each can be auditioned. task: the task it is about (it waits);
     blocks: other tasks that must wait too. The answer arrives in inbox(). Keep working on what doesn't depend on
-    it. For real choices and blockers only - not progress reports."""
+    it. For real choices and blockers only - not progress reports, and not "please listen for me": listen() and
+    render() are how you hear. When taste has to decide between versions, pass their takes as options so the user
+    gets a play key for each."""
     return studio.ask_human(title, detail, kind, options, task, blocks, session)
 
 
@@ -640,7 +779,28 @@ def needs_you(resolve: str | None = None, option: str | None = None, text: str =
 def take_new(name: str | None = None, task: str | None = None, session: str | None = None) -> dict:
     """Cut a take: a private copy of the session's project. Your tools then edit the take, so nobody's work changes
     under you and yours isn't heard until it is accepted. task: the task the take is for."""
-    return takes.take_new(name, task, None, True, session)
+    return _take_in_hand(task, session) or takes.take_new(name, task, None, True, session)
+
+
+def _take_in_hand(task: str | None, session: str | None) -> dict | None:
+    """The take a launched agent already works in, when it asks for one for the same task (or names none). The
+    floor manager cuts the take before the agent starts; an agent that calls take_new() out of habit would leave
+    that one open and empty and hand in another. It gets the one it has."""
+    d = api._default_project
+    if not _launched() or not d or session:
+        return None
+    try:
+        meta = takes._meta(Path(d))
+    except (OSError, ValueError, KeyError):
+        return None  # its tools edit the session: there is no take yet
+    if meta.get("state") != "open" or meta.get("seat") != studio.me():
+        return None
+    if task and str(task).strip().lower() != str(meta.get("task") or "").lower():
+        return None
+    return {"take": meta["id"], "project": str(d), "base_rev": meta.get("base_rev"),
+            "note": f"You already have {meta['id']} open" + (f" for {meta['task']}" if meta.get("task") else "")
+                    + ": your tools edit it and nothing new was cut. take_diff shows what you changed; "
+                      "take_submit hands it in."}
 
 
 @tool
@@ -665,23 +825,33 @@ def take_sync(take: str | None = None, on_conflict: str = "fail", session: str |
 
 @tool
 def take_submit(summary: str, take: str | None = None, session: str | None = None) -> dict:
-    """Hand in your take. summary: what you made, where (tracks, bars), what the listener should check, and
-    anything you could not do or verify."""
+    """Hand in your take. summary, three lines at most: what you made and where (tracks, bars), what to check, and
+    anything you could not do or verify. The take's diff is shown to whoever auditions it: do not list it again."""
     return takes.take_submit(summary, take, session)
 
 
 @tool
 def take_accept(take: str, on_conflict: str = "fail", session: str | None = None) -> dict:
     """Merge a take into the session (one undo step). Listen first: take_use(take), render(), listen().
-    on_conflict: "fail" (default: list the conflicts, change nothing), "take" or "session" wins each conflict."""
+    on_conflict: "fail" (default: list the conflicts, change nothing), "take" or "session" wins each conflict.
+    Finishes the take's task and any task to audition it, and puts your tools back on the session."""
     return takes.take_accept(take, on_conflict, session)
 
 
 @tool
 def take_reject(take: str, reason: str, session: str | None = None) -> dict:
     """Send a take back to its seat. reason: what has to change, specific enough to act on - bars, tracks, what
-    you heard. Its task goes back in the queue and the take stays open for the seat to continue."""
+    you heard. Its task goes back in the queue and the take stays open for the seat to continue. Finishes any task
+    to audition it and puts your tools back on the session."""
     return takes.take_reject(take, reason, session)
+
+
+@tool
+def take_discard(take: str, session: str | None = None) -> dict:
+    """Close a take without merging it: its work is left out of the session for good (the files stay on disk).
+    For a take that is not wanted - superseded, cut by mistake, or left over when its task was closed. A take
+    that needs changes is returned with take_reject instead."""
+    return takes.take_discard(take, session)
 
 
 def apply_seat() -> list[str]:

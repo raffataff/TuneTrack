@@ -55,6 +55,8 @@ def set_default_project(path: str | Path | None) -> None:
 
 
 def _path(project: str | None) -> Path:
+    if isinstance(project, str) and project.strip().lower() in ("none", "null", ""):
+        project = None  # agents write project="none" when they mean "the one I am working in"
     if not project and _default_project:
         if not (_default_project / "project.json").exists():
             raise FileNotFoundError(f"No TuneTrack project at {_default_project}")
@@ -540,7 +542,14 @@ def track_update(track: str, project: str | None = None, name: str | None = None
             if v is not None:
                 setattr(t, k, v)
         if output is not None:
-            t.output = "master" if output == "master" else p.track(output).id
+            to = None if output == "master" else p.track(output)
+            seen, cur = set(), to
+            while cur is not None and cur.id not in seen:  # follow the route: it must not come back to this track
+                if cur.id == t.id:
+                    raise ValueError(f"{t.name} cannot be routed into {to.name}: its sound would be fed back into itself")
+                seen.add(cur.id)
+                cur = next((x for x in p.tracks if x.id == cur.output), None)
+            t.output = to.id if to else "master"
         if sends is not None:
             t.sends = [{"to": p.track(s["to"]).id, "db": float(s.get("db", -12))} for s in sends]
     return {"track": t.id, "name": t.name}
@@ -586,6 +595,17 @@ def track_duplicate(track: str, new_name: str | None = None, with_clips: bool = 
 
 def _fx_chain(p: Project, track: str) -> list[Device]:
     return p.master["fx"] if track == "master" else p.track(track).fx
+
+
+def _fx_at(chain: list[Device], track: str, index) -> Device:
+    """The effect at a place in a chain, or an error that says what the chain holds and what to call instead."""
+    i = int(index)
+    if 0 <= i < len(chain):
+        return chain[i]
+    have = ", ".join(f"[{k}] {f.label()}" for k, f in enumerate(chain))
+    raise IndexError(f"{track} has no effect at index {i}: its chain is {have or 'empty'}. "
+                     + ("Add one with fx_add(track, device) first; track_add and track_update do not set effects."
+                        if not chain else "Index 0 is the first effect."))
 
 
 def _eq_label(p: Project, f: Device) -> str:
@@ -716,7 +736,7 @@ def fx_update(track: str, index: int, project: str | None = None, params: dict |
               bypass: bool | None = None, replace=None, sidechain: str | None = None) -> dict:
     """sidechain: a track name to key the effect from, "" to disconnect it, None to leave it as it is.
     A replaced device keeps the old one's sidechain key."""
-    old = _fx_chain(load(project), track)[int(index)]
+    old = _fx_at(_fx_chain(load(project), track), track, index)
     new = parse_device(replace, instrument=False) if replace is not None else old
     key = old.sidechain if sidechain is None else (sidechain or None)
     switch, notes = {}, []
@@ -727,7 +747,7 @@ def fx_update(track: str, index: int, project: str | None = None, params: dict |
         switch, notes = _sidechain_switches(old, False)
     with _Edit(project) as p:
         chain = _fx_chain(p, track)
-        dev = chain[int(index)]
+        dev = _fx_at(chain, track, index)
         if replace is not None:
             dev = chain[int(index)] = new
         if sidechain is not None or replace is not None:
@@ -745,7 +765,8 @@ def fx_update(track: str, index: int, project: str | None = None, params: dict |
 def fx_remove(track: str, index: int, project: str | None = None) -> dict:
     with _Edit(project) as p:
         chain = _fx_chain(p, track)
-        removed = chain.pop(int(index))
+        removed = _fx_at(chain, track, index)
+        chain.remove(removed)
         labels = [_fx_label(p, f) for f in chain]
     return {"removed": removed.label(), "fx": labels}
 
@@ -1547,6 +1568,24 @@ def audition(instrument, phrase: str = "auto", out: str | None = None, tempo: fl
 
 # ---- render & review ---------------------------------------------------------------------------------------------------
 
+def _takes_left_out(path: Path, rep: dict) -> None:
+    """An export of the session does not contain work that is still in takes (seen live: a final mix went out
+    without a part that had been handed in and never auditioned). Say so where the caller reads warnings."""
+    try:
+        from . import takes
+        left = [t for t in takes.take_pending(str(path))["takes"] if t["changes"]]
+    except Exception:  # noqa: BLE001 - a board that cannot be read must not fail a render
+        return
+    if not left:
+        return
+    rep["not_in_this_render"] = [f"{t['take']} ({t['seat']}) {t['name']}: {t['status']}" for t in left]
+    n = len(left)
+    rep.setdefault("warnings", []).append(
+        f"{n} take{'s' if n != 1 else ''} with work in {'them' if n != 1 else 'it'} "
+        f"{'are' if n != 1 else 'is'} not in this export ({', '.join(t['take'] for t in left)}): accept, return or "
+        f"discard {'each' if n != 1 else 'it'} first, or leave {'them' if n != 1 else 'it'} out on purpose.")
+
+
 def render(project: str | None = None, out: str | None = None, format: str = "wav", bits: int = 24,
            loop: str = "auto", normalize: bool = True, stems: bool = False, layers: bool = False,
            midi: bool = False) -> dict:
@@ -1559,6 +1598,8 @@ def render(project: str | None = None, out: str | None = None, format: str = "wa
     rep = engine.render_project(p, out, format, int(bits), loop, normalize, stems, layers, midi)
     rep.pop("renderer", None)
     rep["seconds"] = round(time.time() - t0, 1)
+    if out and session_root(p.path) == p.path:
+        _takes_left_out(p.path, rep)
     (p.path / "renders").mkdir(exist_ok=True)
     (p.path / "renders" / "last.json").write_text(json.dumps(rep, indent=1), encoding="utf-8")
     return rep

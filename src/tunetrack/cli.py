@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import math
 import sys
 
 from . import api, config
@@ -54,6 +55,23 @@ def main(argv: list[str] | None = None) -> None:
     w.add_argument("--parallel", type=int, default=3, help="agents working at once")
     w.add_argument("--max-runs", type=int, default=40, help="agent runs before the crew stops and asks you")
     w.add_argument("--refresh", action="store_true", help="detect: rescan instead of using the cached result")
+    t = sub.add_parser("takes", help="`takes clean`: delete the folders of takes that are over (accepted or closed); "
+                                     "lists them unless --yes is given")
+    t.add_argument("action", choices=["clean"])
+    t.add_argument("--project")
+    t.add_argument("--days", type=float, default=0.0, help="keep takes that ended in the last N days")
+    t.add_argument("--yes", action="store_true", help="delete them (without it: only list what would go)")
+    lv = sub.add_parser("live", help="play a project in real time through the audio interface (the live engine); "
+                                     "edits made elsewhere are heard as they land")
+    lv.add_argument("project", nargs="?")
+    lv.add_argument("--device", help="part of an output's name, e.g. \"SSL\" or \"Windows Audio: Speakers\"")
+    lv.add_argument("--devices", action="store_true", help="list the audio outputs and stop")
+    lv.add_argument("--from-bar", type=float, default=None, help="start at this bar (default: the start)")
+    lv.add_argument("--seconds", type=float, default=0.0, help="stop after this long (default: until Ctrl+C)")
+    lv.add_argument("--no-loop", action="store_true", help="play to the end instead of looping the loop region")
+    lv.add_argument("--window", help="also open a plugin's window: <track name>/inst or <track name>/fx/<n>")
+    lv.add_argument("--null-test", action="store_true",
+                    help="no playback: render with both engines and report how far apart they are")
     sub.add_parser("install-claude", help="install the TuneTrack skill and register the MCP server with Claude Code")
     a = ap.parse_args(argv)
 
@@ -88,6 +106,8 @@ def main(argv: list[str] | None = None) -> None:
         run_mcp()
     elif a.cmd == "render":
         _print(api.render(a.project, a.out, a.format, a.bits, a.loop, not a.no_normalize, a.stems, a.layers, a.midi))
+    elif a.cmd == "live":
+        _live(a)
     elif a.cmd == "capture":
         tags = [t.strip() for t in a.tags.split(",") if t.strip()]
         print(f"Opening {a.plugin}... pick a sound, then close the plugin window.")
@@ -121,6 +141,9 @@ def main(argv: list[str] | None = None) -> None:
         if problems:
             print("Before the crew can work:\n  " + "\n  ".join(problems))
         _print(floor.Floor(max_parallel=a.parallel, max_launches=a.max_runs, on_event=show).run())
+    elif a.cmd == "takes":
+        from . import takes
+        _print(takes.take_cleanup(a.days, dry_run=not a.yes, session=a.project))
     elif a.cmd == "functions":
         for mod in _modules():
             for name, fn in inspect.getmembers(mod, inspect.isfunction):
@@ -133,6 +156,70 @@ def main(argv: list[str] | None = None) -> None:
         if fn is None:
             sys.exit(f"unknown function {a.fn!r} (see `tunetrack functions`)")
         _print(fn(**json.loads(a.args)))
+
+
+def _live(a) -> None:
+    import time
+    from . import live
+    if a.devices:
+        eng = live.Engine(no_device=True)
+        try:
+            _print(eng.call("devices")["devices"])
+        finally:
+            eng.close()
+        return
+    p = api.load(a.project)
+    if a.null_test:
+        _print(live.null_test(p, per_sample=True, progress=lambda m: print("  " + m, flush=True)))
+        return
+    print(f"Loading {p.name} into the live engine...", flush=True)
+    player = live.Player(p.path, device=a.device)
+    try:
+        dev = player.engine.ready
+        print(f"Output: {dev.get('type', '?')}: {dev.get('name', 'none')}  {dev.get('sr', 0):.0f} Hz, "
+              f"block {dev.get('block', 0)}")
+        if dev.get("device_problem"):
+            print("  ! " + dev["device_problem"])
+        for w in player.loaded.get("warnings", []) + ([player.loaded["device_problem"]]
+                                                       if player.loaded.get("device_problem") else []):
+            print("  ! " + w)
+        if a.window:
+            name, _, rest = a.window.partition("/")
+            t = next((t for t in p.tracks if t.name.lower() == name.lower() or t.id == name), None)
+            try:
+                if t is None:
+                    raise live.EngineError(f"no track named {name!r}")
+                player.engine.call("editor", ref=f"{t.id}/{rest or 'inst'}")
+                print(f"  opened the window of {a.window}")
+            except live.EngineError as e:
+                print(f"  ! {e}")
+        time.sleep(player.loaded.get("settle_ms", 0) / 1000 + 0.1)  # instruments finish loading their sounds
+        player.engine.call("ticks", hz=10)
+        beat = None if a.from_bar is None else (a.from_bar - 1) * p.beats_per_bar
+        player.play(beat if beat is not None else 0.0, loop=False if a.no_loop else None)
+        print("Playing. Ctrl+C stops.", flush=True)
+        t0, peak = time.time(), 0.0
+        while player.engine.alive() and (not a.seconds or time.time() - t0 < a.seconds):
+            time.sleep(0.5)
+            res = player.sync()
+            if res is not None:
+                print()
+                print("  project changed: reloaded", flush=True)
+                for w in res.get("warnings", []):
+                    print("  ! " + w, flush=True)
+            tk = player.engine.tick
+            m = tk.get("peaks", {}).get("master", [0, 0])
+            peak = max(m[:2]) if m else 0.0
+            bar = tk.get("beat", 0.0) / p.beats_per_bar + 1
+            print(f"\r  bar {bar:6.1f}   master {20 * math.log10(max(peak, 1e-6)):6.1f} dB   "
+                  f"cpu {100 * tk.get('cpu', 0):3.0f}%   dropouts {tk.get('xruns', 0)}   ", end="", flush=True)
+            if not tk.get("playing", True) and time.time() - t0 > 2:
+                break
+        print()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        player.close()
 
 
 def _modules() -> list:

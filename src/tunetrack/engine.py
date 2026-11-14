@@ -674,6 +674,10 @@ class Renderer:
         if midi:
             files.append(export_midi(p, out_dir / f"{base}.mid"))
         rep["files"] = files
+        # what was written, so a delivery spec ("48 kHz stereo WAV") can be checked from the report: a Producer
+        # that could not see this held a finished cue back and asked the user to inspect the file
+        rep["file_format"] = {"format": fmt, "sample_rate": int(sr), "channels": int(mix.shape[0]),
+                              **({"bits": int(bits)} if fmt in ("wav", "flac", "aiff") else {})}
         rep["loop_mode"] = mode
         rep["normalize_gain_db"] = round(gain_db, 1)
         rep["limiter_max_reduction_db"] = round(gr, 1)

@@ -104,6 +104,9 @@ says, and you can talk to a seat or to everyone from it.
 - **Arrangement**: drag clips to move (Alt-drag copies), drag the right edge to resize, double-click empty space for a new clip,
   right-click for rename/duplicate/split/mute/delete. Click the ruler to move the playhead, shift-drag it (or drag its top
   strip) to set the loop region, right-click it for markers. Ctrl+wheel zooms.
+- **Chord lane** (under the ruler): double-click a bar to write its chord (`Am7`, `F/A`, or roman numerals in the key; several
+  in one slot share it), Tab moves to the next slot, drag a chord's right edge to resize it, `Write…` or right-click for a
+  whole progression over a section or the loop.
 - **Piano roll**: click to add, drag to move, drag the edge to resize, double-click to delete, shift/ctrl-drag to box-select,
   arrows to nudge (shift = octave), Ctrl+D duplicates, Delete removes, velocity lane below.
 - **Mixer**: faders, pan, mute/solo, insert FX (click a name to bypass), sends to buses, master chain.
@@ -245,7 +248,7 @@ bar 11
 
 ## For agents
 
-66 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
+70 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
 The skill (`skill/SKILL.md`) is the composition playbook: understanding the project, forms per cue type, melody/harmony/bass/
 arrangement craft, genre palettes, mixing targets, the review loop and delivery per engine.
 

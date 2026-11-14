@@ -25,7 +25,9 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 import re
+import shutil
 import time
 from collections import Counter
 from pathlib import Path
@@ -545,10 +547,23 @@ def take_new(name: str | None = None, task: str | None = None, seat: str | None 
             if use else "Pass project=<this path> to edit the take."}
 
 
+def _to_session() -> None:
+    """Point this process's tools back at the session. A launched agent's session is the one it was started for
+    (TUNETRACK_SESSION), whatever project the editor has open by now; anything else falls back to the open project."""
+    api.set_default_project(os.environ.get("TUNETRACK_SESSION") or None)
+
+
+def _leave(d: Path) -> None:
+    """A take was accepted, returned or closed by this process while its tools pointed at it (the Producer
+    auditions in the take): they go back to the session, so its next edit does not land in a take nobody hears."""
+    if api._default_project and api._default_project == Path(d).resolve():
+        _to_session()
+
+
 def take_use(take: str | None = None, session: str | None = None) -> dict:
     """Point this process's tools at a take (to continue or audition it), or back at the session (take=None)."""
-    if not take:
-        api.set_default_project(None)
+    if not take or str(take).strip().lower() in ("none", "null", "session"):  # how agents write "the session"
+        _to_session()
         return {"editing": "session", "project": str(studio.session_path(session))}
     d = _take_dir(take, session)
     api.set_default_project(d)
@@ -559,6 +574,44 @@ def take_list(state: str | None = None, session: str | None = None) -> dict:
     """Takes in the session. state: open | submitted | accepted | rejected (default: open and submitted)."""
     want = {state} if state else {"open", "submitted"}
     return {"takes": [t for t in studio.take_index(studio.session_path(session)) if state == "all" or t.get("state") in want]}
+
+
+def take_pending(session: str | None = None) -> dict:
+    """Takes whose work is not in the session: handed in and waiting, or still open. An export does not contain
+    them, so a session is finished when this is empty or every take in it is left out on purpose. `status` says
+    where each one stands; `loose` marks the ones nobody is dealing with (handed in with nobody asked to audition
+    it, or left open with work in it after its task was closed)."""
+    path = studio.session_path(session)
+    st = studio.read(str(path))
+    tasks = {t["id"]: t for t in st["tasks"]}
+    out = []
+    for meta in studio.take_index(path):
+        if meta.get("state") not in ("open", "submitted"):
+            continue
+        d = path / "takes" / meta["id"]
+        try:
+            n = len(changes(_read_json(d / "base.json"), _read_json(d / "project.json")))
+        except (OSError, ValueError):
+            continue
+        task = tasks.get(meta.get("task") or "")
+        loose = False
+        if meta["state"] == "submitted":
+            asked = studio.auditioner(st, meta["id"])
+            status = f"handed in, waiting for {asked} to audition it" if asked else \
+                "handed in, and nobody has been asked to audition it"
+            loose = not asked
+        elif not n:
+            status = "open and empty"
+        elif task and task["state"] in studio.OPEN:
+            status = f"in progress ({task['id']} is {task['state']})"
+        else:
+            status = (f"left open with work in it: its task {task['id']} is {task['state']}" if task
+                      else "open with work in it, for no task")
+            loose = bool(task)
+        out.append({"take": meta["id"], "seat": meta.get("seat"), "name": meta.get("name"), "state": meta["state"],
+                    "changes": n, "status": status, **({"task": task["id"]} if task else {}),
+                    **({"loose": True} if loose else {})})
+    return {"takes": out}
 
 
 def take_audition(take: str | None = None, session: str | None = None) -> dict:
@@ -590,17 +643,20 @@ def take_submit(summary: str, take: str | None = None, session: str | None = Non
     rep = _report(d, meta)
     if not rep["changes"]:
         raise ValueError("This take changes nothing yet. Did the edits go to another project? "
-                         "(project_info shows which one your tools are editing)")
+                         "(project_info shows which one your tools are editing.) If the task needed no change, "
+                         "do not hand in an empty take: task_update(task, state=\"done\", result=why).")
     meta = _meta(d, state="submitted", summary=str(summary).strip(), submitted=round(time.time(), 3))
     with studio._Board(str(session_root(d))) as b:
         if meta.get("task"):
             t = b.task(meta["task"])
-            if t["state"] in ("queued", "working", "needs_you"):
+            # "done" too: a seat that closes its task and then hands in (seen live) has work that is not in the
+            # session yet. Left as done, nobody is asked to audition the take and the export goes out without it.
+            if t["state"] in ("queued", "working", "needs_you", "done"):
                 t.update(state="submitted", result=meta["summary"], updated=meta["submitted"])
                 b.emit("task", id=t["id"], seat=t["seat"], state="submitted", title=t["title"], by=studio.me(),
                        take=meta["id"])
         b.emit("take", id=meta["id"], state="submitted", seat=meta.get("seat"), task=meta.get("task"),
-               summary=meta["summary"][:240], changes=len(rep["changes"]))
+               summary=meta["summary"][:studio.EVENT_TEXT], changes=len(rep["changes"]))
     return {**rep, "state": "submitted", "summary": meta["summary"]}
 
 
@@ -641,6 +697,7 @@ def take_accept(take: str, on_conflict: str = "fail", session: str | None = None
         b.emit("take", id=meta["id"], state="accepted", seat=meta.get("seat"), task=meta.get("task"), rev=p.rev,
                by=studio.me())
         b.close_auditions(meta["id"], "accepted")
+    _leave(d)
     out = {"accepted": True, "take": meta["id"], "rev": p.rev, "changes": len(ch)}
     if done:
         out["task_done"] = done
@@ -662,7 +719,9 @@ def take_reject(take: str, reason: str, session: str | None = None) -> dict:
     meta = _meta(d)
     if meta["state"] not in ("open", "submitted"):
         raise ValueError(f"{meta['id']} is already {meta['state']}")
-    meta = _meta(d, state="open", returned=round(time.time(), 3), returns=int(meta.get("returns", 0)) + 1)
+    # the reason stays on the take: a person in the seat reads it on their task and on the Desk, not in a log
+    meta = _meta(d, state="open", returned=round(time.time(), 3), returns=int(meta.get("returns", 0)) + 1,
+                 reason=str(reason).strip())
     with studio._Board(str(session_root(d))) as b:
         if meta.get("task"):
             t = b.task(meta["task"])
@@ -672,8 +731,9 @@ def take_reject(take: str, reason: str, session: str | None = None) -> dict:
         if meta.get("seat") in roles.ROLES:
             b.message(studio.me(), meta["seat"], f"Take {meta['id']} came back: {str(reason).strip()}", meta.get("task"))
         b.emit("take", id=meta["id"], state="returned", seat=meta.get("seat"), task=meta.get("task"),
-               reason=str(reason).strip()[:240], by=studio.me())
-        b.close_auditions(meta["id"], "returned")
+               reason=str(reason).strip()[:studio.EVENT_TEXT], by=studio.me())
+        b.close_auditions(meta["id"], "returned", str(reason).strip()[:300])
+    _leave(d)
     return {"returned": meta["id"], "to": meta.get("seat"), "task": meta.get("task")}
 
 
@@ -682,11 +742,51 @@ def take_discard(take: str, session: str | None = None) -> dict:
     if studio.me() not in (roles.YOU, "producer"):
         raise PermissionError("Takes are discarded by the Producer or the user")
     d = _take_dir(take, session)
+    meta = _meta(d)
+    if meta["state"] not in ("open", "submitted"):
+        raise ValueError(f"{meta['id']} is already {meta['state']}")
     meta = _meta(d, state="rejected", closed=round(time.time(), 3))
+    out = {"discarded": meta["id"]}
     with studio._Board(str(session_root(d))) as b:
         b.emit("take", id=meta["id"], state="rejected", seat=meta.get("seat"), task=meta.get("task"), by=studio.me())
         b.close_auditions(meta["id"], "discarded")
-    return {"discarded": meta["id"]}
+        _leave(d)
+        t = b.task(meta["task"]) if meta.get("task") else None
+        if t and t["state"] in studio.OPEN:  # the work is gone but the task is not: whoever discards decides
+            out["task"] = (f"{t['id']} is still {t['state']}: task_update(\"{t['id']}\", state=\"cancelled\") if the "
+                           f"work is not wanted, or state=\"queued\" to have it done again in a new take.")
+    return out
+
+
+def take_cleanup(older_than_days: float = 0.0, dry_run: bool = True, session: str | None = None) -> dict:
+    """Delete the folders of takes that are over: accepted (their work is in the session) and closed ones (returned
+    for good, discarded, put away empty). Open and handed-in takes are never touched. older_than_days: keep the
+    ones that ended more recently than this. dry_run (the default) only lists what would go. The board's log still
+    says what happened to each take; what is deleted is its copy of the project and its renders."""
+    if studio.me() != roles.YOU:
+        raise PermissionError("Takes are deleted by the user")
+    path = studio.session_path(session)
+    before = time.time() - 86400 * max(0.0, float(older_than_days))
+    gone, kept = [], 0
+    for meta in studio.take_index(path):
+        d = path / "takes" / str(meta.get("id"))
+        if meta.get("state") not in ("accepted", "rejected") or not (d / "take.json").is_file():
+            kept += 1
+            continue
+        ended = float(meta.get("accepted") or meta.get("closed") or (d / "take.json").stat().st_mtime)
+        if ended > before:
+            kept += 1
+            continue
+        size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+        if not dry_run:
+            shutil.rmtree(d)
+        gone.append({"take": meta["id"], "seat": meta.get("seat"), "state": meta["state"], "name": meta.get("name"),
+                     "mb": round(size / 1e6, 2)})
+    out = {"deleted" if not dry_run else "would_delete": gone, "kept": kept,
+           "mb": round(sum(g["mb"] for g in gone), 2)}
+    if not dry_run and gone:
+        studio.log("take", str(path), state="cleaned", ids=[g["take"] for g in gone], by=studio.me())
+    return out
 
 
 def take_sync(take: str | None = None, on_conflict: str = "fail", session: str | None = None) -> dict:

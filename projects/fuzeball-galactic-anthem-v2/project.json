@@ -284,7 +284,7 @@
   ]
  },
  "next_id": 77,
- "rev": 134,
+ "rev": 154,
  "tracks": [
   {
    "id": "t1",
@@ -1513,14 +1513,13 @@
   },
   {
    "id": "t5",
-   "name": "Horn 2",
+   "name": "Violas",
    "kind": "midi",
    "instrument": {
-    "type": "vst3",
-    "name": "HALion Sonic",
-    "patch": "halion-sonic-french-horn"
+    "type": "sfz",
+    "name": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\instruments\\vsco2-ce\\ViolaEns-KS.sfz"
    },
-   "volume_db": -13.0,
+   "volume_db": -7.5,
    "pan": -0.35,
    "sends": [
     {
@@ -1537,8 +1536,13 @@
       "mid_freq": 750,
       "mid_gain": -3,
       "mid_q": 0.8,
-      "high_gain": 0
+      "high_gain": 0,
+      "low_gain": -2
      }
+    },
+    {
+     "type": "builtin",
+     "name": "reverb"
     }
    ],
    "role": "horn",
