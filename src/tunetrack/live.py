@@ -1,0 +1,554 @@
+"""The live engine: the C++ process (engine/) that plays a session in real time and renders it offline.
+
+`build_spec` turns a project into the flat description the engine loads: every time already in samples, every
+device resolved to a file path. `Engine` runs the process and talks to it, one JSON command per line.
+
+What the engine hosts itself: VST3 instruments and effects, the built-in synths and effects, faders, pans,
+automation, sends, buses, sidechain keys and the master chain. What it plays from a file: SFZ instruments and
+audio tracks, rendered dry by the offline worker (cached) and run through their effects live.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import queue
+import subprocess
+import threading
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+
+from . import config, eqmap, synths
+from .engine import Renderer, audio_track_input, resolve_device, sidechain_links, soloed_sources
+from .model import Device, Project, Track, read_rev
+
+TPB = 960  # the offline renderer hands notes over as a MIDI file at this resolution; keep the same grid
+
+
+def engine_exe() -> Path | None:
+    """The built engine, or None when it has not been built (see engine/README.md)."""
+    for cand in (os.environ.get("TUNETRACK_ENGINE"), config.load_config().get("engine_exe"),
+                 config.ROOT / "engine" / "build" / "tunetrack-engine_artefacts" / "Release" / "tunetrack-engine.exe"):
+        if cand and Path(cand).exists():
+            return Path(cand)
+    return None
+
+
+# ---- the spec ----------------------------------------------------------------------------------------------
+
+def _midi_clock(tm, sr: int):
+    """beat -> sample, exactly where the offline renderer plays a MIDI event at that beat.
+
+    Offline, notes travel as a MIDI file: beats snap to ticks, tempo is stored in whole microseconds per beat
+    (84 bpm becomes 84.00002) and the time is cut down to a sample. Reproducing that keeps the two engines
+    sample-aligned; a one-sample slip is enough to change which synth voice plays a note."""
+    import mido
+    marks = [(int(round(b * TPB)), (1.0 / TPB) * (mido.bpm2tempo(bpm) / 1000000.0)) for b, bpm in zip(tm.beats, tm.bpms)]
+
+    def at(beat: float) -> int:
+        tick = int(round(beat * TPB))
+        sec, last, per_tick = 0.0, 0, 0.5 / TPB
+        for t, per in marks:
+            if t >= tick and t > 0:
+                break
+            sec += (t - last) * per_tick
+            last, per_tick = t, per
+        return int((sec + (tick - last) * per_tick) * sr)
+
+    return at
+
+
+def _events(p: Project, t: Track, tm, sr: int, channel: int) -> list[int]:
+    """A track's notes, CCs and pitch bend as a flat [sample, status, data1, data2, ...] list, in play order.
+    The same rules as engine._track_events (notes past a clip's end are hidden, times on the MIDI tick grid)."""
+    ev = []
+    at = _midi_clock(tm, sr)
+
+    def tick(beat: float) -> int:
+        return int(round(beat * TPB))
+
+    for c in t.clips:
+        if c.muted or c.kind != "midi":
+            continue
+        for n in c.notes:
+            if n.start >= c.length - 1e-9:
+                continue
+            on, off = c.start + n.start, c.start + min(n.end, c.length + 8)
+            if off <= on:
+                continue
+            ev.append((tick(on), 2, at(on), 0x90 | channel, int(n.pitch), max(1, min(127, int(n.vel)))))
+            ev.append((tick(off), 1, at(off), 0x80 | channel, int(n.pitch), 0))
+        for lane, pts in c.cc.items():
+            for b, v in pts:
+                if lane == "bend":
+                    val = int(max(-8192, min(8191, v * 8191))) + 8192
+                    ev.append((tick(c.start + b), 0, at(c.start + b), 0xE0 | channel, val & 0x7F, (val >> 7) & 0x7F))
+                else:
+                    ev.append((tick(c.start + b), 0, at(c.start + b), 0xB0 | channel, int(lane), int(max(0, min(127, v)))))
+    ev.sort(key=lambda e: (e[0], e[1]))
+    return [x for e in ev for x in e[2:]]
+
+
+def _fx_spec(d: Device, p: Project) -> dict | None:
+    """One insert as the engine loads it: a VST3, or a built-in effect by name with every setting spelled out."""
+    if d.bypass:
+        return None
+    if d.type == "builtin" and not (d.name == "eq" and eqmap.plugin_entry(eqmap.engine_for(d, p))):
+        if d.name not in synths.FX:
+            raise KeyError(f"Unknown built-in effect {d.name!r}")
+        params = {**synths.FX[d.name][1], **{k: float(v) for k, v in d.params.items()}}
+        if d.name == "delay":
+            params["delay_sec"] = params["time"] * 60.0 / p.tempo
+        return {"type": "faust", "name": d.name, "params": params}
+    spec = resolve_device(d, p, False)
+    if spec is None:
+        return None
+    return {k: spec.get(k) for k in ("type", "path", "shell", "state", "params", "name")}
+
+
+def _stem(r: Renderer, t: Track, spec: dict) -> str:
+    """The dry (no effects) audio of a track the engine cannot host: rendered offline once, then cached."""
+    dry = {**spec, "fx": []}
+    r.render_track(t, dry)
+    from .engine import _fingerprint
+    return str(r.cache / f"{_fingerprint(dry)}.wav")
+
+
+def _audio_stem(r: Renderer, p: Project, t: Track, spec: dict) -> str:
+    key = hashlib.sha1(json.dumps({"clips": spec["clips"], "n": r.n, "sr": r.sr}, sort_keys=True,
+                                  default=str).encode()).hexdigest()[:20]
+    out = r.cache / f"live-in-{key}.wav"
+    if not out.exists():
+        part = out.with_suffix(".part.wav")
+        sf.write(str(part), audio_track_input(p, t, r.n).T, r.sr, subtype="FLOAT")
+        part.replace(out)
+    return str(out)
+
+
+def build_spec(p: Project, progress=None) -> tuple[dict, list[str]]:
+    """(engine spec, warnings) for a project. Renders the stems the engine needs, so the first call can be slow."""
+    r = Renderer(p, progress)
+    sr, tm = r.sr, r.tm
+    warnings: list[str] = list(eqmap.warnings(p))
+
+    def smp(beat: float) -> int:
+        return int(round(tm.sec(beat) * sr))
+
+    buses = {t.id: t for t in p.tracks if t.kind == "bus"}
+    sources = [t for t in p.tracks if t.kind != "bus"]
+    playing = soloed_sources(p)
+
+    # buses that can play: the offline mixer skips any bus caught in a routing loop
+    live_buses: set[str] = set()
+    for _ in range(len(buses) + 1):
+        for bid in buses:
+            if bid in live_buses:
+                continue
+            feeders = [x for x in buses.values() if x.id != bid and x.id not in live_buses and
+                       (x.output == bid or any(s.get("to") == bid for s in x.sends))]
+            if not feeders:
+                live_buses.add(bid)
+    if len(live_buses) < len(buses):
+        warnings.append("bus routing has a cycle; some buses were skipped")
+
+    has_audio: set[str] = set()   # tracks with a signal before the fader (what a sidechain key can listen to)
+    key_ids = {kid for _o, _d, kid in sidechain_links(p)}
+    tracks = []
+
+    def fx_chain(owner: Track | None, devices: list[Device], label: str) -> list[dict]:
+        out = []
+        for i, d in enumerate(devices):
+            try:
+                spec = _fx_spec(d, p)
+            except Exception as e:  # noqa: BLE001 - one broken insert shouldn't stop the session
+                warnings.append(f"{label} fx {i}: {e}")
+                continue
+            if spec is None:
+                continue
+            if d.sidechain:
+                keyed = spec["type"] == "vst3" or d.name in synths.SIDECHAIN_FX
+                if not keyed:
+                    warnings.append(f"{label}: {d.label()} has no sidechain input; key ignored")
+                else:
+                    spec["key"] = d.sidechain  # checked below, once every track is known
+            out.append(spec)
+        return out
+
+    for t in sources:
+        audible = (not t.mute) and t.id in playing
+        entry = {"id": t.id, "name": t.name, "kind": t.kind, "source": None, "fx": [], "on": audible}
+        if audible or t.id in key_ids:
+            try:
+                spec = r.track_spec(t)
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"track '{t.name}': {e}")
+                spec = None
+            if spec is not None:
+                try:
+                    inst = spec.get("instrument")
+                    if t.kind == "audio":
+                        entry["source"] = {"type": "stem", "file": _audio_stem(r, p, t, spec)}
+                    elif inst["type"] == "sfz":
+                        entry["source"] = {"type": "stem", "file": _stem(r, t, spec)}
+                    elif inst["type"] == "synth":
+                        tpl, _desc, defaults = synths.SYNTHS[t.instrument.name]
+                        entry["source"] = {"type": "synth", "template": tpl, "voices": 32,
+                                           "params": {**defaults, **{k: float(v) for k, v in t.instrument.params.items()}},
+                                           "events": _events(p, t, tm, sr, 0)}
+                    else:
+                        entry["source"] = {**{k: inst.get(k) for k in ("type", "path", "shell", "state", "params", "name")},
+                                           "events": _events(p, t, tm, sr, int(inst.get("channel", 1)) - 1)}
+                    entry["fx"] = fx_chain(t, t.fx, f"track '{t.name}'")
+                    has_audio.add(t.id)
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(f"track '{t.name}': {e}")
+                    entry["source"], entry["fx"] = None, []
+        tracks.append((t, entry))
+
+    for b in buses.values():
+        ok = b.id in live_buses
+        entry = {"id": b.id, "name": b.name, "kind": "bus", "source": None, "on": ok and not b.mute,
+                 "fx": fx_chain(b, b.fx, f"bus '{b.name}'") if ok and not b.mute else []}
+        tracks.append((b, entry))
+
+    out_tracks = []
+    for t, entry in tracks:
+        entry.update(db=float(t.volume_db), pan=float(t.pan),
+                     vol_auto=[[smp(b), float(v)] for b, v in sorted(t.automation.get("volume_db", []))],
+                     pan_auto=[[smp(b), float(v)] for b, v in sorted(t.automation.get("pan", []))])
+        dead_bus = t.kind == "bus" and t.id not in live_buses
+        entry["out"] = "" if dead_bus else (t.output if t.output in buses else "master")
+        entry["sends"] = [] if dead_bus else [[s["to"], float(s.get("db", -12))] for s in t.sends if s.get("to") in buses]
+        for d in entry["fx"]:
+            if d.get("key") and d["key"] not in has_audio:
+                name = next((x.name for x in p.tracks if x.id == d["key"]), d["key"])
+                warnings.append(f"'{t.name}': sidechain key '{name}' has no audio; the effect hears silence")
+                d["key"] = "silent"
+        out_tracks.append(entry)
+
+    spec = {
+        "sr": sr, "block": 512, "ts": list(p.time_sig), "end": r.n,
+        "tempo": [[smp(b), float(b), float(bpm)] for b, bpm in zip(tm.beats, tm.bpms)],
+        "loop": [smp(p.loop["start"]), smp(p.loop["end"])] if p.loop else None,
+        "tracks": out_tracks,
+        "master": {"db": float(p.master.get("volume_db", 0)),
+                   "fx": fx_chain(None, [d for d in p.master.get("fx", []) if isinstance(d, Device)], "master")},
+    }
+    return spec, warnings
+
+
+# ---- the process ---------------------------------------------------------------------------------------------
+
+class EngineError(RuntimeError):
+    pass
+
+
+class Engine:
+    """A running engine process. Not thread-safe per call id; one caller at a time is the intended use."""
+
+    def __init__(self, device: str | None = None, no_device: bool = False, per_sample: bool = False,
+                 on_event=None):
+        exe = engine_exe()
+        if exe is None:
+            raise EngineError("the live engine is not built: see engine/README.md")
+        args = [str(exe)]
+        if no_device:
+            args.append("--no-device")
+        elif device:
+            args += ["--device", device]
+        if per_sample:
+            args.append("--per-sample")
+        self.on_event = on_event
+        self.tick: dict = {}
+        self.ready: dict = {}
+        self._replies: dict[str, queue.Queue] = {}
+        self._n = 0
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     text=True, encoding="utf-8", errors="replace", bufsize=1,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        threading.Thread(target=self._read, daemon=True).start()
+        if not self._ready.wait(60):
+            self.close()
+            raise EngineError("the live engine did not start")
+
+    def _read(self) -> None:
+        for line in self.proc.stdout:
+            if not line.startswith("@@ "):
+                continue  # a plugin printing to our stdout
+            try:
+                msg = json.loads(line[3:])
+            except ValueError:
+                continue
+            if "re" in msg:
+                q = self._replies.get(str(msg["re"]))
+                if q is not None:
+                    q.put(msg)
+            elif msg.get("ev") == "ready":
+                self.ready = msg
+                self._ready.set()
+            elif msg.get("ev") == "tick":
+                self.tick = msg
+            if "ev" in msg and self.on_event:
+                self.on_event(msg)
+
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def call(self, op: str, timeout: float = 30.0, **args) -> dict:
+        if not self.alive():
+            raise EngineError("the live engine is not running")
+        with self._lock:
+            self._n += 1
+            cid = str(self._n)
+            q: queue.Queue = queue.Queue()
+            self._replies[cid] = q
+            self.proc.stdin.write(json.dumps({"op": op, "id": cid, **args}) + "\n")
+            self.proc.stdin.flush()
+        try:
+            msg = q.get(timeout=timeout)
+        except queue.Empty:
+            raise EngineError(f"the live engine did not answer '{op}' within {timeout:.0f}s") from None
+        finally:
+            self._replies.pop(cid, None)
+        if msg.get("error"):
+            raise EngineError(str(msg["error"]))
+        return msg
+
+    def load(self, p: Project, progress=None) -> dict:
+        """Send the project's current state. Devices that did not change keep playing; returns the engine's
+        answer with the spec's own warnings added."""
+        spec, warnings = build_spec(p, progress)
+        path = p.root / "cache" / "live-spec.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(spec), encoding="utf-8")
+        res = self.call("load", timeout=600, path=str(path))
+        res["warnings"] = warnings + list(res.get("warnings", []))
+        self.sr = spec["sr"]
+        # strips that have notes and are switched on: a render in which one of them is silent started too early
+        self.expect = {t["id"]: t["name"] for t in spec["tracks"]
+                       if t["on"] and (t["source"] or {}).get("events")}
+        return res
+
+    def play(self, from_sample: int | None = None, loop: bool | None = None) -> dict:
+        args = {}
+        if from_sample is not None:
+            args["from"] = int(from_sample)
+        if loop is not None:
+            args["loop"] = bool(loop)
+        return self.call("play", **args)
+
+    def stop(self) -> dict:
+        return self.call("stop")
+
+    def render(self, out: str | Path, length: int | None = None, retries: int = 2) -> dict:
+        """Render offline. An instrument still loading its samples plays nothing, and the engine cannot ask a
+        plugin whether it is ready, so a render that leaves a strip with notes silent is given more time and
+        done again. Strips still silent after that are named in the answer's `silent`."""
+        import time
+        args = {"out": str(out)}
+        if length is not None:
+            args["length"] = int(length)
+        for attempt in range(retries + 1):
+            res = self.call("render", timeout=3600, **args)
+            silent = [name for tid, name in getattr(self, "expect", {}).items()
+                      if max((res.get("peaks") or {}).get(tid, [1.0])[:2]) < 1e-7]
+            if not silent or attempt == retries:
+                break
+            time.sleep(4.0)
+        if silent:
+            res["silent"] = silent
+        return res
+
+    def close(self) -> None:
+        if self.alive():
+            try:
+                self.proc.stdin.write('{"op":"quit"}\n')
+                self.proc.stdin.flush()
+                self.proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                self.proc.kill()
+
+
+class Player:
+    """One engine kept in step with a project folder: `sync()` reloads when project.json has a new revision, so
+    whatever edits it (an agent's tools, the editor, a take being accepted) is heard without stopping."""
+
+    def __init__(self, path: str | Path, device: str | None = None, on_event=None, per_sample: bool = True,
+                 no_device: bool = False):
+        self.path = Path(path)
+        # per_sample: built-in synths behave exactly as in the offline render (what agents measure and what gets
+        # exported), at some CPU cost. Turn it off only once offline rendering goes through this engine too.
+        self.engine = Engine(device=device, no_device=no_device, on_event=on_event, per_sample=per_sample)
+        self.rev = -1
+        self.project: Project | None = None
+        self.loaded: dict = {}
+        self.sync(force=True)
+
+    def sync(self, force: bool = False) -> dict | None:
+        """Reload if the project changed. Returns the engine's answer when it did, else None."""
+        rev = read_rev(self.path)
+        if not force and rev == self.rev:
+            return None
+        self.project = Project.load(self.path)
+        self.rev = rev
+        self.loaded = self.engine.load(self.project)
+        return self.loaded
+
+    def point(self, path: str | Path) -> dict:
+        """Play another project folder (a take of the session, say) on the same engine."""
+        self.path = Path(path)
+        return self.sync(force=True)
+
+    def sample(self, beat: float) -> int:
+        p = self.project
+        return int(round(p.tempo_map().sec(beat) * p.sample_rate))
+
+    def play(self, beat: float | None = None, loop: bool | None = None) -> dict:
+        return self.engine.play(None if beat is None else self.sample(beat), loop)
+
+    def stop(self) -> dict:
+        return self.engine.stop()
+
+    def close(self) -> None:
+        self.engine.close()
+
+
+# ---- checking the engine against the offline renderer ---------------------------------------------------------
+
+def compare(ref: np.ndarray, got: np.ndarray, sr: int) -> dict:
+    """How far `got` is from `ref` (both [2, n]): the level of the difference against the level of the reference
+    (-inf dB = identical), and the shift in samples that lines them up best."""
+    n = min(ref.shape[1], got.shape[1])
+    a, b = ref[:, :n].astype(np.float64), got[:, :n].astype(np.float64)
+
+    def db(x: float) -> float:
+        return round(20 * np.log10(max(x, 1e-12)), 1)
+
+    ref_rms = float(np.sqrt(np.mean(a ** 2)))
+    out = {"ref_rms_db": db(ref_rms), "got_rms_db": db(float(np.sqrt(np.mean(b ** 2)))),
+           "ref_peak_db": db(float(np.abs(a).max(initial=0))), "got_peak_db": db(float(np.abs(b).max(initial=0)))}
+    if ref_rms < 1e-9:
+        out["residual_db"] = db(float(np.sqrt(np.mean(b ** 2))))
+        return out
+    out["residual_db"] = round(db(float(np.sqrt(np.mean((a - b) ** 2)))) - db(ref_rms), 1)
+    out.update(_likeness(a, b, sr))
+    # best alignment within +-64 samples, on a mono mix of the loudest 4 seconds
+    m, g = a.mean(axis=0), b.mean(axis=0)
+    w = min(n, 4 * sr)
+    start = int(np.argmax(np.convolve(np.abs(m[: n - w + 1: 1024]), np.ones(max(1, w // 1024)), "valid"))) * 1024 \
+        if n > w else 0
+    seg_m = m[start:start + w]
+    best = (0, -1.0)
+    for lag in range(-64, 65):
+        lo, hi = max(0, start + lag), min(n, start + lag + w)
+        seg_g = g[lo:hi]
+        k = min(len(seg_m), len(seg_g))
+        if k < 16:
+            continue
+        c = float(np.dot(seg_m[:k], seg_g[:k]))
+        if c > best[1]:
+            best = (lag, c)
+    out["best_lag"] = best[0]
+    if best[0]:
+        s = best[0]
+        bb = np.roll(b, -s, axis=1)
+        out["residual_db_aligned"] = round(db(float(np.sqrt(np.mean((a - bb) ** 2)))) - db(ref_rms), 1)
+    return out
+
+
+def _likeness(a: np.ndarray, b: np.ndarray, sr: int) -> dict:
+    """For sources that never repeat sample for sample (round-robin samples, free-running oscillators): the
+    largest gap between the two long-term octave-band levels, and how alike the loudness curves are (1 = same)."""
+    ma, mb = a.mean(axis=0), b.mean(axis=0)
+    n = len(ma)
+    win = 1 << 14
+    if n < win * 2:
+        return {}
+    k = (n // win) * win
+    sa = (np.abs(np.fft.rfft(ma[:k].reshape(-1, win) * np.hanning(win), axis=1)) ** 2).mean(axis=0)
+    sb = (np.abs(np.fft.rfft(mb[:k].reshape(-1, win) * np.hanning(win), axis=1)) ** 2).mean(axis=0)
+    freqs = np.fft.rfftfreq(win, 1 / sr)
+    gaps = []
+    total = sa.sum()
+    for lo in (31.25 * 2 ** i for i in range(9)):
+        band = (freqs >= lo) & (freqs < lo * 2)
+        ea, eb = sa[band].sum(), sb[band].sum()
+        if ea > total * 1e-4:  # ignore bands with next to nothing in them
+            gaps.append(abs(10 * np.log10(max(eb, 1e-30) / ea)))
+    hop = sr // 20
+    m = (n // hop) * hop
+    ea = np.sqrt((ma[:m].reshape(-1, hop) ** 2).mean(axis=1))
+    eb = np.sqrt((mb[:m].reshape(-1, hop) ** 2).mean(axis=1))
+    corr = float(np.corrcoef(ea, eb)[0, 1]) if ea.std() > 0 and eb.std() > 0 else 1.0
+    return {"band_gap_db": round(float(max(gaps, default=0.0)), 2), "envelope_corr": round(corr, 4)}
+
+
+def null_tracks(p: Project, per_sample: bool = False, only: list[str] | None = None, progress=None) -> dict:
+    """The same check one track at a time, before the fader (instrument + inserts only), to find which device
+    the two engines disagree on. Returns {track name: compare()}."""
+    import tempfile
+    r = Renderer(p, progress)
+    r.run()
+    spec, _w = build_spec(p, progress)
+    by_id = {t["id"]: t for t in spec["tracks"]}
+    tmp = Path(tempfile.mkdtemp(prefix="tunetrack_null_"))
+    out: dict = {}
+    eng = Engine(no_device=True, per_sample=per_sample)
+    try:
+        for t in p.tracks:
+            if t.id not in r.pre or (only and t.name not in only and t.id not in only):
+                continue
+            solo = {**by_id[t.id], "db": 0.0, "pan": 0.0, "vol_auto": [], "pan_auto": [], "out": "master",
+                    "sends": [], "on": True}
+            keys = [{**by_id[d["key"]], "on": False, "out": "master", "sends": []} for d in solo["fx"]
+                    if d.get("key") in by_id]
+            one = {**spec, "tracks": [solo] + keys, "master": {"db": 0.0, "fx": []}}
+            path = tmp / "spec.json"
+            path.write_text(json.dumps(one), encoding="utf-8")
+            eng.call("load", timeout=600, path=str(path))
+            wav = tmp / f"{t.id}.wav"
+            eng.render(wav, r.n)
+            got, _ = sf.read(str(wav), dtype="float32", always_2d=True)
+            src = by_id[t.id]["source"] or {}
+            out[t.name] = {"device": src.get("name") or src.get("template") or src.get("type"),
+                           "fx": [d.get("name") for d in solo["fx"]], **compare(r.pre[t.id], got.T, r.sr)}
+    finally:
+        eng.close()
+    return out
+
+
+def null_test(p: Project, per_sample: bool = False, keep: str | Path | None = None, progress=None) -> dict:
+    """Render the project's raw master (before loudness normalisation and the limiter) with both engines and
+    report the difference."""
+    import tempfile
+    r = Renderer(p, progress)
+    report = r.run()
+    eng = Engine(no_device=True, per_sample=per_sample)
+    try:
+        loaded = eng.load(p, progress)
+        out = Path(keep) if keep else Path(tempfile.mkdtemp(prefix="tunetrack_null_")) / "engine.wav"
+        info = eng.render(out, r.n)
+    finally:
+        eng.close()
+    got, _ = sf.read(str(out), dtype="float32", always_2d=True)
+    res = compare(r.master, got.T, r.sr)
+    # strip by strip, after the fader: where the two engines' peaks are more than 1 dB apart
+    apart = {}
+    names = {t.id: t.name for t in p.tracks}
+    for tid, lr in (info.get("peaks") or {}).items():
+        if len(lr) > 2:
+            res.setdefault("bad_samples", {})[names.get(tid, tid)] = lr[2]
+        if tid in r.post:
+            a, b = float(np.abs(r.post[tid]).max(initial=0)), float(max(lr[:2]))
+            da, dbb = 20 * np.log10(max(a, 1e-9)), 20 * np.log10(max(b, 1e-9))
+            if abs(da - dbb) > 1.0 and max(da, dbb) > -80:
+                apart[names.get(tid, tid)] = [round(da, 1), round(dbb, 1)]
+    res["strips_apart_db"] = apart  # name: [offline peak, engine peak]
+    res.update(engine_seconds=round(float(info.get("seconds", 0)), 1), offline_seconds=report.get("render_seconds"),
+               latency=info.get("latency"), engine_file=str(out),
+               warnings=loaded.get("warnings", []) + [f"'{n}' rendered silent in the live engine" for n in info.get("silent", [])])
+    return res

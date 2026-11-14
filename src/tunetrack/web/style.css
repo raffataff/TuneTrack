@@ -89,6 +89,7 @@ a { color: var(--amber); }
 .tag.stale { color: var(--amber); border-color: var(--amber-d); }
 .tag.bad { color: var(--red); border-color: #5a1d17; }
 .tag.cy { color: var(--cyan); border-color: #1d4259; }
+#liveBtn.on { color: var(--red); text-shadow: 0 0 6px rgba(255,74,58,.6); }
 
 /* ---------------------------------------------------------------- header (master section) */
 #top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 7px 12px; white-space: nowrap;
@@ -206,16 +207,28 @@ body[data-room="studio"] .deskonly { display: none; }
 .chip em { color: var(--red); font-style: normal; }
 .chip.off { opacity: .4; }
 .console { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 6px; align-items: stretch; }
-.ch { width: 96px; flex: none; display: grid; grid-template-rows: auto 52px 150px auto auto auto auto; gap: 6px; padding: 8px 7px; border: 1px solid #000; border-radius: 2px;
+.ch { width: 96px; flex: none; display: grid; grid-template-rows: auto 52px auto 150px auto auto auto auto; gap: 6px; padding: 8px 7px; border: 1px solid #000; border-radius: 2px;
   background: linear-gradient(#1c1c1e, #131314); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
 .ch.moved { box-shadow: inset 0 2px 0 var(--cyan), inset 0 1px 0 rgba(255,255,255,.06); }
-.ch.master { width: 168px; grid-template-rows: auto 52px 150px auto auto auto auto; box-shadow: inset 0 1px 0 rgba(255,255,255,.06), inset 0 0 0 1px var(--amber-d); }
+.ch.master { width: 168px; grid-template-rows: auto 52px auto 150px auto auto auto auto; box-shadow: inset 0 1px 0 rgba(255,255,255,.06), inset 0 0 0 1px var(--amber-d); }
 .ch .nm, .slotB .nm { font: 10px var(--legend); text-transform: uppercase; letter-spacing: .12em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-left: 3px solid var(--c, var(--amber)); padding-left: 6px; }
-.ch .slots { display: flex; flex-direction: column; gap: 2px; overflow: hidden; font: 10px var(--mono); }
+.ch .slots { display: flex; flex-direction: column; gap: 2px; overflow: hidden auto; scrollbar-width: thin; scrollbar-color: #3a3a3e transparent; font: 10px var(--mono); }
+.ch .slots > * { flex: none; }
 .ch .slot { background: #0b0b0c; border: 1px solid #000; padding: 1px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #bdb8ab; }
 .ch .slot.new { color: var(--cyan); }
 .ch .slot.byp { color: var(--dim); text-decoration: line-through; }
 .ch .slot.send { color: var(--muted); }
+.ch button.slot { font: inherit; text-align: left; border-radius: 0; cursor: pointer; }
+.ch button.slot:hover { border-color: var(--line2); color: var(--ink); }
+/* an effect or send with its remove key: the label gives way, the key keeps its width */
+.ch .slotRow { display: flex; min-width: 0; }
+.ch .slotRow .slot { flex: 1; min-width: 0; }
+.ch .slotRow input.db { flex: 1; }
+.ch .slots .rm { flex: none; width: 14px; padding: 0; font: 10px var(--mono); line-height: 1; color: var(--dim); background: #0b0b0c; border: 1px solid #000; border-left: 0; border-radius: 0; cursor: pointer; }
+.ch .slots .rm:hover { color: var(--red); border-color: var(--line2); }
+.ch .adds { display: flex; gap: 2px; }
+.ch .adds button { flex: 1; min-width: 0; font: 9px var(--legend); letter-spacing: .06em; color: var(--muted); background: #0b0b0c; border: 1px solid #000; border-radius: 2px; padding: 1px 0; white-space: nowrap; overflow: hidden; }
+.ch .adds button:hover:not(:disabled) { color: var(--amber); border-color: var(--amber-d); }
 .well { display: grid; grid-template-columns: 9px 1fr; gap: 8px; }
 .well .lvl { position: relative; background: #060606; border: 1px solid #000; overflow: hidden; }
 .well .lvl i { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(0deg, var(--green) 0 96px, var(--amber) 124px, var(--red) 148px) bottom / 100% 148px no-repeat;
@@ -229,15 +242,29 @@ body[data-room="studio"] .deskonly { display: none; }
 .slotway .cap::after { content: ""; position: absolute; left: 3px; right: 3px; top: 5px; height: 2px; background: var(--ink); }
 .slotway .cap.ghost { background: none; border: 1px dashed var(--cyan); box-shadow: none; opacity: .75; }
 .slotway .cap.ghost::after { display: none; }
+/* the console's controls work: a fader and a pan strip are taken hold of anywhere along their travel */
+.slotway, .ch .pan { touch-action: none; }
+.slotway { cursor: ns-resize; }
+.slotway .cap.ghost, .ch .pan i { pointer-events: none; }
+.slotway .cap.now:focus-visible, .ch .pan:focus-visible, .ch button:focus-visible, .ch input.db:focus { outline: 1px solid var(--amber); outline-offset: 1px; }
+.slotway:active .cap.now { background: linear-gradient(#6c6c73, #37373c 45%, #202023); }
+.ch.master .well { grid-template-columns: 1fr 34px; }
+.ch .dbs { display: grid; grid-template-columns: 1fr 34px; gap: 8px; }
+.ch button.db { cursor: text; width: 100%; }
+.ch button.db:hover { border-color: var(--vfd-d); }
+.ch input.db { width: 100%; min-width: 0; box-sizing: border-box; }
+.ch .slots input.db { padding: 0 3px; font-size: 10px; flex: none; }
 .ch .db { font: 11px var(--mono); text-align: center; color: var(--vfd); background: var(--vfd-bg); border: 1px solid #000; border-radius: 2px; padding: 1px 0; text-shadow: 0 0 6px rgba(116,240,214,.4); }
-.ch .pan { position: relative; height: 6px; background: #060606; border: 1px solid #000; }
+.ch .pan { position: relative; height: 6px; background: #060606; border: 1px solid #000; cursor: ew-resize; }
+.ch .pan::after { content: ""; position: absolute; inset: -6px 0; }  /* a strip 6px tall is drawn; 18px is held */
 .ch .pan::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--line2); }
 .ch .pan i { position: absolute; top: -2px; width: 3px; height: 8px; margin-left: -1px; background: var(--ink); }
 .ch .pan i.ghost { background: var(--cyan); opacity: .6; }
 .ch .ms { display: flex; justify-content: space-between; gap: 6px; font: 9px var(--legend); letter-spacing: .1em; color: var(--dim); text-transform: uppercase; white-space: nowrap; overflow: hidden; }
-.ch .ms b { font-weight: 400; }
-.ch .ms b.m.on { color: var(--amber); text-shadow: 0 0 6px rgba(255,176,0,.6); }
-.ch .ms b.s.on { color: var(--green); text-shadow: 0 0 6px rgba(95,224,122,.6); }
+.ch .ms button { font: inherit; letter-spacing: inherit; color: inherit; background: #0b0b0c; border: 1px solid #000; border-radius: 2px; padding: 1px 5px; cursor: pointer; }
+.ch .ms button:hover { color: var(--ink); }
+.ch .ms .m.on { color: var(--amber); text-shadow: 0 0 6px rgba(255,176,0,.6); }
+.ch .ms .s.on { color: var(--green); text-shadow: 0 0 6px rgba(95,224,122,.6); }
 .ch .was { font: 9.5px var(--mono); color: var(--cyan); text-align: center; min-height: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ch.master .was { color: var(--muted); white-space: normal; }
 .bandsB { display: flex; gap: 3px; align-items: flex-end; height: 150px; padding-bottom: 14px; }

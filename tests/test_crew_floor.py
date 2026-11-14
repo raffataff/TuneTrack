@@ -343,12 +343,29 @@ def test_a_missing_runner_is_a_blocker(song):
 
 def test_briefs_give_each_seat_its_own_playbook():
     comp, mix, prod = briefs.system("composer", True), briefs.system("mix", True), briefs.system("producer", False)
-    assert "take_submit(summary)" in comp and "## 4. Write the music" in comp and "## 6. Mix and master" not in comp
-    assert "## 6. Mix and master" in mix and "## 4. Write the music" not in mix
-    assert "three at most" in mix.split("---- Craft")[0] and "three at most" not in comp  # Mix's stopping rule
-    assert "You run the session" in prod and "live for everyone" in prod and "take_submit" not in prod.split("---- Craft")[0]
+    assert "take_submit(summary)" in comp and "Chord track first" in comp and "Notation for write()" in comp
+    assert "eq:nova" in mix and "Notation for write()" not in mix and "Chord track first" not in mix
+    assert "three at most" in mix and "three at most" not in comp  # Mix's stopping rule
+    assert "You run the session" in prod and "live for everyone" in prod and "take_submit(" not in prod
     assert "no brass" in briefs.system("arranger", True, "no brass")
     assert "change nothing" in briefs.system("review", False)
+
+
+def test_a_seats_craft_text_names_only_tools_that_seat_has():
+    """Craft is written per seat (crew/craft.py). A line that sends a seat to a tool it was not given costs a failed
+    call on every run, so each `name(` in a seat's text has to be one of its tools."""
+    import re
+    from tunetrack import mcp_server, roles
+    from tunetrack.crew import craft
+    assert set(craft.CRAFT) == set(roles.ORDER)
+    for seat in roles.ORDER:
+        text = craft.craft(seat)
+        named = {w for w in re.findall(r"\b([a-z_]+)\(", text) if w in mcp_server.TOOLS}
+        assert named <= roles.get(seat).tools, (seat, sorted(named - roles.get(seat).tools))
+    # what a seat is sent with every step: the longest (the Producer's, with its playbook) stays under 13,000
+    # characters; it was 15,500 when craft was cut from skill/SKILL.md, and the Composer's 14,700
+    sizes = {s: len(briefs.system(s, s != "producer")) for s in roles.ORDER}
+    assert max(sizes.values()) < 13000 and sizes["composer"] < 7000, sizes
 
 # ---- loose ends: takes that never reach the session, and questions that cost a run each -------------------------------
 
@@ -446,6 +463,86 @@ def test_a_take_with_work_in_it_is_never_put_away(song):
     assert left["state"] == "open" and left["loose"] and "its task T1 is cancelled" in left["status"]
 
 
+def test_an_agents_take_left_with_work_after_its_task_was_closed_is_handed_in_for_it(song, tmp_path):
+    # Known gap until 2026-11-14: such a take was flagged "loose" and nobody was asked about it.
+    seat("composer", agent(tmp_path, "composer", COMPOSER))
+    studio.task_add("composer", "Write the hook")
+    tk = takes.take_new("Hook", "T1", "composer", use=False)
+    api.write("Piano", "D5:w", at="1:1", project=tk["project"])
+    studio.task_update("T1", state="cancelled")
+    f = floor.Floor(song)
+    f.tick()
+    [left] = takes.take_pending()["takes"]
+    assert left["state"] == "submitted" and "loose" not in left and "waiting for you" in left["status"]
+    [item] = studio.attention_list()["needs_you"]
+    assert item["take"] == "tk1" and "T1 was set cancelled" in item["detail"]
+    assert [o["label"] for o in item["options"]] == ["Accept", "Return", "Discard"]
+    assert studio.task_list(state="cancelled")["tasks"][0]["id"] == "T1"  # the task stays as it was left
+    studio.attention_resolve(item["id"], "discard")
+    assert takes.take_pending()["takes"] == [] and studio.attention_list()["needs_you"] == []
+    assert takes.take_list("rejected")["takes"][0]["id"] == "tk1" and (72, 0.0) not in piano(song)
+
+
+def test_a_take_the_floor_handed_in_once_is_not_handed_in_again(song, tmp_path):
+    seat("composer", agent(tmp_path, "composer", COMPOSER))
+    studio.task_add("composer", "Write the hook")
+    tk = takes.take_new("Hook", "T1", "composer", use=False)
+    api.write("Piano", "D5:w", at="1:1", project=tk["project"])
+    studio.task_update("T1", state="cancelled")
+    f = floor.Floor(song)
+    f.tick()
+    takes.take_reject("tk1", "Not this one")  # back to open; its task is still cancelled
+    f.tick(), f.tick()
+    [left] = takes.take_pending()["takes"]
+    assert left["state"] == "open" and left["loose"] and studio.attention_list()["needs_you"] == []
+
+
+def test_an_audition_that_ends_undecided_is_asked_again_then_goes_to_the_user(song, tmp_path):
+    # Known gap until 2026-11-14: the audition task was closed with the run's last words and the take stayed
+    # handed in with nobody asked.
+    seat("producer", agent(tmp_path, "producer", """
+        tool("render")
+        say(type="text", text="Sounds fine to me.")
+    """))
+    _handed_in()
+    f = floor.Floor(song)
+    out = f.run(poll=0.05)
+    assert out["launches"] == 2  # once more with the reason, then no third run
+    said = [m["text"] for m in studio.read()["messages"] if m["to"] == "producer"]
+    assert len(said) == 1 and "ended without take_accept or take_reject" in said[0] and "Sounds fine" in said[0]
+    [aud] = studio.task_list(state="done")["tasks"]
+    assert aud["result"] == "tk1 undecided after two runs: passed to the user"
+    [item] = out["needs_you"]
+    assert item["title"].startswith("Audition take tk1")
+    assert "waiting for you" in takes.take_pending()["takes"][0]["status"]
+    studio.attention_resolve(item["id"], "accept")
+    assert (69, 8.0) in piano(song) and takes.take_pending()["takes"] == []
+
+
+def test_take_cleanup_deletes_only_takes_that_are_over(song):
+    studio.seat_assign("composer", "human")
+    ids = []
+    for bar in (1, 2, 3, 4):
+        tk = takes.take_new(f"Idea {bar}", None, "composer", use=False)
+        api.write("Piano", "E5:w", at=f"{bar}:1", project=tk["project"])
+        ids.append(tk["take"])
+    takes.take_submit("in", ids[0]), takes.take_accept(ids[0])  # accepted
+    takes.take_discard(ids[1])                                  # closed
+    takes.take_submit("waiting", ids[2])                        # handed in; ids[3] stays open
+    look = takes.take_cleanup()
+    assert [g["take"] for g in look["would_delete"]] == ids[:2] and look["kept"] == 2
+    assert all((Path(song) / "takes" / i).is_dir() for i in ids)  # the default only lists
+    assert takes.take_cleanup(older_than_days=1)["would_delete"] == []  # they ended a moment ago
+    done = takes.take_cleanup(dry_run=False)
+    assert [g["take"] for g in done["deleted"]] == ids[:2]
+    assert [t["id"] for t in studio.take_index(Path(song))] == ids[2:]
+    assert (76, 0.0) in piano(song)  # what was accepted is in the session, not in the folder that went
+    assert takes.take_new("Next", None, "composer", use=False)["take"] == "tk5"  # ids are not reused
+    studio.seat_join("producer")
+    with pytest.raises(PermissionError):
+        takes.take_cleanup(dry_run=False)
+
+
 def test_an_export_says_which_takes_it_does_not_contain(song):
     tk = takes.take_new("Hook", None, "composer", use=False)
     assert "not_in_this_render" not in api.render(out="renders/final.wav")  # an empty take holds nothing back
@@ -495,3 +592,78 @@ def test_the_producer_is_told_to_clear_the_takes_before_it_finishes():
     assert "take_discard" in prod and "not_in_this_render" in prod
     from tunetrack import roles
     assert "take_discard" in roles.tools_for("producer") and "take_discard" not in roles.tools_for("mix")
+
+
+# ---- usage: an agent starts with what it needs in front of it, and is not sent the same thing twice ------------------
+# A real session (49 runs) spent a third of its steps on finding out what the floor manager already knew.
+
+def _handed_in(text: str = "Try this") -> str:
+    tk = takes.take_new("An idea for bar 3", None, "composer", use=False)
+    api.write("Piano", "A4:w", at="3:1", project=tk["project"])
+    takes.take_submit(text, tk["take"])
+    return tk["take"]
+
+
+def test_the_producer_is_started_on_an_audition_with_the_take_in_front_of_it(song, tmp_path):
+    # this stand-in never looks at the board, never points its tools anywhere and never closes its task
+    seat("producer", agent(tmp_path, "producer", """
+        import os
+        from pathlib import Path
+        take = re.search(r"take (tk\\d+)", prompt).group(1)
+        assert "Their summary: Try this" in prompt and re.search(r"What tk1 changed \\(\\d+\\):\\n- ", prompt)
+        assert "task_update(" not in prompt  # no bookkeeping call to open with
+        assert api._path(None).name == take  # its tools hear the take
+        tool("take_accept"); takes.take_accept(take)
+        assert api._path(None) == Path(os.environ["TUNETRACK_SESSION"]).resolve()  # and are back on the session
+        say(type="text", text="Accepted.")
+    """))
+    _handed_in()
+    out = floor.Floor(song).run(poll=0.05)
+    assert out["launches"] == 1 and (69, 8.0) in piano(song) and out["tasks"] == [] and out["needs_you"] == []
+    [aud] = studio.task_list(state="done")["tasks"]
+    assert aud["title"].startswith("Audition take tk1") and aud["result"] == "tk1 accepted"
+
+
+def test_returning_a_take_is_the_audition_s_result(song, tmp_path):
+    seat("producer", agent(tmp_path, "producer", PRODUCER))
+    tk = _handed_in()
+    f = floor.Floor(song)
+    f._route_takes()
+    takes.take_reject(tk, "Bar 3 should stay on Bb")
+    [aud] = studio.task_list(state="done")["tasks"]
+    assert aud["result"] == "tk1 returned: Bar 3 should stay on Bb"
+
+
+def test_a_take_the_user_decided_first_does_not_start_the_producer(song, tmp_path):
+    seat("producer", agent(tmp_path, "producer", PRODUCER))
+    tk = _handed_in()
+    f = floor.Floor(song)
+    f._route_takes()
+    assert studio.task_list("producer")["tasks"][0]["state"] == "queued"
+    takes.take_accept(tk)  # the user accepts it on the seat's TAKES tab before the Producer is started
+    out = f.run(poll=0.05)
+    assert out["launches"] == 0 and out["tasks"] == [] and (69, 8.0) in piano(song)
+
+
+def test_messages_in_a_task_message_are_read_once(song, tmp_path):
+    seat("composer", agent(tmp_path, "composer", """
+    assert "Keep it under 8 voices" in prompt""" + COMPOSER))  # it never calls inbox()
+    studio.message_send("composer", "Keep it under 8 voices")
+    studio.task_add("composer", "Write the hook")
+    floor.Floor(song).run(poll=0.05)
+    assert studio.inbox("composer", mark_read=False)["messages"] == []  # not sent again with its next task
+
+
+def test_a_task_message_is_short_about_what_came_before(song):
+    studio.seat_assign("composer", "agent", runner="script", model="x.py")
+    studio.seat_assign("mix", "human")
+    studio.task_add("composer", "Write the hook")
+    studio.task_update("T1", state="done", result="word " * 200)
+    studio.task_add("producer", "Plan the session")
+    studio.task_add("composer", "Write the bridge", depends=["T1"])
+    st = studio.read()["tasks"]
+    prompt = briefs.task_prompt(st[2], studio.studio_status(), None, [st[0]])
+    assert len(prompt) < 600 and " ..." in prompt and "Seats that are filled: composer, mix (the user)" in prompt
+    lead = briefs.task_prompt(st[1], studio.studio_status())  # the Producer hands out work: told what each seat is for
+    assert "- composer: Themes, harmony and structure" in lead and "- mix (the user): Balance" in lead
+    assert "spotting" not in lead and "rhythm" not in lead  # empty seats are not its business

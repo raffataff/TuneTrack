@@ -286,11 +286,11 @@ function renderBench(seat, force = false) {
   const body = u.querySelector(".benchBody");
   const tasks = ST.board.tasks.filter((t) => t.seat === seat), takes = ST.board.takes.filter((t) => t.seat === seat), a = seatAct(seat);
   const B = benchOf(seat);
-  const sig = JSON.stringify(tab === "bench" ? [tab, B.version, B.err, [...B.hidden], body.clientWidth, s.seat === "producer" ? ST.board.tasks.map((t) => [t.id, t.state, t.depends]) : 0]
+  const sig = JSON.stringify(tab === "bench" ? [tab, B.version, B.err, [...B.hidden], body.clientWidth, (ST.crew && ST.crew.active && ST.crew.active[seat] || {}).take, s.seat === "producer" ? ST.board.tasks.map((t) => [t.id, t.state, t.depends]) : 0]
     : tab === "tasks" ? [tab, tasks, s.occupant, takes.map((t) => [t.id, t.state, t.reason])] : tab === "takes" ? [tab, takes, Object.fromEntries(takes.map((t) => [t.id, ST.diffs[t.id]]))]
     : tab === "log" ? [tab, a.lines.length] : [tab, s.occupant, s.mode, s.notes, s.paused]);
   if (!force && ST.benchSig[seat] === sig) return;
-  if (!force && focusedIn(body)) return;  // don't pull a form out from under someone typing; focusout redraws
+  if (!force && (focusedIn(body) || B.hold)) return;  // don't pull a form out from under someone typing (focusout redraws) or a fader out of a hand
   ST.benchSig[seat] = sig;
   if (tab === "bench") benchWork(body, s);
   else if (tab === "tasks") benchTasks(body, s, tasks);
@@ -299,9 +299,9 @@ function renderBench(seat, force = false) {
   else benchSetup(body, s);
 }
 // ---------------------------------------------------------------- the seat's bench: its work, in its own form
-function benchOf(seat) { return ST.bench[seat] || (ST.bench[seat] = { data: null, version: null, take: null, hidden: new Set(), err: null, busy: false }); }
+function benchOf(seat) { return ST.bench[seat] || (ST.bench[seat] = { data: null, version: null, take: null, hidden: new Set(), err: null, busy: false, hold: 0, focus: null }); }
 async function loadBench(seat) {
-  const B = benchOf(seat); if (B.busy) return; B.busy = true;
+  const B = benchOf(seat); if (B.busy) { B.again = true; return; } B.busy = true;
   try {
     const r = await api("seat_bench", { seat, take: B.take, have: B.version });
     if (!r.unchanged) { B.data = r; B.version = r.version; }
@@ -311,6 +311,7 @@ async function loadBench(seat) {
     else B.err = e.message;
   }
   B.busy = false;
+  if (B.again) { B.again = false; return loadBench(seat); }  // asked again while reading: that read may predate an edit
   if (ST.open === seat) renderBench(seat);
 }
 let benchTimer = null;
@@ -325,18 +326,30 @@ const dbName = (v) => (v > 0 ? "+" : "") + (+v).toFixed(1);
 function benchWork(body, s) {
   const B = benchOf(s.seat), d = B.data;
   if (!d) { body.innerHTML = `<div class="empty">${B.err ? esc(B.err) : "Reading the work…"}</div>`; if (!B.err) loadBench(s.seat); return; }
-  const src = d.source, shown = src.take || "session";
+  const src = d.source, shown = src.take || "session", where = src.take ? esc(src.take.toUpperCase()) : "the session";
+  const run = ST.crew && ST.crew.active && ST.crew.active[s.seat], atWork = !!(run && src.take && run.take === src.take);
   const pick = d.takes.length ? [...d.takes, "session"].map((id) => `<button class="mini ${shown === id ? "on" : ""}" data-src="${esc(id)}" title="${id === "session" ? "The music as accepted" : "This seat's take " + esc(id)}">${esc(id.toUpperCase())}</button>`).join("") : "";
   body.innerHTML = `<div class="work">
     <div class="workBar">
       <span class="vfd small">${src.take ? `${esc(src.take.toUpperCase())} · ${src.state === "submitted" ? "HANDED IN" : "IN PROGRESS"} · <span class="amb">${d.changes} CHANGE${d.changes === 1 ? "" : "S"}</span>` : `SESSION · REV ${esc(src.rev ?? "?")}`}</span>
       ${src.task ? `<span class="tag">${esc(src.task)}</span>` : ""}${src.returns ? `<span class="tag stale">RETURNED ${src.returns}×</span>` : ""}
       <span class="srcs">${pick}</span><span class="spacer"></span>
-      ${src.take ? abKeys(src.take) : ""}<button class="key" data-do="desk" title="Open this on the desk to edit it">OPEN ON DESK</button>
+      ${d.view === "mix" ? `${atWork ? `<span class="tag stale" title="This seat's agent is working in this take right now. Your edits and its edits both land in it.">AGENT AT WORK IN ${where}</span>` : ""}<span class="srcs"><button class="mini" data-hist="undo" title="Undo the last change to ${where} (whoever made it)">UNDO</button><button class="mini" data-hist="redo" title="Redo it">REDO</button></span>` : ""}
+      ${src.take ? abKeys(src.take) : ""}<button class="key" data-do="desk" title="${d.view === "mix" ? "Open this on the desk's mixer" : "Open this on the desk to edit it"}">OPEN ON DESK</button>
     </div><div class="workBody"></div>${d.truncated ? `<div class="meta">Too many notes to draw them all here: open it on the desk for the rest.</div>` : ""}</div>`;
   const box = body.querySelector(".workBody");
   ({ notes: workRoll, mix: workConsole, sound: workSounds, plan: workPlan, report: workReport })[d.view](box, d, B, s);
   wireAb(body);
+  body.querySelectorAll("[data-hist]").forEach((b) => b.onclick = async () => {
+    const redo = b.dataset.hist === "redo";
+    try {
+      const r = await api(b.dataset.hist, {}, src.take || null);
+      toast(r.undone || r.redone ? `${redo ? "Redid" : "Undid"} the last change to ${src.take || "the session"}.` : `Nothing to ${b.dataset.hist} in ${src.take || "the session"}.`, true);
+      delete AB.cache[src.take || "session"];
+    } catch (e) { toast(e.message); }
+    B.version = null; await loadBench(s.seat);
+    if (!src.take || src.take === S.take) loadState().catch(() => {});
+  });
   body.querySelectorAll("[data-src]").forEach((b) => b.onclick = () => { B.take = b.dataset.src; B.version = null; loadBench(s.seat); });
   body.querySelector('[data-do="desk"]').onclick = async () => {
     hush(); await openTake(src.take || null);
@@ -389,40 +402,146 @@ function workRoll(box, d, B, s) {
   }
   if (!vis.some((x) => (x.t.notes || []).length)) { g.fillStyle = "#5a564d"; g.font = "12px 'Segoe UI', sans-serif"; g.fillText(parts.length ? "Nothing written yet." : "No tracks yet.", GUT + 14, TOP + 26); }
 }
-// Mix: the console. Every moved fader stands next to a dashed outline of where it was.
-function workConsole(box, d) {
-  const r = d.render, was = (t, k) => t.was && k in t.was;
+// Mix: the console. Every moved fader stands next to a dashed outline of where it was, and the controls work:
+// drag a fader or the pan strip (Shift: fine), double-click to reset, click the readout to type a level, M and S,
+// click an effect to bypass it, click a send to type its level, × removes an effect or a send, +FX / +SND / OUT
+// add an effect, add a send and route the output. An edit goes to what the bench shows (the take, or the session), one undo step each.
+function workConsole(box, d, B, s) {
+  const r = d.render, was = (t, k) => t.was && k in t.was, on = d.source.take || null;
+  const buses = d.tracks.filter((t) => t.kind === "bus");
+  const sendsTo = (t, b) => t.sends.some((x) => x.id ? x.id === b.id : x.to === b.name);  // a bench read before sends carried ids has names only
+  const rmKey = (attr, k, what) => `<button class="rm" ${attr}="${k}" title="Remove ${what}" aria-label="Remove ${what}">×</button>`;
+  const fxSlots = (list, fresh) => list.map((f, k) => `<span class="slotRow"><button class="slot ${f.bypass ? "byp" : ""} ${fresh && fresh(f) ? "new" : ""}" data-fx="${k}" aria-pressed="${!f.bypass}" title="${esc(f.label)}${f.bypass ? " (bypassed)" : ""}. Click to ${f.bypass ? "switch it in" : "bypass it"}.">${esc(f.label)}</button>${rmKey("data-fxrm", k, esc(f.label))}</span>`).join("");
+  // the keys that change a strip's shape: add an effect, add a send (tracks only), route the output
+  const addKeys = (t) => {
+    const free = t ? buses.filter((b) => b.id !== t.id && !sendsTo(t, b)) : [];
+    return `<div class="adds"><button data-add="fx" title="Add an effect to the end of this chain">+FX</button>${t && t.kind !== "bus" ? `<button data-add="send" ${free.length ? "" : "disabled"} title="${free.length ? "Send to a bus" : buses.length ? "Already sends to every bus" : "No buses yet: add one on the desk"}">+SND</button>` : ""}${t ? `<button data-add="out" title="Output: ${esc(t.output)}. Click to route it.">OUT</button>` : ""}</div>`;
+  };
+  const fader = (name, db, ghost, lo) => `<div class="slotway" data-lo="${lo}" title="Drag to set the level (Shift: fine), double-click for 0 dB."><i class="zero" style="bottom:${faderPos(0)}%"></i>${ghost != null ? `<i class="cap ghost" style="bottom:${faderPos(ghost)}%"></i>` : ""}<i class="cap now" role="slider" tabindex="0" aria-label="${esc(name)} level" aria-valuemin="${lo}" aria-valuemax="12" aria-valuenow="${+db || 0}" style="bottom:${faderPos(db)}%"></i></div>`;
   const strip = (t, i) => {
     const moved = [], w = t.was || {};
     if ("volume_db" in w) moved.push(`was ${dbName(w.volume_db)}`);
     if ("pan" in w) moved.push(`pan was ${panName(w.pan)}`);
     if ("mute" in w) moved.push(w.mute ? "was muted" : "was unmuted");
     if ("solo" in w) moved.push(w.solo ? "was solo" : "solo now");
-    if ("fx" in w) moved.push(`fx was ${w.fx.length ? w.fx.map((f) => f.label).join(", ") : "none"}`);
+    const chain = (l) => l.map((f) => f.label).join(", ");
+    if ("fx" in w) moved.push(chain(w.fx) !== chain(t.fx) ? `fx was ${chain(w.fx) || "none"}` : w.fx.some((f, k) => !f.bypass !== !t.fx[k].bypass) ? "fx switched in or out" : "fx settings changed");
     if ("sends" in w) moved.push("sends changed"); if ("output" in w) moved.push(`out was ${w.output}`); if ("automation" in w) moved.push("automation changed");
     if (t.new) moved.push("new track");
     const lv = t.level, rms = lv && lv.rms_dbfs != null ? Math.max(0, Math.min(100, (lv.rms_dbfs + 54) / 54 * 100)) : 0, pk = lv && lv.peak_dbfs != null ? Math.max(0, Math.min(100, (lv.peak_dbfs + 54) / 54 * 100)) : null;
     const oldFx = new Set(((w.fx || t.fx).map((f) => f.label)));
-    return `<div class="ch ${moved.length ? "moved" : ""}" style="--c:${trackColor(t, i)}">
+    return `<div class="ch ${moved.length ? "moved" : ""}" style="--c:${trackColor(t, i)}" data-ch="${esc(t.id)}">
       <div class="nm" title="${esc(t.name)} · ${esc(t.instrument || t.kind)}">${esc(t.name)}</div>
-      <div class="slots">${t.fx.map((f) => `<span class="slot ${f.bypass ? "byp" : ""} ${was(t, "fx") && !oldFx.has(f.label) ? "new" : ""}" title="${esc(f.label)}">${esc(f.label)}</span>`).join("")}${t.sends.map((x) => `<span class="slot send" title="send to ${esc(x.to)}">→ ${esc(x.to)} ${dbName(x.db)}</span>`).join("")}${t.output !== "master" ? `<span class="slot send">out ${esc(t.output)}</span>` : ""}${t.automation.length ? `<span class="slot send">auto ${esc(t.automation.join(", "))}</span>` : ""}</div>
+      <div class="slots">${fxSlots(t.fx, (f) => was(t, "fx") && !oldFx.has(f.label))}${t.sends.map((x, k) => `<span class="slotRow"><button class="slot send" data-send="${k}" title="Send to ${esc(x.to)} at ${dbName(x.db)} dB. Click to type a level.">→ ${esc(x.to)} ${dbName(x.db)}</button>${rmKey("data-sendrm", k, `the send to ${esc(x.to)}`)}</span>`).join("")}${t.output !== "master" ? `<button class="slot send" data-add="out" title="Output: ${esc(t.output)}. Click to route it.">out ${esc(t.output)}</button>` : ""}${t.automation.length ? `<span class="slot send">auto ${esc(t.automation.join(", "))}</span>` : ""}</div>
+      ${addKeys(t)}
       <div class="well"><div class="lvl" title="${lv ? `last render: peak ${lv.peak_dbfs} dBFS, rms ${lv.rms_dbfs} dBFS` : "not rendered yet"}"><i style="height:${rms}%"></i>${pk != null ? `<u style="bottom:${pk}%"></u>` : ""}</div>
-        <div class="slotway"><i class="zero" style="bottom:${faderPos(0)}%"></i>${was(t, "volume_db") ? `<i class="cap ghost" style="bottom:${faderPos(w.volume_db)}%"></i>` : ""}<i class="cap" style="bottom:${faderPos(t.volume_db)}%"></i></div></div>
-      <div class="db">${dbName(t.volume_db)}</div>
-      <div class="pan" title="pan ${panName(t.pan)}">${was(t, "pan") ? `<i class="ghost" style="left:${(w.pan + 1) * 50}%"></i>` : ""}<i style="left:${(t.pan + 1) * 50}%"></i></div>
-      <div class="ms"><b class="m ${t.mute ? "on" : ""}">M</b><span>${panName(t.pan)}</span><b class="s ${t.solo ? "on" : ""}">S</b></div>
+        ${fader(t.name, t.volume_db, was(t, "volume_db") ? w.volume_db : null, -60)}</div>
+      <button class="db" title="Click to type a level in dB">${dbName(t.volume_db)}</button>
+      <div class="pan" role="slider" tabindex="0" aria-label="${esc(t.name)} pan" aria-valuemin="-1" aria-valuemax="1" aria-valuenow="${t.pan}" title="Pan ${panName(t.pan)}. Drag to move it (Shift: fine), double-click to centre.">${was(t, "pan") ? `<i class="ghost" style="left:${(w.pan + 1) * 50}%"></i>` : ""}<i class="now" style="left:${(t.pan + 1) * 50}%"></i></div>
+      <div class="ms"><button class="m ${t.mute ? "on" : ""}" aria-pressed="${!!t.mute}" title="Mute">M</button><span>${panName(t.pan)}</span><button class="s ${t.solo ? "on" : ""}" aria-pressed="${!!t.solo}" title="Solo">S</button></div>
       <div class="was" title="${esc(moved.join(" · "))}">${esc(moved[0] || "")}${moved.length > 1 ? ` +${moved.length - 1}` : ""}</div></div>`;
   };
-  const m = d.master, bands = r ? Object.entries(r.bands_pct) : [], top = Math.max(1, ...bands.map((b) => b[1]));
+  const m = d.master, mw = m.was || {}, bands = r ? Object.entries(r.bands_pct) : [], top = Math.max(1, ...bands.map((b) => b[1]));
   box.innerHTML = d.tracks.length ? `<div class="console">${d.tracks.map(strip).join("")}
-    <div class="ch master"><div class="nm">Master</div>
-      <div class="slots">${m.fx.map((f) => `<span class="slot ${f.bypass ? "byp" : ""}">${esc(f.label)}</span>`).join("") || `<span class="slot send">no master chain</span>`}</div>
-      <div class="bandsB" title="Band balance of the last render">${bands.map(([k, v]) => `<div title="${esc(k)}: ${v}%"><i style="height:${v / top * 100}%"></i><span>${esc(k.replace("_", " "))}</span></div>`).join("") || `<span class="meta">not rendered yet</span>`}</div>
-      <div class="db">${r && r.lufs != null ? `${r.lufs} LUFS` : "— LUFS"}</div>
+    <div class="ch master ${m.was ? "moved" : ""}" data-ch="master"><div class="nm">Master</div>
+      <div class="slots">${fxSlots(m.fx) || `<span class="slot send">no master chain</span>`}</div>
+      ${addKeys(null)}
+      <div class="well"><div class="bandsB" title="Band balance of the last render">${bands.map(([k, v]) => `<div title="${esc(k)}: ${v}%"><i style="height:${v / top * 100}%"></i><span>${esc(k.replace("_", " "))}</span></div>`).join("") || `<span class="meta">not rendered yet</span>`}</div>
+        ${fader("Master", m.volume_db || 0, "volume_db" in mw ? mw.volume_db || 0 : null, -24)}</div>
+      <div class="dbs"><span class="db" title="Loudness of the last render">${r && r.lufs != null ? `${r.lufs} LUFS` : "— LUFS"}</span><button class="db" title="Click to type the master level in dB">${dbName(m.volume_db || 0)}</button></div>
       <div class="ms"><span>target ${esc(m.target_lufs)} · ceil ${esc(m.ceiling_db)}</span></div>
       <div class="ms"><span>${r ? `peak ${esc(r.true_peak_dbtp)} dBTP` : ""}</span></div>
-      <div class="was">${r ? `${r.stale ? "render is older than the mix · " : ""}${r.warnings.length ? r.warnings.length + " warning" + (r.warnings.length === 1 ? "" : "s") : "no warnings"}` : ""}${m.was ? " · master changed" : ""}</div></div></div>
+      <div class="was">${[r && r.stale ? "render is older than the mix" : "", r ? (r.warnings.length ? r.warnings.length + " warning" + (r.warnings.length === 1 ? "" : "s") : "no warnings") : "", "volume_db" in mw ? `level was ${dbName(mw.volume_db || 0)}` : "", Object.keys(mw).some((k) => k !== "volume_db") ? "master changed" : ""].filter(Boolean).join(" · ")}</div></div></div>
     ${r && r.warnings.length ? `<ul class="changes">${r.warnings.slice(0, 6).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}` : `<div class="empty">No tracks to mix yet.</div>`;
+
+  // One edit, sent to what this bench shows. The bench is not redrawn under a control in use (B.hold counts the
+  // drags, key runs and edits in flight); the answer is, so the strip shows what was stored and where it was.
+  const send = async (fn, args, rev = null) => {
+    B.hold++;
+    try { await api(fn, args, on, rev); delete AB.cache[on || "session"]; }
+    catch (e) {  // refused because it moved on since the bench read it: say so plainly, the redraw below shows it as it is
+      toast(e.conflict && rev != null && /changed since you loaded/.test(e.message) ? `${on ? on.toUpperCase() : "The session"} changed while you were looking at it, so that edit was not made. The bench now shows it as it is: try again.` : e.message);
+    }
+    B.hold--; B.version = null; await loadBench(s.seat);
+    if (!on || on === S.take) loadState().catch(() => {});  // the desk shows the same music: bring it along
+  };
+  const set = (id, args) => send(id === "master" ? "project_set" : "track_update", id === "master" ? { master_volume_db: args.volume_db } : { track: id, ...args });
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), step = (v, by) => Math.round(v / by) * by;
+  const dbAt = (pct) => pct >= 30 ? -20 + (pct - 30) / 70 * 32 : -60 + pct / 30 * 40;  // faderPos, the other way
+  // A drag is relative: pressing anywhere on a control takes hold of it where it is, so a stray click moves nothing.
+  const drag = (el, ev, onMove, onDone) => {
+    if (ev.button) return;
+    ev.preventDefault(); try { el.setPointerCapture(ev.pointerId); } catch { /* a pointer that is already gone */ } B.hold++;
+    const box0 = el.getBoundingClientRect(); let went = false;
+    el.onpointermove = (e) => { went = true; onMove(e, box0); };
+    el.onpointerup = el.onpointercancel = (e) => { el.onpointermove = el.onpointerup = el.onpointercancel = null; B.hold--; onDone(went && e.type === "pointerup"); };
+  };
+  // Arrow keys nudge; the edit is sent once the keys rest, and the control keeps the focus through the redraw.
+  const nudger = (key, commit) => { let tm = null; return () => { if (tm == null) B.hold++; B.focus = key; clearTimeout(tm); tm = setTimeout(() => { tm = null; B.hold--; commit(); }, 450); }; };
+  // A readout that is clicked becomes a box to type a number in: Enter or leaving it sets it, Escape leaves it be.
+  const typeIn = (el, value, label, onValue) => {
+    const inp = h(`<input class="db" type="text" inputmode="decimal" value="${value}" aria-label="${label}">`); let done = false;
+    const end = (keep) => { if (done) return; done = true; const x = parseFloat(inp.value.replace(",", ".")); inp.replaceWith(el); if (keep && isFinite(x) && x !== value) onValue(x); };
+    inp.onkeydown = (e) => { if (e.key === "Enter") end(true); else if (e.key === "Escape") end(false); };
+    inp.onblur = () => end(true);
+    el.replaceWith(inp); inp.select();
+  };
+  box.querySelectorAll("[data-ch]").forEach((ch) => {
+    const id = ch.dataset.ch, t = d.tracks.find((x) => x.id === id), q = (sel) => ch.querySelector(sel);
+    const way = q(".slotway"), cap = q(".cap.now"), read = q("button.db"), lo = +way.dataset.lo, v0 = +cap.getAttribute("aria-valuenow");
+    let v = v0;
+    const show = (x) => { v = +clamp(x, lo, 12).toFixed(1); cap.style.bottom = faderPos(v) + "%"; cap.setAttribute("aria-valuenow", v); read.textContent = dbName(v); };
+    const commit = () => { if (v !== v0) set(id, { volume_db: v }); }, nudge = nudger(`${id}:cap`, commit);
+    way.onpointerdown = (ev) => {
+      const y0 = ev.clientY, p0 = faderPos(v); cap.focus({ preventScroll: true });
+      drag(way, ev, (e, bx) => show(step(dbAt(clamp(p0 + (y0 - e.clientY) / bx.height * 100, 0, 100)), e.shiftKey ? 0.1 : 0.5)), (ok) => { if (ok) commit(); else show(v0); });
+    };
+    way.ondblclick = () => { show(0); commit(); };
+    cap.onkeydown = (e) => {
+      const by = { ArrowUp: 0.5, ArrowRight: 0.5, ArrowDown: -0.5, ArrowLeft: -0.5, PageUp: 3, PageDown: -3 }[e.key];
+      if (!by && e.key !== "Home") return;
+      e.preventDefault(); show(e.key === "Home" ? 0 : v + (e.shiftKey && Math.abs(by) < 1 ? by / 5 : by)); nudge();
+    };
+    read.onclick = () => typeIn(read, v, "Level in dB", (x) => { show(x); commit(); });
+    ch.querySelectorAll("[data-fx]").forEach((b) => b.onclick = () => send("fx_update", { track: id, index: +b.dataset.fx, bypass: b.getAttribute("aria-pressed") === "true" }, d.source.rev));
+    // removing names the effect by its place in the chain, so like bypass it carries the revision the bench read
+    ch.querySelectorAll("[data-fxrm]").forEach((b) => b.onclick = () => send("fx_remove", { track: id, index: +b.dataset.fxrm }, d.source.rev));
+    q('[data-add="fx"]').onclick = () => openDevicePicker(false, (dev) => send("fx_add", { track: id, device: dev }));
+    if (!t) return;  // the master strip has a level and a chain; the rest is per track
+    const pan = q(".pan"), mark = q(".pan .now"), lab = q(".ms span"), p0 = t.pan; let p = p0;
+    const showPan = (x) => { p = clamp(+x.toFixed(2), -1, 1); if (Math.abs(p) < 0.03) p = 0; mark.style.left = (p + 1) * 50 + "%"; pan.setAttribute("aria-valuenow", p); lab.textContent = panName(p); };
+    const commitPan = () => { if (p !== p0) set(id, { pan: p }); }, nudgePan = nudger(`${id}:pan`, commitPan);
+    pan.onpointerdown = (ev) => {
+      const x0 = ev.clientX; pan.focus({ preventScroll: true });
+      drag(pan, ev, (e, bx) => showPan(step(p0 + (e.clientX - x0) / bx.width * 2, e.shiftKey ? 0.01 : 0.05)), (ok) => { if (ok) commitPan(); else showPan(p0); });
+    };
+    pan.ondblclick = () => { showPan(0); commitPan(); };
+    pan.onkeydown = (e) => {
+      const by = { ArrowRight: 0.05, ArrowUp: 0.05, ArrowLeft: -0.05, ArrowDown: -0.05 }[e.key];
+      if (!by && e.key !== "Home") return;
+      e.preventDefault(); showPan(e.key === "Home" ? 0 : p + (e.shiftKey ? by / 5 : by)); nudgePan();
+    };
+    // the send list is stored whole, so every send edit carries the revision the bench read
+    const sendList = (list) => send("track_update", { track: id, sends: list.map((y) => ({ to: y.id || y.to, db: y.db })) }, d.source.rev);
+    ch.querySelectorAll("[data-send]").forEach((b) => b.onclick = () => {
+      const k = +b.dataset.send;
+      typeIn(b, t.sends[k].db, `Send to ${esc(t.sends[k].to)} in dB`, (x) => sendList(t.sends.map((y, j) => j === k ? { ...y, db: clamp(+x.toFixed(1), -60, 12) } : y)));
+    });
+    ch.querySelectorAll("[data-sendrm]").forEach((b) => b.onclick = () => sendList(t.sends.filter((y, j) => j !== +b.dataset.sendrm)));
+    // the menu opens under the key, so it lands in the same place from the mouse or the keyboard
+    const under = (b) => { const rc = b.getBoundingClientRect(); return { clientX: rc.left, clientY: rc.bottom + 2 }; };
+    const sk = q('[data-add="send"]');
+    if (sk) sk.onclick = () => menu(under(sk), buses.filter((b) => b.id !== id && !sendsTo(t, b))
+      .map((b) => [`Send to ${b.name}`, () => sendList([...t.sends, { id: b.id, db: -12 }])]));
+    ch.querySelectorAll('[data-add="out"]').forEach((ok) => ok.onclick = () => menu(under(ok), [{ id: "master", name: "Master" }, ...buses.filter((b) => b.id !== id)]
+      .map((b) => [`${b.id === (t.output_id || t.output) ? "• " : ""}Out to ${b.name}`, () => { if (b.id !== (t.output_id || t.output)) set(id, { output: b.id }); }])));
+    q(".ms .m").onclick = () => set(id, { mute: !t.mute });
+    q(".ms .s").onclick = () => set(id, { solo: !t.solo });
+  });
+  if (B.focus) {  // a control nudged from the keyboard keeps the focus through its own redraw
+    const [id, what] = B.focus.split(":"), ch = [...box.querySelectorAll("[data-ch]")].find((x) => x.dataset.ch === id);
+    B.focus = null; const el = ch && ch.querySelector(what === "pan" ? ".pan" : ".cap.now"); if (el) el.focus({ preventScroll: true });
+  }
 }
 // Sound: the instrument rack. One slot per part, with what it was before this take, and a key to hear it.
 function workSounds(box, d) {
@@ -671,7 +790,7 @@ function renderNeeds() {
       <div class="from"><span>${esc(fromSeat ? title(a.from) : "Floor")} · ${esc(a.kind)}${a.task ? " · " + esc(a.task) : ""}</span><span>${esc(a.id)}</span></div>
       <h3>${esc(a.title)}</h3>${a.detail ? `<p>${esc(a.detail)}</p>` : ""}
       ${hear ? `<div class="opts hear">${hear}</div>` : ""}
-      <div class="opts">${audition ? `${abKeys(a.take)}<button class="key" data-desk="${esc(a.take)}" title="See and edit this take in the arrangement, piano roll and mixer">DESK</button><button class="key go" data-opt="a">ACCEPT</button><button class="key" data-ret>RETURN…</button>`
+      <div class="opts">${audition ? `${abKeys(a.take)}<button class="key" data-desk="${esc(a.take)}" title="See and edit this take in the arrangement, piano roll and mixer">DESK</button><button class="key go" data-opt="a">ACCEPT</button><button class="key" data-ret>RETURN…</button><button class="key warn" data-discard title="Close this take without merging it">DISCARD</button>`
         : a.options.map((o, i) => `${o.take && !takes.includes(o.take) ? "" : ""}${o.audio ? `<button class="key" data-audio="${esc(o.audio)}" title="Hear it">▶</button>` : ""}<button class="key ${i === 0 && !fromSeat ? "go" : ""}" data-opt="${esc(o.id)}" data-do="${esc(o.do || "")}" title="${esc(o.detail || "")}">${esc(o.label)}</button>`).join("")
           + (!a.options.length && !fromSeat ? `<button class="key go" data-say="Sorted. Try again.">TRY AGAIN</button>` : "")
           + (!a.options.length && fromSeat ? REPLIES[kind].map(([label, say, more]) => `<button class="key" data-reply="${esc(say)}" ${more ? "data-more" : ""} title="${esc(say)}">${esc(label)}</button>`).join("") : "")}</div>
@@ -699,6 +818,13 @@ function renderNeeds() {
     });
     el.querySelectorAll("[data-audio]").forEach((b) => b.onclick = () => { hush(); playFile(b.dataset.audio); });
     el.querySelectorAll("[data-desk]").forEach((b) => b.onclick = () => { hush(); openTake(b.dataset.desk); });
+    const drop = el.querySelector("[data-discard]");
+    if (drop) drop.onclick = async () => {
+      if (!confirm(`Discard ${a.take}? Its work stays on disk but is not merged.`)) return;
+      err.classList.add("hidden");
+      try { await api("take_discard", { take: a.take }); refresh(true); }
+      catch (e) { err.textContent = e.message; err.classList.remove("hidden"); refresh(true); }
+    };
     const ret = el.querySelector("[data-ret]");
     if (ret) ret.onclick = () => { text.classList.remove("hidden"); el.querySelector("[data-send]").classList.remove("hidden"); text.focus(); };
     el.querySelector("[data-go]").onclick = () => {

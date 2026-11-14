@@ -25,7 +25,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import api, bench, config, studio, takes
+from . import api, bench, config, livehost, studio, takes
 from .crew import detect, host, scorecard
 
 PORT = 7373
@@ -75,6 +75,45 @@ def take_cut(seat: str | None = None, task: str | None = None, name: str | None 
     return {"take": tid, "continued": bool(have)}
 
 
+def _live_path(take=None) -> Path:
+    cur = _current()
+    if not cur:
+        raise RuntimeError("No project open")
+    return _take_dir(cur, take) if take else cur
+
+
+def live_play(beat: float = 0.0, loop: bool | None = None, take: str | None = None) -> dict:
+    """Play what the Desk shows (the session, or the take it has open) on the live engine, from a beat. The first
+    call starts the engine and loads every plugin, which takes seconds on a big session."""
+    return livehost.play(_live_path(take), beat, loop)
+
+
+def live_stop() -> dict:
+    return livehost.stop()
+
+
+def live_seek(beat: float) -> dict:
+    return livehost.seek(beat)
+
+
+def live_loop(on: bool) -> dict:
+    return livehost.loop(on)
+
+
+def live_window(track: str, slot: str | int = "inst", take: str | None = None) -> dict:
+    """Open a hosted plugin's own window on this computer (slot: "inst" or the effect's number, 0 = first)."""
+    return livehost.window(_live_path(take), track, slot)
+
+
+def live_off() -> dict:
+    """Shut the live engine down and give the audio interface back."""
+    return livehost.off()
+
+
+def live_state() -> dict:
+    return livehost.state()
+
+
 # The studio board, as the user (this server never speaks for a seat). Read-only calls and the user's own
 # decisions: assigning seats, handing out tasks, talkback, answering Needs You, accepting or returning takes,
 # cutting and handing in a take of their own, and starting or stopping the crew.
@@ -85,6 +124,7 @@ STUDIO = {f.__name__: f for f in (
     takes.take_audition, takes.take_submit, takes.take_sync, take_cut, host.crew_start, host.crew_stop, host.crew_state, host.seat_hold, crew_detect,
     studio_view, bench.seat_bench, studio.report_list, studio.report_read,
     scorecard.crew_scorecard, scorecard.crew_review, scorecard.crew_history,
+    live_play, live_stop, live_seek, live_loop, live_window, live_off, live_state,
 )}
 TOKEN = secrets.token_urlsafe(32)
 _HOSTS = {"127.0.0.1", "localhost", "[::1]"}
@@ -242,6 +282,10 @@ async def call(req: Request):
             d = _take_dir(cur, body["take"])
         except KeyError as e:
             return JSONResponse({"error": str(e.args[0]), "conflict": True}, status_code=409)
+        state = takes._meta(d).get("state")
+        if state not in bench.LIVE:  # a page that has not caught up: the edit would land where nobody will hear it
+            was = "accepted into the session" if state == "accepted" else "closed"
+            return JSONResponse({"error": f"{d.name} was {was}; reloading", "conflict": True}, status_code=409)
         if "project" in inspect.signature(target).parameters:
             args = {**args, "project": str(d)}
 
@@ -311,6 +355,28 @@ async def events(req: Request):
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
+async def live_events(req: Request):
+    """Server-sent events for the transport: the live engine's position, meters and state, about 20 times a
+    second while it plays and whenever anything else about it changes."""
+    async def stream():
+        last, idle = None, 0.0
+        while not await req.is_disconnected():
+            st = livehost.state()
+            mark = json.dumps(st, sort_keys=True)
+            if mark != last:
+                last, idle = mark, 0.0
+                yield f"data: {mark}\n\n"
+            elif idle >= 15.0:
+                idle = 0.0
+                yield ": keep-alive\n\n"
+            pause = 0.05 if st.get("playing") or st.get("loading") else 0.25
+            await asyncio.sleep(pause)
+            idle += pause
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
 async def audio(req: Request):
     f = Path(req.query_params.get("file", "")).resolve()
     roots = [config.HOME.resolve(), config.PROJECTS_DIR.resolve()]
@@ -325,7 +391,7 @@ async def audio(req: Request):
 app = _HostGuard(Starlette(routes=[
     Route("/", index), Route("/web/{name}", static), Route("/api/ping", ping), Route("/api/version", version),
     Route("/api/state", state), Route("/api/call", call, methods=["POST"]), Route("/api/audio", audio),
-    Route("/api/events", events),
+    Route("/api/events", events), Route("/api/live", live_events),
 ]))
 
 
@@ -363,6 +429,7 @@ def main(port: int = PORT) -> None:
         uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
     finally:
         host.stop_all()  # agents the editor started don't outlive it
+        livehost.off()   # nor does the live engine (it holds the audio interface)
 
 
 if __name__ == "__main__":

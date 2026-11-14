@@ -137,6 +137,17 @@ def crew_history(seat: str | None = None) -> dict:
     return {"history": sorted(out.values(), key=lambda a: (roles.ORDER.index(a["seat"]), -a["runs"]))}
 
 
+def _returned(session: str | None = None) -> str:
+    """The takes that came back, with why: what the review is mostly about, given to the Producer so it does not
+    read every take and report to find them (on a real session that review was 48 calls and half a million tokens)."""
+    back = [t for t in studio.take_index(studio.session_path(session)) if int(t.get("returns", 0)) and t.get("reason")]
+    if not back:
+        return "No take was returned.\n\n"
+    return "Takes that were returned (the last reason given):\n" + "\n".join(
+        f"- {t['id']} ({t.get('seat')}, {t.get('task') or 'no task'}), {t['returns']}x: "
+        + " ".join(str(t["reason"]).split())[:300] for t in back) + "\n\n"
+
+
 def crew_review(session: str | None = None) -> dict:
     """File this session's scorecard as a report, keep it in the crew history, and - when an agent sits in the
     Producer seat - give it the task of writing the review: what each seat did well, where it cost time, and
@@ -155,14 +166,14 @@ def crew_review(session: str | None = None) -> dict:
     if prod and prod.get("kind") == "agent":
         t = studio.task_add(
             "producer", "Write the session review",
-            "The user wants a review of how each seat's agent did in this session, to decide who to seat where "
-            "next time.\n\nThe counts, from the activity log:\n\n" + table + "\n\n"
-            "Write the review in markdown and file it with report_write(title=\"Session review\", kind=\"review\", "
-            "body=...). For every seat that worked: what it did well, where it cost time or had to be corrected "
-            "(name the takes and tasks), and whether you would seat that agent there again or try another. Ground it "
-            "in the counts above and in what you heard in its takes; say plainly where you cannot tell. End with "
-            "the crew you would pick for the next session of this kind. Do not put the review in talkback. Then set "
-            "this task done with a two-line result.", session=session)
+            "The user wants to know who to seat where next time.\n\nThe counts, from the activity log:\n\n"
+            + table + "\n\n" + _returned(session) +
+            "File the review with report_write(title=\"Session review\", kind=\"review\", body=...). It is read to "
+            "pick a crew, not as an account of the session: 40 lines at most. Per seat that worked, three lines: "
+            "keep or swap (and for what); the one thing that cost most, with the take or task; the one instruction "
+            "that would have avoided it. Then the crew you would pick, one line per seat. Work from the counts and "
+            "the returns above and from what you remember hearing: do not re-read every report and take, and do "
+            "not render again. Say \"cannot tell\" where you cannot. Nothing in talkback.", session=session)
         out["task"] = t["id"]
     else:
         out["note"] = "No agent sits in the Producer seat, so only the scorecard was filed."

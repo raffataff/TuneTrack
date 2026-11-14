@@ -166,13 +166,21 @@ class _Board:
                       reason=time.strftime("starts again at %H:%M", time.localtime(not_before)) if not_before and t["state"] == "queued" else None)
         return out
 
-    def close_auditions(self, take: str, outcome: str) -> None:
-        """The take was accepted, returned or discarded: any request to audition it is answered."""
+    def close_auditions(self, take: str, outcome: str, why: str = "") -> None:
+        """The take was accepted, returned or discarded: any request to audition it is answered, and so is the
+        Producer's task to audition it. The decision is that task's result, so the Producer has nothing to write
+        up afterwards, and a take the user decided first does not start a Producer run to hear it again."""
+        now = round(time.time(), 3)
         for a in self.st["attention"]:
             if a["state"] == "open" and a.get("take") == take:
-                a["state"], a["resolved"] = "resolved", round(time.time(), 3)
+                a["state"], a["resolved"] = "resolved", now
                 a["answer"] = {"option": None, "text": f"take {outcome}"}
                 self.emit("attention", id=a["id"], state="resolved", title=a["title"], answer=f"take {outcome}")
+        for t in self.st["tasks"]:
+            if t.get("audition") == take and t["state"] in OPEN:
+                t.update(state="done", updated=now, result=f"{take} {outcome}" + (f": {why}" if why else ""))
+                self.emit("task", id=t["id"], seat=t["seat"], state="done", title=t["title"], by=me(),
+                          result=t["result"][:EVENT_TEXT])
 
     def message(self, sender: str, to: str, text: str, task: str | None = None) -> dict:
         m = {"id": self.new_id("M"), "from": sender, "to": to, "text": text, "task": task,
@@ -461,6 +469,22 @@ def inbox(seat: str | None = None, mark_read: bool = True, session: str | None =
     return out
 
 
+def messages_read(seat: str, ids: list[str], session: str | None = None) -> int:
+    """Mark messages as read by a seat. The floor manager puts a seat's unread messages in its task message; once
+    that run has ended well they have been read, whether or not the agent called inbox() (a seat that never did
+    was sent every old message again with each new task)."""
+    who, want = _who(seat), set(ids or [])
+    if not want:
+        return 0
+    n = 0
+    with _Board(session) as b:
+        for m in b.st["messages"]:
+            if m["id"] in want and who not in m["read"]:
+                m["read"].append(who)
+                n += 1
+    return n
+
+
 # ---- Needs You -----------------------------------------------------------------------------------------------------
 
 def _answer_text(a: dict) -> str:
@@ -609,6 +633,9 @@ def attention_resolve(item: str, option: str | None = None, text: str = "", sess
                 raise ValueError("Say what has to change so the seat can act on it")
             takes.take_reject(pending["take"], text, session=session)
             carried = True
+        elif choice in ("c", "discard") and any(o["id"] == "c" for o in pending.get("options") or []):
+            takes.take_discard(pending["take"], session=session)
+            carried = True
     with _Board(session) as b:
         a = b.item(item)
         closed = a["state"] != "open"  # carrying out the decision above already closed the audition request
@@ -650,10 +677,43 @@ def take_index(path: Path) -> list[dict]:
     return sorted(out, key=lambda t: t.get("created", 0))
 
 
-def studio_status(session: str | None = None) -> dict:
-    """The board at a glance: seats and who is in them, open tasks, takes waiting, and what needs the user."""
+def _status_lean(path: Path, st: dict) -> dict:
+    """The board for an agent the studio started, which reads it to act and pays for every character on each later
+    step: seats that are filled (a word each), open tasks and takes without their texts, the last few finished
+    tasks by title. Empty seats, model names, role descriptions, summaries and results are left out."""
+    seats, open_tasks = {}, [t for t in st["tasks"] if t["state"] in OPEN]
+    for sid in roles.ORDER:
+        occ = st["seats"][sid]["occupant"]
+        if occ:
+            seats[sid] = ("user" if occ["kind"] == "human" else occ["kind"]) + (
+                " (on hold)" if st["seats"][sid].get("paused") else "")
+    tasks = []
+    for t in open_tasks:
+        d = _task_view(st, t)
+        d.pop("result", None)
+        d.pop("scope", None)
+        tasks.append(d)
+    out = {"you_are": me(), "seats": seats, "tasks": tasks,
+           "takes": [{k: t.get(k) for k in ("id", "seat", "task", "state") if t.get(k)}
+                     for t in take_index(path) if t.get("state") in ("open", "submitted")],
+           "needs_you": [{"id": a["id"], "kind": a["kind"], "from": a["from"], "title": a["title"]}
+                         for a in st["attention"] if a["state"] == "open"]}
+    recent = [t for t in st["tasks"] if t["state"] in ("done", "failed")][-5:]
+    if recent:
+        out["recently_finished"] = [f"{t['id']} {t['seat']} {t['state']}: {t['title']}" for t in recent]
+    empty = sorted({t["seat"] for t in open_tasks if not st["seats"][t["seat"]]["occupant"]})
+    if empty:
+        out["warnings"] = [f"{s} has open tasks but nobody in the seat" for s in empty]
+    return out
+
+
+def studio_status(session: str | None = None, lean: bool = False) -> dict:
+    """The board at a glance: seats and who is in them, open tasks, takes waiting, and what needs the user.
+    lean: the short form a launched agent gets (_status_lean)."""
     path = session_path(session)
     st = read(session)
+    if lean:
+        return _status_lean(path, st)
     seats = []
     for sid in roles.ORDER:
         s, r = st["seats"][sid], roles.ROLES[sid]

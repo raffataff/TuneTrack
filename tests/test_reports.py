@@ -110,6 +110,7 @@ def test_a_review_files_the_scorecard_remembers_it_and_tasks_the_producer(song, 
     assert out["scorecard"] == "R1" and len(studio.report_list()["reports"]) == 1  # the scorecard is replaced, not piled up
     task = studio.task_list("producer")["tasks"][0]
     assert task["id"] == out["task"] and "report_write" in task["detail"] and "kilo · free-a" in task["detail"]
+    assert "No take was returned" in task["detail"] and "40 lines at most" in task["detail"]
 
     [h] = scorecard.crew_history("composer")["history"]  # one session, counted once however often it is reviewed
     assert (h["agent"], h["sessions"], h["runs"], h["tool_calls"]) == ("kilo · free-a", 1, 2, 5)

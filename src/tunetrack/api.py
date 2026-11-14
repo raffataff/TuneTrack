@@ -542,7 +542,14 @@ def track_update(track: str, project: str | None = None, name: str | None = None
             if v is not None:
                 setattr(t, k, v)
         if output is not None:
-            t.output = "master" if output == "master" else p.track(output).id
+            to = None if output == "master" else p.track(output)
+            seen, cur = set(), to
+            while cur is not None and cur.id not in seen:  # follow the route: it must not come back to this track
+                if cur.id == t.id:
+                    raise ValueError(f"{t.name} cannot be routed into {to.name}: its sound would be fed back into itself")
+                seen.add(cur.id)
+                cur = next((x for x in p.tracks if x.id == cur.output), None)
+            t.output = to.id if to else "master"
         if sends is not None:
             t.sends = [{"to": p.track(s["to"]).id, "db": float(s.get("db", -12))} for s in sends]
     return {"track": t.id, "name": t.name}
@@ -588,6 +595,17 @@ def track_duplicate(track: str, new_name: str | None = None, with_clips: bool = 
 
 def _fx_chain(p: Project, track: str) -> list[Device]:
     return p.master["fx"] if track == "master" else p.track(track).fx
+
+
+def _fx_at(chain: list[Device], track: str, index) -> Device:
+    """The effect at a place in a chain, or an error that says what the chain holds and what to call instead."""
+    i = int(index)
+    if 0 <= i < len(chain):
+        return chain[i]
+    have = ", ".join(f"[{k}] {f.label()}" for k, f in enumerate(chain))
+    raise IndexError(f"{track} has no effect at index {i}: its chain is {have or 'empty'}. "
+                     + ("Add one with fx_add(track, device) first; track_add and track_update do not set effects."
+                        if not chain else "Index 0 is the first effect."))
 
 
 def _eq_label(p: Project, f: Device) -> str:
@@ -718,7 +736,7 @@ def fx_update(track: str, index: int, project: str | None = None, params: dict |
               bypass: bool | None = None, replace=None, sidechain: str | None = None) -> dict:
     """sidechain: a track name to key the effect from, "" to disconnect it, None to leave it as it is.
     A replaced device keeps the old one's sidechain key."""
-    old = _fx_chain(load(project), track)[int(index)]
+    old = _fx_at(_fx_chain(load(project), track), track, index)
     new = parse_device(replace, instrument=False) if replace is not None else old
     key = old.sidechain if sidechain is None else (sidechain or None)
     switch, notes = {}, []
@@ -729,7 +747,7 @@ def fx_update(track: str, index: int, project: str | None = None, params: dict |
         switch, notes = _sidechain_switches(old, False)
     with _Edit(project) as p:
         chain = _fx_chain(p, track)
-        dev = chain[int(index)]
+        dev = _fx_at(chain, track, index)
         if replace is not None:
             dev = chain[int(index)] = new
         if sidechain is not None or replace is not None:
@@ -747,7 +765,8 @@ def fx_update(track: str, index: int, project: str | None = None, params: dict |
 def fx_remove(track: str, index: int, project: str | None = None) -> dict:
     with _Edit(project) as p:
         chain = _fx_chain(p, track)
-        removed = chain.pop(int(index))
+        removed = _fx_at(chain, track, index)
+        chain.remove(removed)
         labels = [_fx_label(p, f) for f in chain]
     return {"removed": removed.label(), "fx": labels}
 

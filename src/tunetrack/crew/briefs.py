@@ -1,27 +1,20 @@
 """What a launched agent is told: who it is in the studio, how its seat does good work, and the task in front of it.
 
 The role text goes in the agent's system prompt (or is prefixed to the task where a CLI has no such thing); the
-task text is the message. Craft guidance comes from the project's skill (skill/SKILL.md), cut down to the sections a
-seat needs, so the Composer reads about melody and the Mix engineer about loudness - not everyone about everything.
+task text is the message. Craft guidance is written per seat (crew/craft.py), so the Composer reads about melody
+and the Mix engineer about loudness - not everyone about everything.
 """
 from __future__ import annotations
 
-import re
-
-from .. import config, roles
-
-# skill/SKILL.md sections ("## 4. Write the music") each seat reads; "ttn" = the notation reference.
-SKILL_SECTIONS = {
-    "producer": (1, 3, 5, 7, 8), "spotting": (1, 3), "composer": (3, 4, 5, 7, "ttn"), "arranger": (2, 4, 5, 7, "ttn"),
-    "rhythm": (4, 5, 7, "ttn"), "sound": (2, 5, 7), "tracking": (6,), "mix": (6, 7), "review": (5, 6, 7),
-}
+from .. import roles
+from .craft import craft
 
 PRODUCER = """You run the session. You do not write the notes or move the faders yourself: you decide what the
 music has to be, split it into tasks for the seats that are filled, and judge what comes back by listening.
 
 Planning (your first task):
-- Read the brief and what it is for (studio_status, project_info). If it is for a game or a film, understand the
-  moment the music plays in before choosing anything.
+- Read the brief and what it is for (project_info; your task message says who is in which seat). If it is for a
+  game or a film, understand the moment the music plays in before choosing anything.
 - Set the musical contract on the session: project_set (tempo, key, metre, loop, brief), markers for the form
   (Intro, A, B, ... with bar numbers), and the track list with track_add so every seat sees the same plan. Leave
   the chord track to the Composer unless the brief dictates the harmony.
@@ -29,18 +22,31 @@ Planning (your first task):
   theme, Piano, bars 5-12", not "write the song". Say which tracks and bars, what it must fit with, and what done
   sounds like. Use depends= so the order is real: sound choice before the parts that depend on the instrument's
   range, themes before arrangement, arrangement before mix, review last.
-- Give work only to seats that have someone in them (studio_status shows it). When a seat you need is empty, give
-  its work to the seat it merges into, or ask_human to have it filled. Small pieces need few seats.
+- Give work only to seats that have someone in them (your task message lists them). When a seat you need is
+  empty, give its work to the seat it merges into, or ask_human to have it filled. Small pieces need few seats.
+- A task's detail is the one place a seat is told what to do: put everything it needs there, once. Do not follow
+  it with a message that says the same.
 - Sound chooses and shapes instruments; it cannot write notes. A new colour or texture track needs two tasks: Sound
   for the instrument and a note-writing seat (Composer, Arranger, Rhythm) for its part.
+- Sound's task comes before the parts and says what they will ask of each instrument (short fast notes, long
+  sustained lines, how loud and how soft), so it auditions for exactly that. An articulation found missing after
+  the parts are written costs three takes: isolate those bars on their own track and change the patch there.
+- If the brief names a delivery format or a length (sample rate, a tail of silence), check it against render()'s
+  file_format and duration while planning, not after the last take.
 - Before you finish planning, read your own track list against your tasks: every track needs a task that writes
   its part. A track nobody was asked to write stays silent, and the mix that waits on it is done twice.
 
-When a take is handed in (a task "Audition take ..." lands in your inbox):
-- take_use(take), then render() and listen(), score() for the notes, take_diff(take) for what changed and whether
-  it stayed in its department. Judge it against the brief and against what is already accepted.
-- Good: take_use() back to the session, then take_accept(take). If it reports conflicts, look at them: accept with
-  on_conflict only when you know which side should win, otherwise return the take and say what to keep.
+When a take is handed in you are started on a task "Audition take ...". Its message carries what you would
+otherwise look up: the seat's summary, what the take changed, whether it stayed in its department, any conflict
+with the session. Your tools already point at the take.
+- render() and listen() once, and score() for the bars that changed. Judge it against the brief and against what
+  is already accepted. listen(section_bars=1) is a block per bar and the most expensive answer there is: use it
+  when you have to find a bar, not as the default; tracks=[...] and probe=False narrow it.
+- Good: take_accept(take). If it reports conflicts, look at them: accept with on_conflict only when you know which
+  side should win, otherwise return the take and say what to keep.
+- The accept or the return is the whole verdict: it finishes your audition task and puts your tools back on the
+  session. No task_update, no report, no message to say a take passed. What the next seat must know because of
+  what you heard goes in that seat's task (task_add detail, or task_update(task, detail=...)).
 - Accepting a take finishes its task, and the tasks that waited on it start at once. So when the audition shows
   that more has to happen first (a part nobody wrote, a fix by another seat), add that task and put it in the
   waiting tasks' depends (task_update(task, depends=[...])) before you accept.
@@ -60,7 +66,9 @@ close the gap, or set your own task done with a short account of what was made a
 SEAT = """You are the {title} of this studio session ({room}). {purpose}
 
 How your seat works:
-- inbox() shows your tasks and messages; studio_status() the whole board; project_info() and score() the music.
+- Your task message has what you need to start: the task, what it builds on, your messages, who is in which
+  seat. The task is already marked as being worked on. project_info() and score() show the music. studio_status()
+  and inbox() are for looking something up mid-task: do not open with them, and never call them to pass time.
 - {where}
 - Do the task you were given and stay inside it: its tracks, its bars, your department ({owns}). When the fix
   belongs to another seat, tell that seat or the Producer (message_send) instead of doing it yourself.
@@ -72,10 +80,15 @@ How your seat works:
 - You have no speakers and nobody expects you to: render() and listen() are your ears, and their measurements are
   enough to finish your task. Never stop to ask the user to listen for you. When two versions are both defensible
   and only taste decides, ask_human with the takes as options (they get a play key each) and carry on meanwhile.
-- When your task is finished or cannot move until someone else acts, end your turn. Do not wait, and do not call
-  studio_status() or inbox() over and over to watch for it: you are started again when there is something to do.
-- Talkback (message_send) is for a few sentences. Anything longer - a review, a report, findings - is filed with
-  report_write(title, body) and mentioned in one line.
+- When your task is finished or cannot move until someone else acts, end your turn. Do not wait or watch the
+  board: you are started again the moment there is something for you (a take handed in, an answer, a new task).
+- Nobody reads along while you work, and every word you write is paid for again by each agent that reads it. Write
+  for the next agent, not for an audience: what, where (bars, tracks), the number that matters. No recap of the
+  brief, no account of your steps, no praise. Do not narrate between tool calls. A hand-in summary or a task result
+  is three lines at most, a message two.
+- message_send only when the receiver has to act on it or decide differently because of it. Not to say something
+  is done or passed: the board shows that.
+- report_write only when your task asks for a report. It is not a record of what you did.
 - Say plainly what you could not do or could not verify. A take described as finished when part of it is not
   costs the whole crew a round trip.
 You have only the studio's tools. Do not try to read or write files, run commands or browse - the music lives in
@@ -88,8 +101,9 @@ MIX = """When the mix is done: it is done when the music does what the brief ask
 way - not when every number is tidy. Work in passes:
 - One pass = render() and listen(), pick the two or three things a listener would notice first (a buried lead, mud
   in the low mids, a part fighting another for one band, clipping, a jump at the loop point), fix those, stop.
-- Two passes, three at most. Then hand the take in, and put what is still off in the summary with the bars and
-  tracks, so the Producer decides whether it is worth another round.
+- Two passes, three at most: each render() report starts with the pass you are on (mix_pass). Batch your fixes
+  between renders instead of rendering after every change. Then hand the take in, and put what is still off in the
+  summary with the bars and tracks, so the Producer decides whether it is worth another round.
 - Band percentages, LUFS and correlation are evidence, not targets. Do not re-render to move a figure by a point or
   two, and do not undo a change that sounded right because a number moved the wrong way.
 """
@@ -99,25 +113,9 @@ _IN_TAKE = ("Your take is already cut: every tool you call edits your private co
 _DIRECT = "You work on the session itself: what you change is live for everyone at once."
 _SUBMIT = ("take_diff() to make sure the take holds what you meant and nothing else, then take_submit(summary): "
            "what you made, where (tracks, bars), and what the listener should check.")
-_DONE = "When the task is finished: task_update(task, state=\"done\", result=...) with one or two sentences on the outcome."
-
-
-def skill_sections(seat: str) -> str:
-    """The parts of skill/SKILL.md this seat needs (empty when the skill file is not there)."""
-    f = config.ROOT / "skill" / "SKILL.md"
-    try:
-        text = f.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    parts = re.split(r"(?m)^(?=## )", text)
-    want = SKILL_SECTIONS.get(seat, ())
-    out = []
-    for p in parts:
-        head = p.splitlines()[0] if p.strip() else ""
-        m = re.match(r"## (\d+)\.", head)
-        if (m and int(m.group(1)) in want) or ("ttn" in want and head.lower().startswith("## ttn")):
-            out.append(p.strip())
-    return "\n\n".join(out)
+_DONE = ("When the task is finished, end your turn with its outcome in one or two sentences: your last words become "
+         "the task's result and close it. (A task that cannot be finished: task_update(task, state=\"failed\", "
+         "result=why).)")
 
 
 def system(seat: str, in_take: bool, notes: str = "") -> str:
@@ -130,32 +128,70 @@ def system(seat: str, in_take: bool, notes: str = "") -> str:
     if seat == "mix":
         text += "\n" + MIX
     if seat == "review":
-        text += ("\nYour report is the task's result. For every problem: where (bars, tracks), what you heard or "
-                 "measured, and which seat should fix it - then task_add that fix for that seat, or message the "
-                 "Producer when it is a question of direction. Measurements are evidence, not a verdict: say "
-                 "whether the music does what the brief asks.\n")
+        text += ("\nYour findings are the task's result: file them with report_write, one line per problem - where "
+                 "(bars, tracks) | what you heard or measured | which seat should fix it - then task_add that fix "
+                 "for that seat, or message the Producer when it is a question of direction. One line for what "
+                 "works; no section per topic. Measurements are evidence, not a verdict: end with whether the "
+                 "music does what the brief asks, in two lines.\n")
     if notes and notes.strip():
         text += f"\nStanding instructions for this seat from the user:\n{notes.strip()}\n"
-    craft = skill_sections(seat)
-    if craft:
-        text += "\n---- Craft reference ----\n" + craft + "\n"
+    if craft(seat):
+        text += "\n" + craft(seat) + "\n"
     return text
 
 
+RESULT_SHOWN = 240  # of an earlier task's result, in the message of a task that builds on it
+ASKED_SHOWN = 700   # of the original task's detail, in the message of the task to audition its take
+DIFF_SHOWN = 40     # lines of a take's diff in an audition message
+
+
+def _audition(a: dict, asked: dict | None) -> list[str]:
+    """What the Producer needs to judge a handed-in take, from take_diff(): it used to open every audition with
+    five calls to find this out (task_update, take_use, project_info, studio_status, take_diff)."""
+    tk, seat = a["take"], a.get("seat")
+    who = roles.get(seat).title if seat in roles.ROLES else "The user"
+    lines = ["", f"{who} handed in {tk}" + (f" for {asked['id']}: {asked['title']}" if asked else "") + "."]
+    if asked and asked.get("detail"):
+        d = asked["detail"].strip()
+        lines.append("Asked for: " + (d if len(d) <= ASKED_SHOWN else d[:ASKED_SHOWN] + " ..."))
+    lines.append(f"Their summary: {a.get('summary') or '(none)'}")
+    ch = a.get("changes") or []
+    lines.append(f"What {tk} changed ({len(ch)}):")
+    lines += [f"- {c['where']}: {c['what']}" for c in ch[:DIFF_SHOWN]]
+    if len(ch) > DIFF_SHOWN:
+        lines.append(f"- and {len(ch) - DIFF_SHOWN} more: take_diff(\"{tk}\")")
+    if a.get("outside_seat"):
+        lines += ["Outside its department:"] + [f"- {x}" for x in a["outside_seat"]]
+    moved = a.get("session_moved")
+    if moved:
+        cf = moved.get("conflicts") or []
+        lines.append(f"The session has moved on since {tk} was cut ({moved.get('changes', 0)} changes); accepting it "
+                     + ("meets no conflict." if not cf else f"would hit {len(cf)}:"))
+        lines += [f"- {c.get('where')}: {c.get('why')}" for c in cf]
+    lines += ["", f"Your tools point at {tk} now: render() and listen() hear the take, score() reads it. Then "
+                  f"take_accept(\"{tk}\") or take_reject(\"{tk}\", reason). Either one finishes this task."]
+    return lines
+
+
 def task_prompt(task: dict, board: dict, take: dict | None = None, earlier: list[dict] | None = None,
-                messages: list[dict] | None = None) -> str:
-    """The message that starts (or resumes) an agent on a task."""
+                messages: list[dict] | None = None, audition: dict | None = None, asked: dict | None = None) -> str:
+    """The message that starts (or resumes) an agent on a task. audition: take_diff() of the take a Producer is
+    started to hear, and asked: the task that take was made for."""
     lines = [f"Task {task['id']} for you: {task['title']}"]
-    if task.get("detail"):
+    if audition:
+        lines += _audition(audition, asked)
+    elif task.get("detail"):
         lines += ["", task["detail"]]
     scope = task.get("scope") or {}
     if scope:
         lines += ["", "Scope: " + "; ".join(f"{k} {', '.join(v) if isinstance(v, list) else v}" for k, v in scope.items())]
-    if task.get("by") and task["by"] != task["seat"]:
+    if task.get("by") and task["by"] not in (task["seat"], "floor"):
         lines.append(f"Given by: {task['by']}")
     if earlier:
         lines += ["", "Already done that this builds on:"]
-        lines += [f"- {t['id']} ({t['seat']}) {t['title']}: {t.get('result') or 'done'}" for t in earlier]
+        for t in earlier:
+            r = " ".join(str(t.get("result") or "done").split())
+            lines.append(f"- {t['id']} ({t['seat']}) {t['title']}: " + (r if len(r) <= RESULT_SHOWN else r[:RESULT_SHOWN] + " ..."))
     if take:
         returns = int(take.get("returns", 0))
         lines += ["", f"Your take is {take['id']}" + (
@@ -171,8 +207,13 @@ def task_prompt(task: dict, board: dict, take: dict | None = None, earlier: list
         lines += ["", "Messages for you:"]
         lines += [f"- from {m['from']}" + (f" (about {m['task']})" if m.get("task") else "") + f": {m['text']}"
                   for m in messages]
-    seats = [f"{s['seat']} ({s['occupant']})" for s in board.get("seats", []) if s.get("occupant")]
-    if seats:
-        lines += ["", "Seats that are filled: " + ", ".join(seats)]
-    lines += ["", f"Start with task_update(\"{task['id']}\", state=\"working\")."]
+    filled = [s for s in board.get("seats", []) if s.get("occupant")]
+    if filled and task["seat"] == "producer" and not audition:
+        # the Producer hands out the work, so it is told what each filled seat is for (the board no longer says)
+        lines += ["", "Seats that are filled:"]
+        lines += [f"- {s['seat']}" + (" (the user)" if s["occupant"] == "you" else "") + f": {roles.get(s['seat']).purpose}"
+                  for s in filled]
+    elif filled:
+        lines += ["", "Seats that are filled: " + ", ".join(
+            s["seat"] + (" (the user)" if s["occupant"] == "you" else "") for s in filled)]
     return "\n".join(lines)

@@ -4,13 +4,20 @@ Read this first if you are picking up the studio work in a new session. It is se
 wants, what was decided and why, what exists, what is verified, what to build next, and what only the owner can
 unblock. Keep it current: when a stage lands or a decision changes, edit this file in the same change.
 
-Last updated: 2026-11-13 (evening). `studio-core` (stages 1 to 2c first cut) is merged to `main` (PR #4, 8c1ad6b).
+Last updated: 2026-11-14. `studio-core` (stages 1 to 2c first cut) is merged to `main` (PR #4, 8c1ad6b).
 The work after it is on branch `desk-takes`, off `main` at 8c1ad6b: takes on the Desk, the Mix stopping rule, no
 pictures for launched agents, then (same day, after two live sessions) seat benches, Needs You answers that fit
 the situation, full-length talkback, reports and the crew scorecard, and the fixes those sessions showed; then (night) a
 third live session on the new briefs, takes that can no longer miss the session, a cap on repeat questions, and the
-chord track on the Desk.
-**Nothing on `desk-takes` is committed yet**; the owner has not asked for a commit.
+chord track on the Desk. All of that is committed and pushed (676d974, `origin/desk-takes`; no PR open).
+**Uncommitted on `desk-takes` since then** (late night; the owner has not asked for a commit): the Mix console bench
+with working controls, the pass count a launched Mix agent is told with each render, `take_new` giving a launched
+agent the take already cut for it, the Desk sending the revision it read with edits that name a thing by its place,
+the live smoke for the Claude runner, and tool schemas listed without their labels. And from 2026-11-14, after the
+owner's first whole session on paid models (The Lonely Walk, section 5): **the usage cuts** (tool answers on one
+line, a short board for launched agents, the Producer started on an audition with the take in front of it, briefs
+that stop agents narrating, reporting and re-reading), the rest of the Mix console (add and remove effects and
+sends, routing), and the render report's `file_format`.
 
 ---
 
@@ -59,7 +66,7 @@ owner's say-so.
 | **Seats work in takes; accepting is a three-way merge by department** | Several agents can work at once without hearing each other's half-finished work, and nothing overwrites accepted music. See section 4. |
 | **The Producer is the musical coordinator; the floor manager is plumbing** | There is no separate "orchestrator" agent. Scheduling, retries, routing and the Needs You list are code, so they work even when an agent is offline. |
 | **Launched agents get only their seat's studio tools** | No shell, no file access. Everything they do goes through MCP and is visible on the board. |
-| **Audio engine: C++ on JUCE (probably Tracktion Engine), not Rust** | Hosting commercial VST3 plugins with their own windows (HALion, Groove Agent, Waves shells, SSL) is the hard part of a DAW. The current renderer (DawDreamer, pedalboard) is already JUCE underneath, so the owner's plugins are known to work there. Rust has no mature VST3 host. Not yet tested: needs a spike (section 6, stage 3). |
+| **Audio engine: C++ on JUCE (probably Tracktion Engine), not Rust** | Hosting commercial VST3 plugins with their own windows (HALion, Groove Agent, Waves shells, SSL) is the hard part of a DAW. The current renderer (DawDreamer, pedalboard) is already JUCE underneath, so the owner's plugins are known to work there. Rust has no mature VST3 host. Built on bare JUCE 9 (2026-11-14, section 6, stage 3). |
 | **One engine, two modes** | Live through the audio interface when the owner listens; faster than real time and cached when agents work alone. What agents measure must be what the owner hears. DawDreamer stays until the new engine null-tests against it. |
 | **UI: web tech (canvas for meters/spectrum), wrapped as a desktop app later** | Best fit for a bespoke rack look, and plugin windows open as native windows from the engine process anyway. |
 | **Frontend stays plain JS/CSS with no build step (decided 2026-11-13)** | The server serves `src/tunetrack/web/` as it is, so `pip install` is the whole install and there is no Node toolchain to keep working. Two classic scripts share globals: `app.js` (desk + header) and `studio.js` (rack). Revisit only if the live-engine UI (stage 3) outgrows it. |
@@ -67,9 +74,10 @@ owner's say-so.
 
 Open decisions:
 
-- **Licence.** JUCE and Tracktion Engine are GPL/AGPL or paid. Fine for this public repo; matters only if the
-  owner ever sells it closed-source. They have not decided. Check current terms before depending on either.
-- **Tracktion Engine vs a bare JUCE graph.** Decide in the engine spike.
+- **Licence.** The engine links JUCE under its AGPLv3 option, so the engine's source has to be offered under
+  AGPLv3. The owner said (2026-11-14) the project will probably be open source; the repo has no LICENSE file
+  yet. Simplest: AGPL-3.0 for the whole repo. Their call; nothing was added.
+- Decided 2026-11-14: bare JUCE, not Tracktion Engine (section 6, stage 3).
 
 ---
 
@@ -109,7 +117,7 @@ On `main`, except what sections 5 and 6 mark `desk-takes`, which is uncommitted 
 | `src/tunetrack/crew/briefs.py` | What a launched agent is told: seat instructions, the Producer playbook, the sections of `skill/SKILL.md` that seat needs, and the task message. |
 | `src/tunetrack/crew/floor.py` | The floor manager: `Floor(session).run()` starts agents on ready tasks, logs their activity, routes handed-in takes, handles failure. `kickoff(brief)` gives the Producer its first task. Holds the one-manager lock (`FloorBusy`, `managed()`), skips seats on hold, `stop()` / `stop_seat()` requeue without counting the attempt, and `_recover()` requeues tasks a dead manager left "working". |
 | `src/tunetrack/crew/host.py` | The crew hosted in a long-lived process (the editor's server): `crew_start(brief)`, `crew_stop()`, `crew_state()`, `seat_hold(seat)`. Runs `Floor.run(keep_alive=True)` in a thread per session. |
-| `src/tunetrack/bench.py` | `seat_bench(seat)`: a read-only snapshot of a seat's work (its take in progress, else its handed-in take, else the session) with what the take changed marked: notes added and removed, each mix value next to what it was, instruments, form, last render. What the seat's first workstation tab draws. |
+| `src/tunetrack/bench.py` | `seat_bench(seat)`: a read-only snapshot of a seat's work (its take in progress, else its handed-in take, else the session) with what the take changed marked: notes added and removed, each mix value next to what it was, instruments, form, last render. What the seat's first workstation tab draws. The Mix console's controls edit through the Desk's own calls, not through this module. |
 | `src/tunetrack/crew/scorecard.py` | `crew_scorecard()` counts each seat and agent from the activity log (runs and how they ended, tool calls, minutes, takes handed in / accepted / first time / returned, asks). `crew_review()` files it as a report and tasks the Producer with the written review. `remember()` / `crew_history(seat)` keep it across sessions in `<library>/crew_history.json`; the seat picker shows it per model. |
 | `src/tunetrack/mcp_server.py` | 20 new tools (70 total; `report_write / report_list / report_read` for every seat, `take_discard` for the Producer). `apply_seat()` strips a seated agent's server down to its seat's tools; seated agents also get seat instructions. |
 | `src/tunetrack/server.py` | `/api/events` (server-sent events: project version + board activity, and with `?take=` the version of the take the Desk has open), board and crew functions callable from the editor (`STUDIO`), `board` and `crew` in `/api/state`, `studio_view()` for cheap redraws. A take on the Desk: `/api/state?take=tk3` and `/api/version?take=tk3`, a `take` field on `/api/call` that points the Desk's own calls at that take, and `take_cut()`. Stops hosted crews on exit. |
@@ -172,6 +180,57 @@ Changes to existing code that are easy to miss:
 - `take_discard` refuses a take that is already accepted or closed, and says what is left of its task.
 - `floor._quota_lock`: two seats on one model that run dry in the same moment raise one item, not two.
 - The Desk can call `harmony` (`server.CALLABLE`); the chord lane sends positions in beats.
+- `app.js` `api(fn, args, take, rev)`: `take` defaults to what the Desk has open; a bench passes the take it shows
+  (null: the session), so a bench edit lands in what the bench shows whatever the Desk is on.
+- `/api/call` refuses (409) a Desk call on a take that is accepted or closed: a page a moment behind would have
+  edited a folder nobody will hear.
+- Edits that name a thing by its place in a list (`fx_update`, `fx_remove`, `track_move`: `BY_PLACE` in `app.js`)
+  carry the revision the page read (`rev` in the call body, `api.expected_rev` on the server) and are refused if the
+  project has moved on; the page reloads. Field edits (a fader, a pan, mute) do not: the last writer wins per field.
+- `mcp_server._mix_pass`: a working `render()` (no `out`) by a launched Mix agent comes back with `mix_pass` first
+  ("Listening pass 2 of 3...", then "hand in now"). Counted per process, which is one run. Nothing is refused.
+- `mcp_server._trim_schema`: tools are listed without the "title" labels the SDK writes into every schema (all
+  70 tools: 34,500 characters of schema down to 25,600). Arguments are checked against the function signature as
+  before.
+- `mcp_server._take_in_hand`: `take_new()` from a launched agent whose tools already edit its own open take for the
+  same task (or with no task named) returns that take instead of cutting another.
+
+Usage (2026-11-14; what a model reads is not written for people, see section 8):
+
+- `mcp_server._wire`: every tool answers in JSON on one line. The SDK wrote dicts indented, one value per line: two
+  fifths of every answer. The name in the module (`mcp_server.render`) still returns the dict; only what is
+  registered with MCP is compacted.
+- `studio.studio_status(lean=True)` is what a launched agent gets from `studio_status()`: filled seats as
+  `{"composer": "agent", "mix": "user"}`, open tasks and takes without their texts, the last five finished tasks as
+  one line each. No empty seats, model names, role catalogue, summaries or results (6,200 characters down to 630 on
+  the Lonely Walk board). The user's own assistant and outside apps still get the full board.
+- A launched agent's `status()` lists patches as `"id [tags]"` under their plugin and has no project summary
+  (31,000 characters down to 9,000); its MCP instructions no longer repeat what its brief says about seats.
+- **The Producer is started on an audition with the take in front of it.** `floor._launch` puts the take's diff,
+  the seat's summary, any conflict and what was asked for in the task message (`briefs._audition`) and points the
+  Producer's tools at the take (`TUNETRACK_PROJECT`). `take_accept` / `take_reject` / `take_discard` finish the
+  audition task themselves (`_Board.close_auditions`: its result is "tk9 accepted" or "tk9 returned: reason") and
+  put the caller's tools back on the session (`takes._leave`). So an audition is render, listen, score, accept:
+  no `task_update`, `take_use`, `project_info`, `studio_status`, `take_diff`, report or message around it.
+- A take the user accepts or returns before the Producer was started closes the Producer's audition task: no run.
+- No bookkeeping calls: the task message no longer ends with "Start with task_update(working)" (the floor marks
+  it), and a seat that works on the session ends its turn with the outcome, which the floor stores as the result.
+- `takes._to_session`: "back to the session" for a launched agent is the session it was started for
+  (`TUNETRACK_SESSION`), not whatever project the editor has open by now.
+- `studio.messages_read`: the messages put in a task message are marked read when that run ends well. Before, a
+  seat that never called `inbox()` was sent every old message again with each task (Mix had 21 waiting).
+- `briefs.RESULT_SHOWN` (240): how much of an earlier task's result a task message quotes. The Producer's task
+  message says what each filled seat is for; other seats get the names only.
+- Briefs (`briefs.SEAT`, `PRODUCER`): nobody reads along; a hand-in summary or result is three lines, a message
+  two; `message_send` only when the receiver must act on it; `report_write` only when the task asks for a report;
+  no narration between tool calls; `listen(section_bars=1)` only to find a bar. The tool docstrings say the same.
+- `scorecard.crew_review`: the review task carries the returned takes with their reasons and asks for 40 lines
+  (keep or swap per seat, what cost most, the instruction that would have avoided it) without re-reading every
+  report and take.
+- `audition([...])` takes up to 12 instruments in one call (Sound made 66 single calls).
+- `render()` reports `file_format` (format, sample rate, channels, bits), and `project_set`'s docstring says what
+  `tail` is: the most a one-shot render runs past the end, cut sooner once the sound has died.
+- `api.track_update(output=...)` refuses a route that leads back into the track itself.
 
 ### How a session flows
 
@@ -210,7 +269,17 @@ Changes to existing code that are easy to miss:
   and LUFS), SOUNDS (Sound: one slot per instrument, what it was, AUDITION), PLAN (Producer, Spotting: form,
   chords, the arrangement, every task and what it waits on), REPORT (Review: the last render as measured). It
   follows the seat's take live while an agent works, switches between the seat's takes and the session, and
-  OPEN ON DESK lands on the matching Desk panel. Read-only: editing is the Desk's job.
+  OPEN ON DESK lands on the matching Desk panel. ROLL, SOUNDS, PLAN and REPORT are read-only: editing is the Desk's
+  job.
+- **The CONSOLE works.** Drag a fader or the pan strip (the drag is relative, so a stray click moves nothing; Shift
+  is fine steps), double-click for 0 dB or centre, arrow keys / PageUp / PageDown / Home on a focused fader or pan,
+  click the dB readout to type a level, click a send to type its level, M and S, click an effect to bypass it, a
+  master fader, UNDO and REDO. An edit goes to what the bench shows: the take (in progress or handed in) or, with SESSION picked, the session
+  itself; one undo step per gesture. The strip then shows the dashed outline of where the control stood before the
+  take. A tag says when the seat's agent is at work in the same take. Under each strip's slots is a key row: +FX
+  (the Desk's device picker; also on the master strip), +SND (a menu of the buses the track does not send to yet),
+  OUT (Master or a bus, the current one marked). An × beside an effect or a send removes it. Removing, and every
+  send edit, carries the revision the bench read. Effect settings are still the Desk mixer's (OPEN ON DESK).
 - **Needs You**: one ticket per item with the answers that fit it. Audition tickets carry A/B keys, ACCEPT and
   RETURN. A seat's question gets keys to hear what it is about (A/B for a take it names, else PLAY SESSION) and
   short replies (SOUNDS RIGHT / NEEDS WORK… / YOU DECIDE, or GO AHEAD / YOU DECIDE / SKIP IT) next to the note
@@ -260,7 +329,7 @@ outside the take's seat's department is flagged in `take_diff`, not blocked.
 
 Verified:
 
-- `uv run pytest -q` → 258 pass (135 existed before this work). `tests/test_crew_host.py` covers the manager
+- `uv run python -m pytest -q` → 275 pass (135 existed before this work). `tests/test_crew_host.py` covers the manager
   lock, hold, stop, recovery, the host, `board()`, `take_audition()`, the server's calls, and a take open on the
   Desk (edits, undo and playback land in the take; ids only; a stale page is refused; the stream follows it).
 - `uv run python tests/fuzz_merge.py 600` → `bad 0`. It builds random edits with the real API and checks four
@@ -313,20 +382,52 @@ Verified:
   a progression over the loop, and a chord written in a take (the session's chord track stays, the take's diff says
   `form chord track`). 258 tests pass; `fuzz_merge.py 600` → `bad 0`.
 
+- In a browser, 2026-11-13 late night (`output/_preview/console_check.py`: a copy of the short session, a person in
+  the Mix seat, a take cut for it): every console control named above, with real pointer drags for the faders and
+  pan; two controls moved in quick succession both land; a click without a drag changes nothing; the take's change
+  count and the dashed outlines follow; UNDO and REDO; SESSION picked on the bench edits the session and the Desk
+  follows; a Desk effect-bypass sent against an old revision is refused and the Desk reloads. No console errors
+  apart from the refused call.
+- Live, 2026-11-13 late night: **the Claude runner** (`output/_preview/claude_smoke.py`, scratch library, Composer on
+  `claude-haiku-5-5`, low effort, one run): 15 s, 8 tool calls, none failed, $0.011, a two-bar melody written in a
+  take and handed in, the audition ticket raised. Session id, text, tool calls, tool results and usage all parsed.
+  Claude Code loads the studio's tools on demand (one `ToolSearch` call in the run). One trip: it called
+  `take_new()` although its take was cut, worked in the new one and left the first open and empty; fixed
+  (`_take_in_hand`).
+
+- Live, 2026-11-13 night: the pass-check session (`output/_preview/pass-check/summary.json`): Mix made 2 renders in
+  its run, inside its limit of three. On The Lonely Walk, Mix averaged 2.2 renders a run over five runs.
+- Live, 2026-11-14 (the owner, on their own library): **The Lonely Walk**, a 48-bar orchestral cue on Codex models
+  (Producer `gpt-6.1-sol` medium; Composer, Arranger, Mix, Review `gpt-6.1-terra` medium; Sound `gpt-6-luna` high):
+  49 runs, 1,006 tool calls, 65 minutes of agent work, 15 of 15 takes accepted (13 first time), cue delivered. What
+  it cost and what was done about it is in the usage table below. The Producer's review (R22) recommends the same
+  crew again with Terra medium tried in Sound.
+- In a browser, 2026-11-14 (`console_check.py`): on the console, +SND adds a send and the key goes dark when there
+  is no bus left, × removes it, OUT routes to a bus and back, a bus is not offered itself, × removes an effect and
+  UNDO restores it, +FX on the master opens the picker and adds the effect, the take's change count follows. No
+  console errors.
+
 Not verified:
 
+- **The usage cuts have not been seen in a live session.** They have tests driven by stand-in agents; whether real
+  models keep to three-line summaries and stop filing reports is the first thing to read in the next session's
+  logs (`studio/logs/*.jsonl`; the measuring script is described in section 9).
 - The fixes for takes that miss the session, the question cap and the put-away of empty takes have tests (some
   driven by stand-in agents) but have not been seen in a live session.
 - A person stepping into a take while its agent is at work (allowed; edits are serialised by the project lock,
   and nothing warns that someone else is in it).
 - The new floor behaviour (one out-of-usage item per model, a run stopped when its task gains a dependency) and
   have tests but have not been seen in a live session (the short session on free models never ran dry).
-- The Mix stopping rule holds the time down (140 s) but not the pass count (six, for a limit of three).
+- On free Kilo models the Producer's and Review's runs hit the 480 s limit four times in the pass-check session
+  (10 runs for a 7-run job). The model was slow that night; not looked into further.
+- One run of the whole suite failed once in `test_a_crashing_agent_is_retried_then_becomes_a_blocker` while that
+  live session and a preview server were running on the same machine; alone and on the next full run it passed.
 
-- **Claude Code as a crew runner.** Flags were checked against `--help` only; the standalone CLI is not logged
-  in. Its tool-call event fixtures in the tests are hand-written.
-- **A real-model session driven from the UI.** The live session ran from a script on `floor.Floor`; the UI was
-  driven with a stand-in agent. Both use the same floor manager, but nobody has pressed RUN on paid models yet.
+- **Claude Code in a whole session.** One Composer run is verified (above); a Producer or Mix run on Claude, a
+  resumed run and a run that hits a usage limit are not. Its tool-call event fixtures in the tests are still
+  hand-written.
+- The console with an agent at work in the same take (the tag is drawn from the crew state; no agent was running
+  in the browser check), and on a touch screen.
 - Kilo: `--variant` on free models.
 - The UI on a narrow window (it reflows below 1180 px; only glanced at), on a long session (hundreds of
   events), and after the event stream drops and reconnects.
@@ -362,6 +463,42 @@ What the two sessions of 2026-11-13 afternoon tripped over, and what was done (a
 | The Producer asked, was answered, re-checked everything and asked again: three runs on one accepted take. Review's waits for answers were counted as "tried 3 times without finishing" | Two questions per task, then only blockers; an answer resets the task's attempts; the restarted run is told the answer is settled. |
 | Found by a flaky test: two seats on one model that ran dry at the same moment each raised their own ticket | One lock around look-then-raise. |
 
+What The Lonely Walk cost (2026-11-14), measured from its run logs, and what was done. The session read
+**21.8 M input tokens** (20.0 M of them cached) and wrote 109 k, over 1,054 agent steps. Every step re-reads the
+whole run so far, so a step saved is about 20 k tokens and a character saved in an early answer is paid back on
+every later step.
+
+| Where it went | Outcome |
+|---|---|
+| The Producer was woken 22 times (6.2 M tokens), 19 of them to audition one take. It was not polling between runs (the floor wakes it on a hand-in), but each wake-up opened with `task_update`, `take_use`, `project_info`, `studio_status`, `take_diff` and closed with a report, two messages, `take_use`, `task_update`: about ten steps around four of work | The audition arrives with the take in front of it and closes itself (above). Expect 5 to 6 steps instead of 15 |
+| `studio_status` 27 calls at 9,300 characters: every seat including empty ones, model names, the role catalogue, full summaries and results | The short board, 630 characters |
+| Answers indented one value per line: `listen` 62 calls at 10,700 characters (31,000 with a block per bar), `status` 10 at 32,000, `project_info` 57 at 5,400, `score` 65 at 4,000 | One line each (about 40% off); `status` cut to 9,000 for agents; the playbook says when a block per bar is worth it |
+| 25 `report_write` calls (22 reports, the Producer filed one per audition) and 41 `report_read` | Reports only when a task asks; the audition's verdict is the accept or the reason on the return |
+| 57 messages (22,000 characters), most of them "tk9 passes" to seats that needed to do nothing; unread ones were sent again with every task | Messages only when the receiver must act; read once |
+| One `task_update(working)` to open and one `task_update(done)` to close every run: about 90 steps | Gone |
+| The session review: 48 calls, 494 k tokens, 15,000 characters | 40 lines, from the counts and the returns |
+| Sound: 7.1 M tokens in 10 runs, 66 `audition`, 37 `sfz_list`, 32 `sfz_info`, `status` 8 times | `audition` takes a list; the playbook has Sound told what the parts will demand. Its two empty investigation runs were a tool gap (below) |
+| The Producer spent 53 calls and two questions to the user on delivery: `tail=6` did not add six seconds, and nothing said what sample rate the file has | `file_format` in the render report; `tail` explained |
+
+Not done, in order of what they would save:
+
+1. **See it live** and re-measure. One short session on a cheap model; compare steps per run and characters per
+   answer with the table above.
+2. Per-seat craft text. A brief is 9,000 to 15,000 characters, most of it slices of `skill/SKILL.md` sent with
+   every step. Shorter slices written per seat.
+3. The second half of the schema trim (optional parameters as `anyOf [type, null]`): needs one live run per runner.
+4. `listen()` for a bar range. An agent that wants bars 13-24 per bar gets all 48. And `energy_arc` repeats what
+   `sections` says when sections are bars.
+5. One Producer run for several takes handed in together (five auditions ran back to back at 01:18-01:23).
+6. A cheaper model in the Producer seat for auditions only, the top one for planning and the final listen.
+
+What the session's own review (R22) says the studio lacks, not built:
+
+- A sampled instrument's release or envelope cannot be changed: `sfz_info` shows no such control, and a HALion
+  "Amp Decay" set through `track_update(instrument_params=...)` read back unchanged. Two Sound runs ended empty.
+- EQ cannot be automated for a section; Mix used volume automation instead. Stage 3.
+- An articulation per phrase (spiccato for bars 13-24 only) needs the bars moved to their own track by hand.
+
 Known gaps and risks:
 
 - Each answer to a Needs You item still restarts the seat that asked (one agent run). The cap and the "settled"
@@ -370,10 +507,21 @@ Known gaps and risks:
   (`take_pending` marks it `loose`, an export warns) but nobody is asked about it.
 - The chord lane edits the chord track only. Notes already written do not follow a changed chord; `score()`
   shows what no longer fits. Chords typed as roman numerals are kept as typed.
-- The bench is a view. A person in the Mix seat still edits on the Desk's mixer.
+- On the console, effect settings are still the Desk mixer's. The other benches are views.
+- A Producer run that ends an audition without accepting or returning the take leaves it handed in with nobody
+  asked (the task is closed with the run's last words; the take shows on the seat's TAKES tab).
+- A person in the Mix seat who moves a fader with SESSION picked edits the session directly, as on the Desk; the
+  bench does not steer them into a take.
 
-- **Context cost per agent step is about 25k tokens** (a composer has 45 tools plus its brief). Mostly cached,
-  but trimming tool descriptions per seat is worth doing before long sessions on paid models.
+- **Context cost per agent step was about 25k tokens** before the 2026-11-14 cuts (28k on Claude Code, measured in
+  the smoke); not re-measured since. Mostly cached.
+  Measured 2026-11-13 (characters / 4): what TuneTrack itself sends is 5k (Spotting) to 12k (Composer) of that:
+  for the Composer 2.9k of tool descriptions, 4.5k of tool schemas after the label trim (6.1k before) and 3.5k of
+  brief, 2.9k of which is the `skill/SKILL.md` slice. The rest is the agent CLI's own prompt. Still to take: the
+  SDK writes every optional parameter as `anyOf [type, null]` with `default: null`; collapsing that would halve the
+  schemas again (to 16,200 characters for all tools) but a client that checks arguments against the listed schema
+  would then refuse an explicit null, so it needs one live run per runner (Claude, Codex, Kilo) first. After that,
+  shorter per-seat skill slices.
 - Takes are never deleted from disk (closed ones stay for reference); no cleanup command yet.
 - Tool lists per seat are coarse (`track_update` covers both fader and instrument). The real guard is the
   out-of-department flag at `take_diff`.
@@ -381,8 +529,8 @@ Known gaps and risks:
 - A take a person hands in is routed like an agent's (audition task for a Producer agent, otherwise a Needs You
   ticket), with or without a task, but only while a floor manager is running, because routing lives in
   `floor._route_takes`. With the crew stopped it waits on the seat's TAKES tab, where ACCEPT works.
-- The Desk does not send the revision it loaded with its edits (`expected_rev` exists server-side; `app.js` never
-  sets `rev`). Whole-list note saves are guarded by `expect_notes`; other edits are last-writer-wins.
+- The Desk sends the revision it read only with edits that name a thing by its place (`BY_PLACE`). Whole-list
+  note saves are guarded by `expect_notes`; field edits are last-writer-wins by design; clip edits name a clip id.
 - The hosted crew stops when the editor's server stops. Nothing restarts it; RUN does, and recovery requeues
   what was cut off.
 - Talkback WAKE costs one agent run per message to an idle seat. It is a visible toggle, on by default.
@@ -397,13 +545,15 @@ Stages 1, 2, 2b (except the Claude runner) and 2c (first cut) are done. Each sta
 ### Stage 2b: prove the crew with real models
 
 - Done 2026-11-13: one real small session end to end on free Kilo models, and the trips it showed fixed (section 5).
-- Left: once Claude is logged in, run the live smoke for the `claude` runner and fix its event parsing if needed.
+- Done 2026-11-13 late night: the live smoke for the `claude` runner (section 5). Its event parsing needed no fix.
 - Done 2026-11-13 (`desk-takes`): the two open rows of the trips table (no pictures for launched agents, a
   stopping rule in the Mix brief).
 - Done 2026-11-13: the second live session, and a long one run by the owner (section 5).
 - Done 2026-11-13 night: a short session on the new briefs (section 5). Agents no longer ask the user to listen
-  or poll while waiting, and reviews arrive as reports. Left: Mix's pass count, and seeing the take and question
-  fixes in a live session.
+  or poll while waiting, and reviews arrive as reports. Left: seeing the take and question fixes in a live session.
+- Done 2026-11-14: the owner's first whole session on paid models (The Lonely Walk), measured, and the usage cuts
+  that followed (section 5). Mix's pass count held (2 renders a run). Left: a short live session to see the cuts
+  work, then the "not done" list under the usage table.
 
 ### Stage 2c: the rack UI
 
@@ -416,22 +566,72 @@ Stages 1, 2, 2b (except the Claude runner) and 2c (first cut) are done. Each sta
      seat works like any other seat (see "The studio UI, as built").
   3. Done 2026-11-13 (`desk-takes`): a real-model session driven from RUN with a person in a seat.
   4. Done 2026-11-13 (`desk-takes`, first cut): per-seat benches (ROLL, CONSOLE, SOUNDS, PLAN, REPORT), read-only.
-     Left: editing in place on the bench (faders on the console). The Composer's chord-track editor is on the Desk
-     (the chord lane, done 2026-11-13 night).
+     Done 2026-11-13 late night: the Mix console's controls work (faders, pan, M/S, effect bypass, typed
+     levels, send levels, master fader, undo). Done 2026-11-14: adding and removing effects and sends, and
+     routing. Left: effect settings on the console; editing on the other benches.
+     The Composer's chord-track editor is on the Desk (the chord lane, done 2026-11-13 night).
   5. Done 2026-11-13 (`desk-takes`): Needs You answers per situation, full-length talkback, reports, scorecard and
      crew history. Left: the owner's view of how these read in use; a review that also weighs cost per accepted
      take once paid runs report usage; picking a crew from history automatically.
   6. Later niceties: workflow/audio cable view, movable modules (stage 6), push-to-talk.
 
-### Stage 3: live engine (the long pole; spike can run alongside 2c)
+### Stage 3: live engine (first cut built 2026-11-14, uncommitted on `desk-takes`)
 
-- Blocked until a C++ toolchain is installed (section 7).
-- Spike, about a week: load HALion Sonic, one SSL plugin and one Waves plugin; play an existing `project.json`
-  through the SSL 2 over ASIO; open a plugin window; null-test a render against today's DawDreamer render.
-  Decide Tracktion Engine vs bare JUCE.
-- Then: engine as its own process controlled by the Python side; real-time transport, faders, meters, spectrum;
-  agents' edits hot-swap into the playing graph; offline mode replaces DawDreamer once it null-tests.
-- Also closes existing limits in the README: plugin parameter automation, tempo-synced effects, time-stretch.
+Decided in the spike: **bare JUCE 9, no Tracktion Engine.** `project.json` stays the one model; the engine is a
+player that loads a flat spec. Tracktion would have been a second model to keep in step, harder to null against
+DawDreamer, and the built-in Faust devices need custom nodes either way. Revisit for stage 4 (recording, comping).
+
+Built (`engine/`, `src/tunetrack/live.py`, `tests/test_live.py`, `engine/README.md` has the detail):
+
+- `tunetrack-engine.exe`: one process hosting the session in a JUCE graph. VST3 instruments and effects (states,
+  shell plugins, settings by number or shown text), the built-in synths and effects (Faust turned into C++ by
+  `engine/tools/gen_faust.py`, settings live), faders, balance pan, volume/pan automation, sends, buses, sidechain
+  keys, master chain, plugin latency lined up by JUCE. SFZ instruments and audio clips play as dry stems the
+  offline worker renders and caches; their inserts run live.
+- Real time through ASIO (the SSL 2) or Windows Audio, transport with seek and loop, meters per strip, plugin
+  windows (`editor`), saving a plugin's state (`save_state`), offline render from the same graph.
+- Hot swap: `Player.sync()` reloads when `project.json` has a new revision; devices that did not change keep
+  playing (a note edit, a fader move or an insert setting never reloads a plugin).
+- `tunetrack live <project>` plays; `--null-test` compares both engines; `--devices` lists outputs.
+
+Measured 2026-11-14 on `fuzeball-galactic-anthem-v2` (30 tracks, 19 HALion/Groove Agent instances, SSL, Waves,
+Valhalla): live at 28-43% CPU of one core, no dropouts, 512-sample ASIO buffer; offline 22 s for 71 s of music.
+Against the offline renderer: same RMS, octave bands within 0.14 dB, loudness curve 0.99 alike. Deterministic
+material cancels to -50..-200 dB per track (HALion, SFZ, audio, all ten built-in effects, the whole mixing path).
+Round-robin samplers and built-in synth parts where a voice is freed at a different sample never cancel.
+
+Found on the way, worth knowing:
+
+- HALion Sonic's licence client crashes the process when a throwaway instance was made first, which is what
+  listing a plugin file's contents does. The engine lists in a second short-lived process and caches the result
+  (`plugin-cache/` beside the exe). `TT_TRACE=1` prints load steps, wiring and symbolised crash stacks.
+- Valhalla Supermassive arrives with its buses off under JUCE 9; the engine switches main buses on.
+- MIDI timing offline is the MIDI file's: ticks at 960, tempo in whole microseconds, cut to a sample.
+  `live._midi_clock` reproduces it; one sample out changes which synth voice plays a note.
+- The offline Faust host computes built-in synths one sample per call, which frees a releasing voice at the
+  first near-silent sample: long releases are cut short (about 0.1 s instead of the set time). The engine matches
+  this with `--per-sample` (the default for `live`); without it releases ring out. Owner's call which is wanted
+  once offline rendering moves to the engine.
+
+Left, in order:
+
+1. Done 2026-11-14: **UI transport on the engine.** A LIVE key beside the transport (remembered per browser).
+   On: play, stop, seek and loop drive one engine hosted by the editor's server (`livehost.py`, `/api/live`
+   streams position, meters, CPU and dropouts); the playhead follows the engine, the mixer strips and the master
+   show live peaks, and VST3 devices get a Window button in the inspector. The engine follows what the Desk shows
+   (the session or the open take) and reloads on every new revision. Off: the browser preview as before, and the
+   engine shuts down so the audio interface is free (Cubase and the engine cannot share the ASIO driver).
+   Checked in the browser on a scratch synth session: start, seek, loop wrap, an edit while playing, meters, off.
+   Not checked by a person yet; opening a take while live was checked on the server side only. Live plays the raw
+   mix (no loudness normalisation or limiter, the tag's tooltip says so). Left: live peaks on the console bench
+   (`studio.js`), Window buttons for master inserts, an output device picker.
+2. **Offline mode replaces DawDreamer.** Needs per-track stems out of the engine (the export, stems and `listen()`
+   read pre-fader tracks) and a real "plugin is ready" check: the engine waits 2 s + 0.4 s per new plugin and
+   `Engine.render` re-renders when a strip with notes is silent, which catches an unloaded instrument but not a
+   half-loaded one.
+3. SFZ in the engine (sfizz) instead of stems; multi-core graph; sample-rate conversion when the device cannot
+   run at the project's rate; a mono sidechain bus gets the left channel only.
+4. The README limits this stage closes: plugin parameter automation, tempo-synced effects, time-stretch.
 
 ### Stage 4: tracking
 
@@ -454,19 +654,20 @@ browser that auditions live, genre style sheets as per-seat skills.
 
 | Needed for | What |
 |---|---|
-| Claude as a crew agent | Run `claude auth login` once in a terminal. |
-| Stage 3 | Install Visual Studio Build Tools (C++ workload) and CMake. Multi-gigabyte system install; ask first. |
+| Claude as a crew agent | Done: the CLI is logged in (`crew detect` says `auth: ok`, and one run worked, 2026-11-13). |
+| Stage 3 | Done 2026-11-14: Build Tools, CMake and JUCE 9 are installed. Left: choose the repo's licence (below). |
 | Orchestral palette | Install Spitfire LABS / BBC SO Discover (needs their Spitfire sign-in), then `tunetrack scan` and capture patches. |
 | Stage 5 | Install `ffmpeg` on PATH. |
 | New tools in their own apps | Restart Claude so the MCP server reloads (it runs from this checkout). |
-| Keeping the work | Say when to commit `desk-takes`, and whether to push / open a PR. |
+| Keeping the work | Say when to commit what is uncommitted on `desk-takes`, and whether to open a PR for the branch. |
 
 ---
 
 ## 8. Working rules for this repo
 
-- **Commands from an agent's shell**: `uv run tunetrack ...` and `.venv/Scripts/tunetrack.exe` are blocked there
-  by Windows Application Control. Use `uv run python -m tunetrack.cli <command>` and `uv run pytest -q`.
+- **Commands from an agent's shell**: `uv run tunetrack ...`, `.venv/Scripts/tunetrack.exe` and now `uv run pytest`
+  are blocked there by Windows Application Control. Use `uv run python -m tunetrack.cli <command>` and
+  `uv run python -m pytest -q`.
 - **Don't commit or push unless the owner asks.** The repo is public (`raffataff/TuneTrack`): no secrets, no
   licensed sample content, and never the owner's email (use the GitHub noreply address already in git config).
 - **Don't disturb the owner's open project.** `library/state.json` holds what their editor shows; `project_new`
@@ -477,6 +678,10 @@ browser that auditions live, genre style sheets as per-seat skills.
 - **Never read credential files** (`~/.codex/auth.json`, Kilo/Claude auth stores) or change the owner's app
   configs (`~/.claude`, `~/.codex`, `~/.config/kilo`).
 - **`patch_capture` opens a plugin window on the owner's desktop**: only when they are at the computer.
+- **What an agent reads is not written for people.** Tool answers, the board an agent sees, task messages and
+  hand-in summaries are read by models and paid for on every later step: keep them to what the reader acts on. The
+  owner does not want to be in the loop of everything; what people read is the UI (Needs You, the benches, REPORTS).
+  Before adding a field to a tool answer or a line to a brief, ask which agent decision it changes.
 - Subagents: brief them with the exact files they may touch, no commits/installs/config changes, a cap on live
   calls; then read their diff and re-run the tests yourself.
 - Writing style in code and docs: plain, specific, no filler. Tool docstrings are prompts for other agents:
@@ -488,7 +693,7 @@ browser that auditions live, genre style sheets as per-seat skills.
 git status --short
 ```
 ```bash
-uv run pytest -q
+uv run python -m pytest -q
 ```
 ```bash
 uv run python tests/fuzz_merge.py 200
@@ -505,12 +710,23 @@ before starting the server, and seat a `script` runner so nothing is spent.
 The owner has now used the UI for a full session (2026-11-13) and asked for better Needs You handling, readable
 talkback, and agent reviews; all three are built on `desk-takes` and waiting for their reaction. Since then the
 short live session on the new briefs is done, and so are three of the known gaps (chord track on the Desk, takes
-that miss the session, a run per Needs You answer). Next: editing in place on the benches (faders on the Mix
-console first), tightening Mix's pass count, then the rest of "Known gaps" in section 5 (context cost per agent
-step, the Desk sending the revision it loaded, a take cleanup command). The Claude runner smoke and the stage 3
-spike wait on section 7.
+that miss the session, a run per Needs You answer), and late that night the Mix console's working controls, the
+pass count told to Mix with each render, the Claude runner smoke, and the Desk's revision guard. On 2026-11-14 the
+owner ran a whole orchestral session on paid Codex models (The Lonely Walk) and asked for less text and fewer
+wasted runs: the usage cuts and the rest of the console are built (section 5). Next: one short live session to see
+the cuts in the logs, the "not done" list under the usage table (craft text per seat first), then the rest of
+"Known gaps" (a take cleanup command, loose takes nobody is asked about, an audition that ends undecided), and a
+whole session with Claude in a seat. Stage 3's first cut is built; its "Left" list is in section 6.
 
-To try it on the owner's test session: `.claude/launch.json` has a temporary entry `tunetrack-live-check` that
-serves `output/_preview/live` (their session, in a scratch library) on port 7399. Remove that entry before any
-commit; `output/` is not tracked. `output/_preview/brief_check.py` reruns the short live session (free models,
-about 25 minutes) and `output/_preview/serve_check.py` serves a copy of its result with nobody to launch.
+To measure a session's usage: each run's log is `<session>/studio/logs/<task>-<attempt>-<seat>.jsonl` (the agent
+CLI's own event stream). For Codex, `turn.completed` carries `usage`, and each `item.completed` of type
+`mcp_tool_call` carries the tool, its arguments and its answer. Count calls and answer characters per tool and
+per seat, and input tokens per run: `uv run python output/_preview/usage.py <session folder>` (untracked, like
+the other throwaways there; forty lines to rewrite if it is gone).
+
+To try it on a scratch session, add a temporary entry to `.claude/launch.json` (it is tracked: remove the entry
+before any commit) that runs one of the throwaways in `output/_preview/` with `uv run python`; `output/` is not
+tracked. `serve.py` serves `output/_preview/live` (the owner's long test session) on port 7399,
+`brief_check.py [model] [folder]` reruns the short live session (free models, about 25 minutes),
+`serve_check.py` serves a copy of its result with nobody to launch, `console_check.py` does the same with a person
+in the Mix seat and a take cut (port 7397), and `claude_smoke.py` is the one-run Claude check.

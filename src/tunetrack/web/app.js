@@ -13,22 +13,35 @@ const S = {
   zoom: 22, rollZoom: 64, rowH: 12, snap: 1, playhead: 0, loopOn: false, lastLen: 1,
   pendingSave: null, busy: false, tab: "roll",
   audio: { ctx: null, buf: null, src: null, start: 0, offset: 0, playing: false, version: -1 },
+  // LIVE transport (S.live is taken: studio.js's event-stream flag). on: the user's choice; st: last engine state
+  eng: { on: false, st: null, at: 0, busy: false, stopAfter: false, hold: false, raf: 0 },
 };
+try { S.eng.on = localStorage.getItem("tt.live") === "1"; } catch { /* no storage */ }
 
 // ---------------------------------------------------------------- api
 const TOKEN = document.querySelector('meta[name="tt-token"]')?.content || "";
 // With a take open on the desk, the server points the desk's own calls (edits, undo, playback, export) at that
-// take. Board calls ignore it.
-async function api(fn, args = {}) {
-  const body = S.take ? { fn, args, take: S.take, session: S.path } : { fn, args };
+// take. Board calls ignore it. A seat's bench edits what it shows, which need not be what the desk has open: it
+// passes its own take (null: the session), and rev where an edit only makes sense against the revision it read.
+async function api(fn, args = {}, take = S.take, rev = null) {
+  const body = take ? { fn, args, take, session: S.path } : { fn, args };
+  if (rev != null) body.rev = rev;
   const r = await fetch("/api/call", { method: "POST", headers: { "Content-Type": "application/json", "X-TuneTrack-Token": TOKEN }, body: JSON.stringify(body) });
   const j = await r.json();
   if (j.error) { const e = new Error(j.error); e.conflict = !!j.conflict; throw e; }
   return j.result;
 }
+// An edit that names a thing by its place in a list (the second effect, the third track) only means what the page
+// showed: it carries the revision the page read, and is refused and reloaded if the project has moved on.
+const BY_PLACE = new Set(["fx_update", "fx_remove", "track_move"]);
 async function act(fn, args, msg) {
-  try { status(msg || "", "busy"); const r = await api(fn, args); status(""); await loadState(); return r; }
-  catch (e) { toast(e.message); status("error", "err"); if (e.conflict) loadState().catch(() => {}); throw e; }
+  const rev = BY_PLACE.has(fn) && S.doc ? S.doc.rev ?? null : null;
+  try { status(msg || "", "busy"); const r = await api(fn, args, S.take, rev); status(""); await loadState(); return r; }
+  catch (e) {
+    const moved = e.conflict && rev != null && /changed since you loaded/.test(e.message);
+    toast(moved ? "Someone else changed this while you were looking at it, so that edit was not made. The desk now shows it as it is: try again." : e.message);
+    status(moved ? "" : "error", moved ? "" : "err"); if (e.conflict) loadState().catch(() => {}); throw e;
+  }
 }
 function status(text, cls = "") { const el = $("#status"); el.textContent = text; el.className = "status " + cls; }
 let toastTimer;
@@ -99,7 +112,8 @@ function leaveTake() {
   S.take = null; S.takeMeta = null; switchedView();
 }
 function switchedView() {
-  stop(false); S.audio.buf = null; S.audio.version = -1; S.lastRender = null;
+  if (liveMode() && isPlaying()) livePlay(); else stop(false);  // a live engine re-points at what the desk now shows
+  S.audio.buf = null; S.audio.version = -1; S.lastRender = null;
   S.sel.notes.clear(); clearTimeout(S.pendingSave); S.pendingSave = null;
   window.Studio?.listen();  // the event stream follows the take the desk has open
 }
@@ -233,10 +247,14 @@ function renderAll() {
   if (document.body.dataset.room !== "desk") return;  // canvases have no size while the desk is hidden
   drawHeaders(); drawArrangement(); drawRoll(); renderPanel();
 }
-// Playback is a render of the project, not a live engine: say whether what you hear is the current revision.
+// Preview playback is a render of the project: say whether what you hear is the current revision. LIVE says what
+// the real-time engine is doing instead.
+const TAG_TITLE = $("#audioState").title;
 function audioTag() {
   const el = $("#audioState"), a = S.audio;
   const what = S.take ? S.take.toUpperCase() + " · " : "";  // playback is of what the desk shows
+  if (liveMode()) return liveTag(el, what);
+  el.title = TAG_TITLE;
   if (!S.doc || !a.buf) { el.textContent = what + "NO RENDER"; el.className = "tag"; }
   else if (a.version === S.version) { el.textContent = `${what}RENDER = REV ${S.doc.rev ?? "?"}`; el.className = "tag ok"; }
   else { el.textContent = `${what}RENDER REV ${a.rev ?? "?"} · NOW ${S.doc.rev ?? "?"}`; el.className = "tag stale"; }
@@ -249,7 +267,18 @@ $("#sig").addEventListener("change", (e) => act("project_set", { time_sig: e.tar
 $("#snap").addEventListener("change", (e) => { S.snap = +e.target.value; });
 $("#undoBtn").onclick = () => act("undo");
 $("#redoBtn").onclick = () => act("redo");
-$("#loopBtn").onclick = () => { S.loopOn = !S.loopOn; renderAll(); };
+$("#loopBtn").onclick = () => {
+  S.loopOn = !S.loopOn;
+  if (liveMode() && S.eng.st.on) api("live_loop", { on: S.loopOn && !!(S.doc && S.doc.loop) }).then(liveState, (e) => toast(e.message));
+  renderAll();
+};
+$("#liveBtn").onclick = () => {
+  const L = S.eng, on = !L.on;
+  if (on) stop(false);  // still preview mode here: stops a playing preview
+  else if (L.st && L.st.on) { L.st.playing = false; api("live_off").then(liveState, (e) => toast(e.message)); }
+  L.on = on; try { localStorage.setItem("tt.live", on ? "1" : "0"); } catch { /* no storage */ }
+  $("#playBtn").classList.remove("on"); $("#liveBtn").classList.toggle("on", on); renderAll();
+};
 $("#playBtn").onclick = () => play();
 $("#stopBtn").onclick = () => stop(true);
 $("#exportBtn").onclick = () => openExportModal();
@@ -615,7 +644,9 @@ ruler.addEventListener("contextmenu", (e) => {
 });
 function setPlayhead(b) {
   S.playhead = Math.max(0, b); $("#pos").textContent = fmtPos(S.playhead);
-  if (S.audio.playing) { stop(false); startPlayback(); }
+  if (liveMode()) {
+    if (S.eng.st.playing) { S.eng.st.beat = S.playhead; S.eng.at = performance.now(); api("live_seek", { beat: S.playhead }).then(liveState, (e) => toast(e.message)); }
+  } else if (S.audio.playing) { stop(false); startPlayback(); }
   drawArrangement(); drawRoll();
 }
 
@@ -766,7 +797,7 @@ function scheduleSave() {
 document.addEventListener("keydown", (e) => {
   if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
   const [, c] = selClip();
-  if (e.code === "Space") { e.preventDefault(); S.audio.playing ? stop(false) : play(); return; }
+  if (e.code === "Space") { e.preventDefault(); isPlaying() ? stop(false) : play(); return; }
   if (document.body.dataset.room !== "desk") return;  // editing keys belong to the desk
   if (e.ctrlKey && e.key.toLowerCase() === "z") { e.preventDefault(); act("undo"); return; }
   if (e.ctrlKey && e.key.toLowerCase() === "y") { e.preventDefault(); act("redo"); return; }
@@ -795,6 +826,7 @@ document.addEventListener("keydown", (e) => {
 // ---------------------------------------------------------------- transport (Web Audio)
 async function play() {
   if (!S.doc || S.busy) return;
+  if (liveMode()) return livePlay();
   window.Studio?.hush();
   try {
     if (S.audio.version !== S.version || !S.audio.buf) {
@@ -828,18 +860,86 @@ function startPlayback() {
 function stop(rewind) {
   const a = S.audio; if (a.src) { try { a.src.stop(); } catch { /* already stopped */ } a.src = null; }
   a.playing = false; $("#playBtn").classList.remove("on");
+  const L = S.eng;
+  if (liveMode()) {
+    if (L.busy) L.stopAfter = true;  // a live_play still in flight: stop once it lands
+    else if (L.st.on && L.st.playing) {
+      L.st.playing = false; L.hold = true;
+      api("live_stop").then((s) => { L.hold = false; liveState(s); }, (e) => { L.hold = false; toast(e.message); });
+    }
+  }
   if (rewind) setPlayhead(0);
 }
 function tick() {
   const a = S.audio; if (!a.playing) return;
   let t = a.offset + (a.ctx.currentTime - a.start);
   if (a.src && a.src.loop) { const ls = a.src.loopStart, le = a.src.loopEnd; if (t >= le) t = ls + ((t - ls) % (le - ls)); }
-  S.playhead = secToBeat(t); $("#pos").textContent = fmtPos(S.playhead);
-  const x = S.playhead * S.zoom;
-  if (x > lanesWrap.scrollLeft + lanesWrap.clientWidth - 40) lanesWrap.scrollLeft = x - 80;
-  drawArrangement(); if (S.tab === "roll") drawRoll();
+  showPlayhead(secToBeat(t));
   requestAnimationFrame(tick);
 }
+function showPlayhead(b) {
+  S.playhead = b; $("#pos").textContent = fmtPos(b);
+  const x = b * S.zoom;
+  if (x > lanesWrap.scrollLeft + lanesWrap.clientWidth - 40) lanesWrap.scrollLeft = x - 80;
+  drawArrangement(); if (S.tab === "roll") drawRoll();
+}
+
+// ---------------------------------------------------------------- transport (LIVE engine)
+// LIVE drives the server's real-time engine instead of playing a render; /api/live streams its state.
+const liveMode = () => S.eng.on && !!(S.eng.st && S.eng.st.available);
+const isPlaying = () => liveMode() ? !!S.eng.st.playing : S.audio.playing;
+async function livePlay() {
+  const L = S.eng; if (L.busy || !S.doc) return;
+  window.Studio?.hush();
+  const wasOn = L.st.on; L.busy = true; L.stopAfter = false; L.hold = false; audioTag();
+  if (!wasOn) status("starting the live engine…", "busy");
+  try {
+    const st = await api("live_play", { beat: S.playhead, loop: S.loopOn && !!S.doc.loop, take: S.take || null });
+    status(""); L.busy = false; liveState(st);
+    const w = st.warnings || []; if (!wasOn && w.length) toast(`${w.length} engine warning(s): ${w[0]}`);
+    if (L.stopAfter) { L.stopAfter = false; stop(false); }
+  } catch (e) { L.busy = false; toast(e.message); status("live engine failed", "err"); audioTag(); }
+}
+function liveState(st) {
+  if (!st) return;
+  const L = S.eng, flip = !!(L.st && L.st.available) !== !!st.available;
+  L.st = st; L.at = performance.now();
+  $("#liveBtn").classList.toggle("hidden", !st.available); $("#liveBtn").classList.toggle("on", L.on);
+  if (L.hold) st.playing = false;  // frames sent before our live_stop landed
+  if (flip) renderAll();
+  if (!liveMode()) return;
+  $("#playBtn").classList.toggle("on", !!st.playing || L.busy);
+  audioTag(); liveMeters();
+  if (st.playing && !L.raf) L.raf = requestAnimationFrame(liveTick);
+}
+function liveTick() {
+  const L = S.eng, st = L.st; L.raf = 0;
+  if (!liveMode() || !st.playing || !S.doc) return;
+  let b = secToBeat(beatToSec(st.beat || 0) + (performance.now() - L.at) / 1000);
+  const lp = S.doc.loop;
+  if (st.looping && lp && lp.end > lp.start && b >= lp.end) b = lp.start + ((b - lp.start) % (lp.end - lp.start));
+  showPlayhead(b);
+  L.raf = requestAnimationFrame(liveTick);
+}
+function liveTag(el, what) {
+  const L = S.eng, st = L.st, d = st.device;
+  el.title = (st.on && d ? `${d.name} · ${d.sr} Hz · ${d.block} samples · CPU ${Math.round((st.cpu || 0) * 100)}% · ${st.dropouts || 0} dropout(s)\n` : "")
+    + (st.error ? st.error + "\n" : "") + "Live is the raw mix: no loudness normalisation or limiter, unlike an export.";
+  const cut = (s) => s.length > 40 ? s.slice(0, 39) + "…" : s;
+  const [text, cls] = st.loading || L.busy ? ["LIVE · LOADING", "tag stale"] : st.error ? ["LIVE · " + cut(st.error), "tag bad"]
+    : st.on ? [what + "LIVE · " + (d ? d.type : "?"), "tag cy"] : ["LIVE · READY", "tag"];
+  el.textContent = text; el.className = cls;
+}
+const peakPct = (p) => p > 0 ? Math.max(0, Math.min(100, (20 * Math.log10(p) + 60) / 60 * 100)) : 0;
+function liveMeters() {
+  const st = S.eng.st; if (!liveMode() || !st.on || S.tab !== "mixer") return;
+  document.querySelectorAll("#mixer .strip[data-t] .meter > div").forEach((m) => {
+    const pk = st.peaks && st.peaks[m.closest(".strip").dataset.t];
+    m.style.width = peakPct(pk && pk.length ? Math.max(...pk) : 0) + "%";
+  });
+}
+const liveES = new EventSource("/api/live");
+liveES.onmessage = (m) => { try { liveState(JSON.parse(m.data)); } catch { /* bad frame */ } };
 
 // ---------------------------------------------------------------- panels
 function renderPanel() {
@@ -876,6 +976,7 @@ function renderMixer() {
     </div>`;
   }).join("") + `<div class="strip master" data-t="master"><h4>Master</h4>
       <div class="muted" style="font-size:11px">target ${S.doc.master.target_lufs} LUFS · ceiling ${S.doc.master.ceiling_db} dB</div>
+      <div class="meter" title="live peak (LIVE engine only)"><div style="width:0%"></div></div>
       ${stripFx(S.doc.master.fx, "master")}
       <input class="fader" type="range" min="-24" max="12" step="0.5" value="${S.doc.master.volume_db || 0}">
       <div class="db">${(+(S.doc.master.volume_db || 0)).toFixed(1)} dB</div></div>`;
@@ -900,6 +1001,7 @@ function renderMixer() {
     if (as) as.onclick = (e) => menu(e, buses.filter((b) => !(t.sends || []).some((s) => s.to === b.id)).map((b) =>
       [b.name, () => act("track_update", { track: id, sends: [...(t.sends || []), { to: b.id, db: -12 }] })]));
   });
+  liveMeters();
 }
 
 async function ensureLibrary(force = false) {
@@ -923,12 +1025,14 @@ async function renderInspector() {
   const inst = t.instrument;
   const synthDef = inst && inst.type === "synth" && S.catalog.synths[inst.name];
   const outs = S.doc.tracks.filter((x) => x.kind === "bus" && x.id !== t.id);
+  const liveOk = !!(S.eng.st && S.eng.st.available);
   box.innerHTML = `
   <div class="card"><h3>${esc(t.name)} <span class="muted">(${t.kind})</span></h3>
     <div class="grid2">
       ${t.kind === "midi" ? `<span>Instrument</span><div><b>${inst ? esc(instLabel(inst)) : "none"}</b>
         <button class="small" id="chooseInst">Change…</button> <button class="small" id="audBtn" ${inst ? "" : "disabled"}>Audition</button>
-        ${inst && inst.type === "vst3" ? `<button class="small" id="capBtn" title="Opens the plugin window on this computer; pick a sound, close the window">Pick sound in plugin window…</button>` : ""}</div>` : ""}
+        ${inst && inst.type === "vst3" ? `<button class="small" id="capBtn" title="Opens the plugin window on this computer; pick a sound, close the window">Pick sound in plugin window…</button>` : ""}
+        ${inst && inst.type === "vst3" && liveOk ? `<button class="small" data-win="inst" title="Open this plugin's window in the live engine">Window</button>` : ""}</div>` : ""}
       <span>Role</span><input id="roleIn" value="${esc(t.role || "")}" placeholder="violin, cello, bass, pad, drums…">
       <span>Layer</span><input id="layerIn" value="${esc(t.layer || "")}" placeholder="adaptive layer, e.g. base / combat">
       <span>Output</span><select id="outSel"><option value="master">Master</option>${outs.map((b) => `<option value="${b.id}" ${t.output === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select>
@@ -938,7 +1042,7 @@ async function renderInspector() {
     const def = f.type === "builtin" && S.catalog.effects[f.name];
     return `<div style="margin-bottom:10px"><b>${i + 1}. ${esc(fxLabel(f))}</b> <span class="muted">${def ? esc(def.description) : f.type}</span>
       <button class="small" data-byp="${i}">${f.bypass ? "Enable" : "Bypass"}</button> <button class="small danger" data-del="${i}">Remove</button>
-      ${f.type === "vst3" ? `<button class="small" data-vp="${i}">Parameters…</button>` : ""}
+      ${f.type === "vst3" ? `<button class="small" data-vp="${i}">Parameters…</button>${liveOk ? ` <button class="small" data-win="${i}" title="Open this plugin's window in the live engine">Window</button>` : ""}` : ""}
       ${canSidechain(f) ? `<label class="muted" title="Another track's sound drives this effect's detector (ducking). Plugins without a sidechain input refuse.">
         Sidechain <select data-sc="${i}"><option value="">none</option>${S.doc.tracks.filter((x) => x.kind !== "bus" && x.id !== t.id)
           .map((x) => `<option value="${x.id}" ${f.sidechain === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>` : ""}
@@ -959,6 +1063,12 @@ async function renderInspector() {
   box.querySelectorAll("[data-byp]").forEach((b) => b.onclick = () => act("fx_update", { track: t.id, index: +b.dataset.byp, bypass: !t.fx[+b.dataset.byp].bypass }));
   box.querySelectorAll("[data-del]").forEach((b) => b.onclick = () => act("fx_remove", { track: t.id, index: +b.dataset.del }));
   box.querySelectorAll("[data-vp]").forEach((b) => b.onclick = () => openVstParams(t, +b.dataset.vp));
+  box.querySelectorAll("[data-win]").forEach((b) => b.onclick = async () => {
+    const slot = b.dataset.win === "inst" ? "inst" : +b.dataset.win;
+    status("opening the plugin window…", "busy");
+    try { const r = await api("live_window", { track: t.id, slot, take: S.take || null }); status(""); if (r && r.opened === false) toast("The plugin window did not open."); }
+    catch (e) { status(""); toast(e.message); }
+  });
   box.querySelectorAll("[data-sc]").forEach((s) => s.onchange = () => act("fx_update", { track: t.id, index: +s.dataset.sc, sidechain: s.value }));
   const commit = (key, val) => {
     const [where, name] = key.split(":");

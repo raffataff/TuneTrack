@@ -64,10 +64,12 @@ def _fx(f: dict) -> dict:
 
 
 def _mix(t: dict, names: dict[str, str]) -> dict:
+    # names to read, ids to edit with: two tracks may share a name, and the console routes and sends by id
     return {"volume_db": float(t.get("volume_db", 0.0)), "pan": float(t.get("pan", 0.0)),
             "mute": bool(t.get("mute")), "solo": bool(t.get("solo")),
-            "output": names.get(t.get("output") or "master", "master"),
-            "sends": [{"to": names.get(s.get("to"), "?"), "db": s.get("db", 0.0)} for s in t.get("sends") or []],
+            "output": names.get(t.get("output") or "master", "master"), "output_id": t.get("output") or "master",
+            "sends": [{"to": names.get(s.get("to"), "?"), "id": s.get("to"), "db": s.get("db", 0.0)}
+                      for s in t.get("sends") or []],
             "fx": [_fx(f) for f in t.get("fx") or []], "automation": sorted(t.get("automation") or {})}
 
 

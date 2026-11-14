@@ -127,6 +127,17 @@ def test_each_seat_reads_the_work_its_own_way(song):
     assert all("notes" not in t for t in seat_bench("producer")["tracks"])
 
 
+def test_the_console_gets_ids_for_routing_and_sends(song):
+    bus = api.track_add("Verb", kind="bus")["track"]
+    api.track_update("Piano", output="Verb", sends=[{"to": "Verb", "db": -9}])
+    b = seat_bench("mix")
+    piano, bass = _track(b, "Piano"), _track(b, "Bass")
+    assert piano["output"] == "Verb" and piano["output_id"] == bus
+    assert piano["sends"] == [{"to": "Verb", "id": bus, "db": -9.0}]
+    assert bass["output"] == "master" and bass["output_id"] == "master" and bass["sends"] == []
+    assert _track(b, "Verb")["kind"] == "bus"
+
+
 def test_have_returns_unchanged_until_the_project_moves(song):
     b = seat_bench("composer")
     assert seat_bench("composer", have=b["version"]) == {"unchanged": True, "version": b["version"]}
@@ -185,3 +196,13 @@ def test_max_notes_truncates_the_bench(song, monkeypatch):
     assert b["truncated"] is True
     assert sum(len(t["notes"]) for t in b["tracks"]) <= 6
     assert "truncated" not in seat_bench("mix")
+
+
+def test_a_bus_cannot_be_routed_back_into_itself(song):
+    a, b = api.track_add("Verb", kind="bus")["track"], api.track_add("Glue", kind="bus")["track"]
+    api.track_update(a, output=b)
+    for bad in (a, b):  # into itself, and round through the bus it feeds
+        with pytest.raises(ValueError, match="fed back into itself"):
+            api.track_update(bad, output=a)
+    api.track_update(a, output="master")
+    api.track_update(b, output=a)  # the other way round is fine once the first route is gone

@@ -301,15 +301,29 @@ class Floor:
         s = st["seats"][seat]
         occ = s["occupant"]
         in_take = s["mode"] == "propose" and bool(roles.get(seat).owns)
-        take = None
+        take = audition = asked = None
         try:
+            if task.get("audition"):
+                # The knock on the Producer's door: it is started with what was handed in already in front of it
+                # (summary, diff, conflicts, what was asked for) and its tools on the take, instead of spending
+                # its first five calls finding that out from the board.
+                tk = next((t for t in studio.take_index(self.path) if t["id"] == task["audition"]), None)
+                if not tk or tk.get("state") != "submitted":
+                    studio.task_update(task["id"], state="done", session=self.session,
+                                       result=f"{task['audition']} is no longer waiting to be heard"
+                                              + (f" ({tk['state']})" if tk else ""))
+                    return False
+                audition = takes.take_diff(tk["id"], self.session)
+                asked = next((t for t in st["tasks"] if t["id"] == tk.get("task")), None)
             if in_take:
                 take = next((t for t in studio.take_index(self.path)
                              if t["id"] == task.get("take") and t.get("state") == "open"), None)
                 if not take:
                     made = takes.take_new(task["title"], task["id"], seat, use=False, session=self.session)
                     take = next(t for t in studio.take_index(self.path) if t["id"] == made["take"])
-            project = self.path / "takes" / take["id"] if take else self.path
+            project = (self.path / "takes" / take["id"] if take else
+                       self.path / "takes" / audition["take"] if audition else self.path)
+            unread = studio.inbox(seat, mark_read=False, session=self.session)["messages"]
             env = {"TUNETRACK_SEAT": seat, "TUNETRACK_SESSION": self.session, "TUNETRACK_PROJECT": str(project),
                    "TUNETRACK_HOME": str(config.HOME), "TUNETRACK_PROJECTS": str(config.PROJECTS_DIR)}
             done = {t["id"]: t for t in st["tasks"] if t["state"] == "done"}
@@ -321,7 +335,7 @@ class Floor:
                 system=briefs.system(seat, in_take, s.get("notes", "")),
                 prompt=briefs.task_prompt(task, studio.studio_status(self.session), take,
                                           [done[d] for d in task.get("depends", []) if d in done],
-                                          studio.inbox(seat, mark_read=False, session=self.session)["messages"]),
+                                          unread, audition, asked),
                 cwd=str(work), env=env, allow_tools=["mcp__tunetrack"],
                 mcp={"tunetrack": {"command": sys.executable, "args": ["-m", "tunetrack.mcp_server"], "env": env}},
                 log=str(self.path / "studio" / "logs" / f"{task['id']}-{task.get('attempts', 0) + 1}-{seat}.jsonl"))
@@ -337,7 +351,8 @@ class Floor:
         studio.seat_presence(seat, "online", session=self.session, pid=run.pid)
         studio.log("run", self.session, seat=seat, task=task["id"], what="start",
                    agent=studio.occupant_label(occ), take=take["id"] if take else None)
-        rec = {"run": run, "task": task["id"], "started": time.time(), "take": take["id"] if take else None}
+        rec = {"run": run, "task": task["id"], "started": time.time(), "take": take["id"] if take else None,
+               "seen": [m["id"] for m in unread]}
         rec["thread"] = threading.Thread(target=self._watch, args=(seat, rec), daemon=True,
                                          name=f"floor-{seat}-{task['id']}")
         with self._lock:
@@ -389,6 +404,8 @@ class Floor:
                (errors[-1] if errors else ""))
         studio.log("run", self.session, seat=seat, task=tid, what="end", ok=bool(done.get("ok")), tools=tools,
                    error=why or None)
+        if done.get("ok") and not why:  # the messages in its task message have been read: not sent again next time
+            studio.messages_read(seat, rec.get("seen") or [], self.session)
         if task["state"] != "working":
             return  # the agent moved its task itself (submitted, done, needs_you, failed): nothing to tidy
         if rec.get("paused") or held:  # stopped by the user or the plan, not by a fault: requeued, attempt not counted
@@ -409,6 +426,8 @@ class Floor:
                 if not rep["changes"]:
                     why = "it stopped without changing anything in its take"
             else:
+                if task.get("audition") and self._undecided(task, said):
+                    return
                 studio.task_update(tid, state="done", result=said[:600] or "Finished (the agent left no summary).",
                                    session=self.session)
                 return
@@ -440,6 +459,43 @@ class Floor:
                                        f"your take; pick it up from there.", tid)
             b.emit("task", id=tid, seat=seat, state="queued", title=t["title"], by="floor", reason=why[:240])
 
+    def _undecided(self, task: dict, said: str) -> bool:
+        """A Producer run ended its audition without accepting or returning the take. Closed like any other task,
+        the take would stay handed in with nobody asked. Once, the Producer is started again and told so; if that
+        run decides nothing either, the take goes to the user's Needs You list. False: the take is not waiting."""
+        tk = next((t for t in studio.take_index(self.path) if t["id"] == task["audition"]), None)
+        if not tk or tk.get("state") != "submitted":
+            return False
+        with studio._Board(self.session) as b:
+            t, now = b.task(task["id"]), round(time.time(), 3)
+            if t.get("attempts", 0) < 2:
+                t["state"], t["updated"] = "queued", now
+                b.message(roles.YOU, "producer", f"Your run on {t['id']} ended without take_accept or take_reject, so "
+                          f"{tk['id']} is still waiting. You have heard it: decide now."
+                          + (f" Your last words: \"{said[:300]}\"" if said else ""), t["id"])
+                b.emit("task", id=t["id"], seat=t["seat"], state="queued", title=t["title"], by="floor",
+                       reason=f"its run ended without a decision on {tk['id']}")
+            else:
+                t.update(state="done", updated=now, result=f"{tk['id']} undecided after two runs: passed to the user")
+                b.emit("task", id=t["id"], seat=t["seat"], state="done", title=t["title"], by="floor",
+                       result=t["result"])
+                self._ask_user(b, tk, t["title"], "The Producer heard this take twice without accepting or returning "
+                               "it." + (f" Its last words: \"{said[:300]}\"" if said else ""))
+        return True
+
+    @staticmethod
+    def _ask_user(b, tk: dict, title: str, note: str = "") -> None:
+        """Put a handed-in take on the user's Needs You list as an audition: accept, return or discard."""
+        seat = tk.get("seat") if tk.get("seat") in roles.ROLES else None
+        a = {"id": b.new_id("N"), "kind": "decision", "from": seat or roles.YOU, "task": None, "title": title,
+             "detail": "\n\n".join(x for x in (tk.get("summary") or "", note) if x), "take": tk["id"],
+             "options": [{"id": "a", "label": "Accept", "take": tk["id"]}, {"id": "b", "label": "Return"},
+                         {"id": "c", "label": "Discard"}],
+             "blocks": [], "state": "open", "answer": None, "created": round(time.time(), 3), "resolved": None}
+        b.st["attention"].append(a)
+        b.emit("attention", id=a["id"], state="open", what="decision", sender=seat or roles.YOU, title=title,
+               take=tk["id"])
+
     def _blocker(self, task: dict, title: str, detail: str, hold: bool = True, options: list | None = None,
                  **extra) -> str:
         """Put a blocker on Needs You. hold: the task waits for the answer (and gets a fresh set of attempts).
@@ -465,10 +521,12 @@ class Floor:
         """A handed-in take needs ears: the Producer's agent gets an audition task, otherwise the user does. That
         goes by the take, not by its task: a seat may close its task and hand in afterwards, and a person may hand
         in a take cut for no task. An audition request on Needs You closes itself once the take has been accepted
-        or returned. And an empty take whose task is over is put away."""
+        or returned. Before that, takes left open after their task ended are dealt with (_left_behind)."""
         index = {t["id"]: t for t in studio.take_index(self.path)}
         st = studio.read(self.session)
-        self._put_away_empty(index, st)
+        if self._left_behind(index, st):
+            index = {t["id"]: t for t in studio.take_index(self.path)}
+            st = studio.read(self.session)
         stale = any(a["state"] == "open" and a.get("take") and index.get(a["take"], {}).get("state") != "submitted"
                     for a in st["attention"])
 
@@ -507,20 +565,18 @@ class Floor:
                     b.st["tasks"].append(task)
                     b.emit("task", id=task["id"], seat="producer", state="queued", title=title, by="floor")
                 else:
-                    a = {"id": b.new_id("N"), "kind": "decision", "from": seat or roles.YOU, "task": None,
-                         "title": title, "detail": tk.get("summary") or "", "take": tk["id"],
-                         "options": [{"id": "a", "label": "Accept", "take": tk["id"]}, {"id": "b", "label": "Return"}],
-                         "blocks": [], "state": "open", "answer": None, "created": now, "resolved": None}
-                    b.st["attention"].append(a)
-                    b.emit("attention", id=a["id"], state="open", what="decision", sender=seat or roles.YOU,
-                           title=title, take=tk["id"])
+                    self._ask_user(b, tk, title)
 
-    def _put_away_empty(self, index: dict, st: dict) -> None:
-        """An open take that changed nothing, whose task is over and whose seat is not at work, is clutter (a Mix
-        task that needed no change left one behind): close it. One with work in it is left for people to decide."""
+    def _left_behind(self, index: dict, st: dict) -> bool:
+        """Open takes whose task is over and whose seat is not at work. One that changed nothing is clutter (a Mix
+        task that needed no change left one behind): it is closed. One with an agent's work in it would never be
+        heard, because that seat is not started again to hand it in (its task was set done or cancelled by someone
+        else): the floor hands it in for the seat, once, and says why, so whoever auditions it keeps what is worth
+        keeping or discards it. A person's take is left alone: they may be working in it. True: a take was handed in."""
         tasks = {t["id"]: t for t in st["tasks"]}
         with self._lock:
             at_work = {r["take"] for r in self._runs.values()}
+        handed = False
         for tk in index.values():
             t = tasks.get(tk.get("task") or "")
             if tk.get("state") != "open" or not t or t["state"] in studio.OPEN or tk["id"] in at_work:
@@ -532,6 +588,13 @@ class Floor:
                     continue  # it has work in it and has not changed since we looked
                 self._looked[tk["id"]] = stamp
                 if takes.changes(takes._read_json(d / "base.json"), takes._read_json(d / "project.json")):
+                    occ = (st["seats"].get(tk.get("seat")) or {}).get("occupant") or {}
+                    if occ.get("kind") == "agent" and not tk.get("handed_in_by_floor"):
+                        takes._meta(d, handed_in_by_floor=round(time.time(), 3))
+                        takes.take_submit(f"Handed in by the floor manager: {t['id']} was set {t['state']} while this "
+                                          f"take still held the seat's work. Keep what is worth keeping, or discard "
+                                          f"it.", tk["id"], self.session)
+                        handed = True
                     continue
                 takes._meta(d, state="rejected", closed=round(time.time(), 3),
                             reason=f"Put away empty: {t['id']} ended without a change")
@@ -540,6 +603,7 @@ class Floor:
             tk["state"] = "rejected"
             studio.log("take", self.session, id=tk["id"], state="rejected", seat=tk.get("seat"), task=t["id"],
                        by="floor", reason="empty")
+        return handed
 
 
 def kickoff(brief: str, session: str | None = None) -> dict:
@@ -549,7 +613,7 @@ def kickoff(brief: str, session: str | None = None) -> dict:
     return studio.task_add(
         "producer", "Plan the session",
         "The user asked for:\n\n" + str(brief).strip() + "\n\nPlan it: set the musical contract on the session, "
-        "then hand out the tasks. When you have, set this task done with a two-line summary of the plan.",
+        "then hand out the tasks. When you have, end your turn with a two-line summary of the plan.",
         session=session)
 
 

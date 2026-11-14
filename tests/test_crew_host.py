@@ -551,6 +551,69 @@ def test_the_desk_names_a_take_of_the_open_session_by_id_only(song, tmp_path):
     assert _call("board", take="tk1")[0] == 200 and _call("synths_list", take="tk1")[0] == 200
 
 
+def test_the_console_bench_edits_the_take_it_shows(song):
+    # What the Mix console sends: the Desk's own calls, pointed at the take the bench shows (the Desk may be elsewhere).
+    from tunetrack import bench
+    api.fx_add("Piano", "builtin:reverb")
+    studio.seat_assign("mix", "human")
+    _call("take_cut", {"seat": "mix"})
+    take_dir = Path(song) / "takes" / "tk1"
+
+    def strip(d):
+        doc = json.loads((Path(d) / "project.json").read_text(encoding="utf-8"))
+        t = doc["tracks"][0]
+        return (t.get("volume_db", 0), t.get("pan", 0), bool(t.get("mute")), bool(t["fx"][0].get("bypass")),
+                (doc.get("master") or {}).get("volume_db") or 0)
+
+    before = strip(song)
+    for fn, args in (("track_update", {"track": "t1", "volume_db": -4.5}), ("track_update", {"track": "t1", "pan": 0.35}),
+                     ("track_update", {"track": "t1", "mute": True}), ("project_set", {"master_volume_db": -2})):
+        status, res = _call(fn, args, take="tk1", session=song)
+        assert status == 200, res
+    assert strip(take_dir) == (-4.5, 0.35, True, False, -2) and strip(song) == before
+
+    b = bench.seat_bench("mix")
+    ch = b["tracks"][0]
+    assert b["source"]["take"] == "tk1" and b["view"] == "mix"
+    assert (ch["volume_db"], ch["pan"], ch["mute"]) == (-4.5, 0.35, True)
+    assert ch["was"] == {"volume_db": 0.0, "pan": 0.0, "mute": False}  # where each control stood: the dashed outline
+    assert b["master"]["volume_db"] == -2 and "volume_db" in b["master"]["was"]
+
+    # an effect is named by its place in the chain, so that edit carries the revision the bench read
+    rev = b["source"]["rev"]
+    status, res = _call("fx_update", {"track": "t1", "index": 0, "bypass": True}, take="tk1", session=song, rev=rev - 1)
+    assert status == 409 and res["conflict"] and strip(take_dir)[3] is False
+    assert _call("fx_update", {"track": "t1", "index": 0, "bypass": True}, take="tk1", session=song, rev=rev)[0] == 200
+    assert strip(take_dir)[3] is True
+    assert bench.seat_bench("mix")["tracks"][0]["fx"][0]["bypass"] is True
+
+    assert _call("undo", take="tk1")[0] == 200 and strip(take_dir)[3] is False  # the take's history, one step per edit
+    assert strip(song) == before
+
+    # on the session ("SESSION" picked on the bench) the same calls edit the music itself
+    assert _call("track_update", {"track": "t1", "volume_db": 2})[0] == 200
+    assert strip(song)[0] == 2 and strip(take_dir)[0] == -4.5
+
+
+def test_a_page_that_has_not_caught_up_cannot_edit_a_take_that_is_over(song):
+    _call("take_cut", {"seat": "mix"})
+    _call("take_cut", {"seat": "mix"})
+    assert _call("track_update", {"track": "t1", "volume_db": -3}, take="tk1")[0] == 200
+    assert _call("take_submit", {"take": "tk1", "summary": "Piano down 3"})[0] == 200
+    assert _call("track_update", {"track": "t1", "volume_db": -4}, take="tk1")[0] == 200  # handed in: still in play
+    assert _call("take_accept", {"take": "tk1"})[1]["result"]["accepted"] is True
+    assert _call("take_discard", {"take": "tk2"})[0] == 200
+
+    for tid, why in (("tk1", "accepted into the session"), ("tk2", "closed")):
+        was = (Path(song) / "takes" / tid / "project.json").read_bytes()
+        for fn, args in (("track_update", {"track": "t1", "volume_db": 6}), ("undo", {})):
+            status, res = _call(fn, args, take=tid, session=song)
+            assert status == 409 and res["conflict"] and why in res["error"], (tid, fn, res)
+        assert (Path(song) / "takes" / tid / "project.json").read_bytes() == was
+    doc = json.loads((Path(song) / "project.json").read_text(encoding="utf-8"))
+    assert doc["tracks"][0]["volume_db"] == -4  # what was accepted, and nothing since
+
+
 def test_the_event_stream_follows_the_open_take(song):
     from tunetrack import server
     _call("take_cut")

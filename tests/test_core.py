@@ -299,4 +299,5 @@ def test_render_audio_and_synth_tracks(proj, tmp_path):
     assert {"Lead", "Audio"} <= set(rep["tracks"])
     info = sf.info(rep["files"][0])
     assert abs(info.duration - 2 * 4 * 60 / 100) < 0.05  # exactly two bars at 100 bpm
+    assert rep["file_format"] == {"format": "ogg", "sample_rate": info.samplerate, "channels": info.channels}
     assert any(f.endswith("_stem_Audio.ogg") for f in rep["files"])
