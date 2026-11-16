@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -127,3 +128,17 @@ def test_listen_compares_with_a_reference(song):
     assert abs(ref["this_mix"]["brightness_hz"] - ref["reference"]["brightness_hz"]) < 0.25 * ref["reference"]["brightness_hz"]
     assert not [d for d in ref["differences"] if "band balance" in d or "darker" in d or "brighter" in d]
     assert "verify" in rep and "probe" not in rep["verify"].get("Lead", {})
+
+
+def test_listen_for_a_bar_range_reports_only_those_bars(song):
+    whole = api.listen(probe=False)
+    n = len(whole["bar_lufs"])
+    assert n >= 4 and "energy_arc" in whole
+    part = api.listen(probe=False, start="2:1", end="4:1", section_bars=1)
+    assert part["bars"] == "2-3" and part["bar_lufs"] == whole["bar_lufs"][1:3]
+    assert [s["bars"] for s in part["sections"]] == ["2-2", "3-3"]
+    assert "energy_arc" not in part  # a block per bar already says each bar's level
+    assert len(json.dumps(part)) < len(json.dumps(api.listen(probe=False, section_bars=1)))
+    with pytest.raises(ValueError):
+        api.listen(probe=False, start="4:1", end="2:1")
+

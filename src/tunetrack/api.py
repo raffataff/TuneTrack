@@ -63,6 +63,7 @@ def _path(project: str | None) -> Path:
         return _default_project
     if project:
         p = Path(project)
+        explicit = False
         if not p.exists() and not p.is_absolute() and _default_project:
             # a crew agent naming a take of its own session: "tk2", "takes/tk2"
             root = session_root(_default_project)
@@ -70,7 +71,7 @@ def _path(project: str | None) -> Path:
             if (take / "project.json").exists():
                 p = take
             elif str(project).strip().lower() in ("session", "."):
-                p = root
+                p, explicit = root, True
         if not p.exists() and not p.is_absolute():
             cand = config.PROJECTS_DIR / project
             if cand.exists():
@@ -80,7 +81,14 @@ def _path(project: str | None) -> Path:
                 if cand.exists():
                     p = cand
         # absolute, so worker processes (which run in another folder) find the project's cache files
-        return (p.parent if p.is_file() else p).resolve()
+        p = (p.parent if p.is_file() else p).resolve()
+        if _default_project and not explicit and p == session_root(_default_project) != _default_project:
+            # Tools that point at a take, called with the take's own session by name or path (seen live: a Mix agent
+            # passed project="shop-loop" on every call): that is the project the caller means, not a way past its
+            # take. Its edits went to the session unheard, the take stayed empty and was put away. "session" (or
+            # take_use("session") first) still reaches the session itself.
+            return _default_project
+        return p
     cur = _state().get("current")
     if not cur:
         raise RuntimeError("No project open. Use project_new or project_open first.")
@@ -1649,17 +1657,23 @@ def score(start=None, end=None, section: str | None = None, tracks: list | None 
 
 
 def listen(project: str | None = None, reference: str | None = None, probe: bool = True,
-           section_bars: int | None = None, tracks: list | None = None) -> dict:
+           section_bars: int | None = None, tracks: list | None = None, start=None, end=None,
+           section: str | None = None) -> dict:
     """Measure what the mix sounds like (the agent's ears): per-section loudness/brightness/width/balance and a
     loudness value per bar, masking between tracks, a check of each track's audio against its notes (with probe
-    renders of every pitch it uses), and an optional comparison with a reference recording."""
+    renders of every pitch it uses), and an optional comparison with a reference recording. start/end or a marker
+    section: sections, bar_lufs and masking for that range only."""
     from . import listening
     p = load(project)
+    span = None
+    if start is not None or end is not None or section:
+        s, e = _span(p, start, end, section)
+        span = (s, e if e is not None else max(p.end, p.beats_per_bar))
     t0 = time.time()
     r = engine.Renderer(p)
     rep = r.run()
     res = listening.report(p, r, reference=reference, probe=probe,
-                           section_bars=int(section_bars) if section_bars else None, tracks=tracks)
+                           section_bars=int(section_bars) if section_bars else None, tracks=tracks, span=span)
     res["warnings"] = [w for w in rep["warnings"]] + res["warnings"]
     res["seconds"] = round(time.time() - t0, 1)
     (p.path / "renders").mkdir(exist_ok=True)

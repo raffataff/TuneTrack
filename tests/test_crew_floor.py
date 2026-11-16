@@ -624,6 +624,66 @@ def test_the_producer_is_started_on_an_audition_with_the_take_in_front_of_it(son
     assert aud["title"].startswith("Audition take tk1") and aud["result"] == "tk1 accepted"
 
 
+def _two_handed_in() -> list[str]:
+    """Two seats that worked at once hand in together: bar 3 and bar 1 of the same clip (they merge cleanly)."""
+    first = _handed_in()
+    tk = takes.take_new("An idea for bar 1", None, "arranger", use=False)
+    api.write("Piano", "F5:w", at="1:1", project=tk["project"])
+    takes.take_submit("And this", tk["take"])
+    return [first, tk["take"]]
+
+
+def test_takes_handed_in_together_are_heard_in_one_producer_run(song, tmp_path):
+    # The Lonely Walk: five auditions ran back to back, each a run that read the brief, tools and session again.
+    seat("producer", agent(tmp_path, "producer", """
+        heard = re.findall(r"handed in (tk\\d+)", prompt)
+        assert heard == ["tk1", "tk2"] and "1 more take handed in at the same time" in prompt
+        assert "Their summary: And this" in prompt and "Task T2: Audition take tk2" in prompt
+        for tk in heard:
+            tool("take_use"); takes.take_use(tk)
+            tool("take_accept"); takes.take_accept(tk)
+        say(type="text", text="Both in.")
+    """))
+    _two_handed_in()
+    out = floor.Floor(song).run(poll=0.05)
+    assert out["launches"] == 1 and out["tasks"] == [] and out["needs_you"] == []
+    assert (69, 8.0) in piano(song) and (77, 0.0) in piano(song)
+    assert sorted(t["result"] for t in studio.task_list(state="done")["tasks"]) == ["tk1 accepted", "tk2 accepted"]
+    [start] = [e for e in studio.events()["events"] if e["kind"] == "run" and e.get("what") == "start"]
+    assert start["task"] == "T1" and start["also"] == ["T2"]
+
+
+def test_a_take_left_undecided_in_a_shared_run_is_heard_again(song, tmp_path):
+    seat("producer", agent(tmp_path, "producer", """
+        take = re.search(r"handed in (tk\\d+)", prompt).group(1)  # decides only the first take it is given
+        tool("take_accept"); takes.take_accept(take)
+        say(type="text", text="One done.")
+    """))
+    _two_handed_in()
+    out = floor.Floor(song).run(poll=0.05)
+    assert out["launches"] == 2 and out["tasks"] == [] and out["needs_you"] == []
+    assert (69, 8.0) in piano(song) and (77, 0.0) in piano(song)
+    [nudge] = [m["text"] for m in studio.read()["messages"] if m["to"] == "producer"]
+    assert nudge.startswith("Your run on T2 ended without take_accept or take_reject, so tk2 is still waiting")
+
+
+def test_a_stopped_shared_audition_run_requeues_every_take_uncounted(song, tmp_path):
+    seat("producer", agent(tmp_path, "producer", """
+        import time
+        tool("render"); time.sleep(30)
+    """))
+    _two_handed_in()
+    f = floor.Floor(song)
+    f.tick()
+    assert {t["id"]: t["state"] for t in studio.read()["tasks"]} == {"T1": "working", "T2": "working"}
+    import time
+    while not studio.events()["events"] or not any(e.get("what") == "tool" for e in studio.events()["events"]):
+        time.sleep(0.05)
+    f.stop()
+    assert {t["id"]: (t["state"], t["attempts"]) for t in studio.read()["tasks"]} == {"T1": ("queued", 0),
+                                                                                       "T2": ("queued", 0)}
+
+
 def test_returning_a_take_is_the_audition_s_result(song, tmp_path):
     seat("producer", agent(tmp_path, "producer", PRODUCER))
     tk = _handed_in()
@@ -667,3 +727,23 @@ def test_a_task_message_is_short_about_what_came_before(song):
     lead = briefs.task_prompt(st[1], studio.studio_status())  # the Producer hands out work: told what each seat is for
     assert "- composer: Themes, harmony and structure" in lead and "- mix (the user): Balance" in lead
     assert "spotting" not in lead and "rhythm" not in lead  # empty seats are not its business
+
+
+def test_seats_that_add_tasks_are_shown_the_open_work(song, tmp_path):
+    # Seen live (2026-11-16): auditioning blind, the Producer added a second Mix task beside the planned one, and
+    # Review filed fixes the Producer had already handed out: 12 tasks for a job planned as 4.
+    studio.task_add("composer", "Write the hook")
+    studio.task_add("mix", "Mix the loop", depends=["T1"])
+    studio.task_add("review", "Review the loop", depends=["T2"])
+    tk = _handed_in()
+    seat("producer", agent(tmp_path, "producer", PRODUCER))
+    floor.Floor(song)._route_takes()
+    st = {t["id"]: t for t in studio.read()["tasks"]}
+    board = studio.studio_status()
+    heard = briefs.task_prompt(st["T4"], board, audition=takes.take_diff(tk))
+    assert "- T2 mix queued after T1: Mix the loop" in heard and "- T1 composer queued: Write the hook" in heard
+    assert "T4 producer" not in heard  # its own audition is not listed as open work
+    assert "Open tasks" in briefs.task_prompt(st["T3"], board)  # Review adds fix tasks too
+    assert "Open tasks" not in briefs.task_prompt(st["T1"], board)  # a Composer adds none
+    prod = briefs.system("producer", False)
+    assert "task_update(task, detail=...)" in prod and "task_add only for work none of them covers" in prod

@@ -41,12 +41,15 @@ otherwise look up: the seat's summary, what the take changed, whether it stayed 
 with the session. Your tools already point at the take.
 - render() and listen() once, and score() for the bars that changed. Judge it against the brief and against what
   is already accepted. listen(section_bars=1) is a block per bar and the most expensive answer there is: use it
-  when you have to find a bar, not as the default; tracks=[...] and probe=False narrow it.
+  when you have to find a bar, and then with start/end round the bars in question; tracks=[...] and probe=False
+  narrow it further.
 - Good: take_accept(take). If it reports conflicts, look at them: accept with on_conflict only when you know which
   side should win, otherwise return the take and say what to keep.
 - The accept or the return is the whole verdict: it finishes your audition task and puts your tools back on the
   session. No task_update, no report, no message to say a take passed. What the next seat must know because of
-  what you heard goes in that seat's task (task_add detail, or task_update(task, detail=...)).
+  what you heard goes into that seat's open task: task_update(task, detail=...). Your task message lists the open
+  tasks; task_add only for work none of them covers (seen live: a second Mix task beside the planned one, both
+  mixing the same bars).
 - Accepting a take finishes its task, and the tasks that waited on it start at once. So when the audition shows
   that more has to happen first (a part nobody wrote, a fix by another seat), add that task and put it in the
   waiting tasks' depends (task_update(task, depends=[...])) before you accept.
@@ -130,7 +133,8 @@ def system(seat: str, in_take: bool, notes: str = "") -> str:
     if seat == "review":
         text += ("\nYour findings are the task's result: file them with report_write, one line per problem - where "
                  "(bars, tracks) | what you heard or measured | which seat should fix it - then task_add that fix "
-                 "for that seat, or message the Producer when it is a question of direction. One line for what "
+                 "for that seat (when an open task in your task message already covers it, name that task in the "
+                 "line instead), or message the Producer when it is a question of direction. One line for what "
                  "works; no section per topic. Measurements are evidence, not a verdict: end with whether the "
                  "music does what the brief asks, in two lines.\n")
     if notes and notes.strip():
@@ -173,13 +177,48 @@ def _audition(a: dict, asked: dict | None) -> list[str]:
     return lines
 
 
+TITLE_SHOWN = 70  # of an open task's title, in the list a seat that adds tasks is given
+
+
+def _open_tasks(task: dict, board: dict, more: list | None = None) -> list[str]:
+    """The open work, for a seat that can add tasks (Producer, Review). Seen live: started without it, the Producer
+    added a second Mix task beside the planned one while auditioning, and Review filed fixes the Producer had
+    already handed out: 12 tasks for a job planned as 4, two seats mixing the same bars at once."""
+    skip = {task["id"]} | {t["id"] for t, _a, _q in more or []}
+    rows = [t for t in board.get("tasks", []) if t["id"] not in skip and not t["title"].startswith("Audition take ")]
+    if not rows:
+        return []
+    out = ["", "Open tasks (add to one of these rather than a second task for the same work):"]
+    for t in rows:
+        title = t["title"] if len(t["title"]) <= TITLE_SHOWN else t["title"][:TITLE_SHOWN] + "..."
+        after = f" after {', '.join(t['waiting_for'])}" if t.get("waiting_for") else ""
+        out.append(f"- {t['id']} {t['seat']} {t['state']}{after}: {title}")
+    return out
+
+
+def _auditions_more(more: list) -> list[str]:
+    """Further takes handed in at the same time, heard in the same run (floor._more_auditions)."""
+    lines = ["", f"{len(more)} more take{'s' if len(more) != 1 else ''} handed in at the same time, heard in this "
+                 f"run. Decide each one: its accept or return finishes its own task. Hear them one at a time: "
+                 f"take_use(\"<take>\") points your tools at it (an accept or return points them back at the "
+                 f"session)."]
+    for t, a, asked in more:
+        block = _audition(a, asked)
+        lines += ["", f"Task {t['id']}: {t['title']}"] + block[1:-2]
+    return lines
+
+
 def task_prompt(task: dict, board: dict, take: dict | None = None, earlier: list[dict] | None = None,
-                messages: list[dict] | None = None, audition: dict | None = None, asked: dict | None = None) -> str:
+                messages: list[dict] | None = None, audition: dict | None = None, asked: dict | None = None,
+                more: list | None = None) -> str:
     """The message that starts (or resumes) an agent on a task. audition: take_diff() of the take a Producer is
-    started to hear, and asked: the task that take was made for."""
+    started to hear, and asked: the task that take was made for. more: further auditions heard in the same run,
+    as (task, take_diff, asked)."""
     lines = [f"Task {task['id']} for you: {task['title']}"]
     if audition:
         lines += _audition(audition, asked)
+        if more:
+            lines += _auditions_more(more)
     elif task.get("detail"):
         lines += ["", task["detail"]]
     scope = task.get("scope") or {}
@@ -207,6 +246,8 @@ def task_prompt(task: dict, board: dict, take: dict | None = None, earlier: list
         lines += ["", "Messages for you:"]
         lines += [f"- from {m['from']}" + (f" (about {m['task']})" if m.get("task") else "") + f": {m['text']}"
                   for m in messages]
+    if "task_add" in roles.get(task["seat"]).tools:
+        lines += _open_tasks(task, board, more)
     filled = [s for s in board.get("seats", []) if s.get("occupant")]
     if filled and task["seat"] == "producer" and not audition:
         # the Producer hands out the work, so it is told what each filled seat is for (the board no longer says)
