@@ -283,7 +283,7 @@ src/tunetrack/
                 briefs.py (what each seat is told), floor.py (start agents on ready tasks, route takes, handle failures)
   mcp_server.py MCP tools    server.py + web/  editor    cli.py  command line
 library/        plugins.json, patches/, instruments/ (SFZ), config.json
-projects/<name>/project.json, audio/, renders/, cache/, history/
+projects/<name>/project.json, audio/, renders/, cache/, history/  (gitignored: songs stay local)
 ```
 
 ## Limits

@@ -32,6 +32,23 @@ public:
     void resetBuiltIns();  // clear the state of every built-in synth and effect (not the hosted plugins)
     int latency() const { return totalLatency; }
 
+    // The "is this instrument ready" probe, offline only. A plugin instrument cannot say when it has finished
+    // loading its samples, so each new one is played a note from its own part (the median pitch, at that note's
+    // velocity) and measured after the instrument, before its inserts. probeBegin arms every instrument not yet
+    // heard to settle and returns how many; the caller runs the graph, stopped, for `length` samples and a block
+    // more; probeEnd measures. An instrument is ready once it sounds and is no louder than on the probe before
+    // (still loading = getting louder). probeEnd returns how many are not ready; giveUpProbes marks them ready
+    // and says why each was not.
+    bool hasUnproven() const;
+    int probeBegin (juce::int64 length);
+    int probeEnd();
+    juce::StringArray giveUpProbes();
+
+    // Write strips' audio before the fader ({strip id: wav path}) during the next offline render, `length` samples
+    // from song position 0. closeTaps finishes the files and returns {strip id: peak}.
+    juce::String armTaps (const juce::var& taps, juce::int64 length);
+    juce::var closeTaps();
+
     // ref: "<track id>/inst", "<track id>/fx/<n>", "master/fx/<n>". Empty string on success, else the problem.
     juce::String openEditor (const juce::String& ref);
     void closeEditors();
@@ -50,11 +67,15 @@ private:
     struct Slot
     {
         Graph::Node::Ptr node;
-        juce::String ref, applied;
+        juce::String ref, applied, key;
         juce::var deferred;
         bool fresh = false, plugin = false;
+        bool ready = false, probeSilent = true;  // the ready probe (instruments only)
+        float probeDb = -1000.0f;
+        int probes = 0;
     };
     struct Strip { Graph::Node::Ptr head, tap, fader; };
+    struct ProbeWant { juce::String slot, ref; Graph::Node::Ptr midi, meter; int channel, note, velocity; };
     class EditorWindow;
 
     using Maker = std::function<std::unique_ptr<juce::AudioProcessor> (juce::String&)>;
@@ -74,6 +95,8 @@ private:
     std::map<juce::String, Slot> slots, next;
     std::map<juce::String, int> seen;
     std::map<juce::String, Strip> strips;
+    std::vector<ProbeWant> probeWants;
+    juce::StringArray tapped;
     std::vector<Graph::Connection> wires, wired;
     std::map<juce::String, std::unique_ptr<EditorWindow>> editors;
     juce::StringArray warnings;
