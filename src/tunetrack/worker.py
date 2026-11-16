@@ -24,11 +24,30 @@ def _result(obj) -> None:
     print("@@RESULT " + json.dumps(obj), flush=True)
 
 
-def _engine(sr: int, bpm: float, block: int = 512):
+def _engine(sr: int, bpm: float, block: int = 512, tempo: list | None = None, duration: float = 0.0):
+    """tempo: [beats, bpms] (the project's tempo map); with changes in it, plugins see them (tempo-synced effects)."""
     import dawdreamer as daw
     eng = daw.RenderEngine(int(sr), int(block))
-    eng.set_bpm(float(bpm))
+    if tempo and len(tempo[0]) > 1:
+        eng.set_bpm(_bpm_per_tick(tempo, duration), ppqn=PPQN)
+    else:
+        eng.set_bpm(float(bpm))
     return eng
+
+
+PPQN = 960
+
+
+def _bpm_per_tick(tempo: list, duration: float) -> np.ndarray:
+    """The tempo at every tick (PPQN per beat) from the song start to a beat past `duration` seconds."""
+    beats, bpms = [float(b) for b in tempo[0]], [float(x) for x in tempo[1]]
+    secs = [0.0]
+    for i in range(1, len(beats)):
+        secs.append(secs[-1] + (beats[i] - beats[i - 1]) * 60.0 / bpms[i - 1])
+    end = beats[-1] + max(0.0, duration - secs[-1]) * bpms[-1] / 60.0 + 1.0
+    ticks = np.arange(int(np.ceil(max(end, beats[-1] + 1.0) * PPQN)))
+    idx = np.searchsorted(np.array(beats) * PPQN, ticks, side="right") - 1
+    return np.array(bpms, dtype=np.float32)[np.maximum(idx, 0)]
 
 
 # ---- parameters ---------------------------------------------------------------------------------------
@@ -265,11 +284,12 @@ def _midi_events(midi_path: str, bends: list | None = None):
     return notes, ccs
 
 
-def _run_dd(specs: list[dict], audio: np.ndarray | None, sr: int, bpm: float, duration: float, midi: str | None):
+def _run_dd(specs: list[dict], audio: np.ndarray | None, sr: int, bpm: float, duration: float, midi: str | None,
+            tempo: list | None = None):
     """Render a chain of DawDreamer-hosted devices. specs[0] may be an instrument (when audio is None)."""
     if not specs:
         return audio, 0
-    eng = _engine(sr, bpm)
+    eng = _engine(sr, bpm, tempo=tempo, duration=duration)
     graph = []
     prev = None
     latency = 0
@@ -352,11 +372,16 @@ def cmd_render(spec_path: str) -> None:
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     sr, bpm, dur = int(spec["sr"]), float(spec["bpm"]), float(spec["duration"])
     midi = spec.get("midi")
+    tempo = spec.get("tempo")
     n = int(round(dur * sr))
     audio = None
     pending: list[dict] = []
     warnings = []
     inst = spec.get("instrument")
+    for d in ([inst] if inst else []) + list(spec.get("fx", [])):
+        if d.get("automation"):
+            warnings.append(f"{d.get('name') or d.get('type')}: automation of {', '.join(sorted(d['automation']))} "
+                            f"plays in the live engine only; this render (DawDreamer) holds the setting")
     if spec.get("audio_in"):
         data, _ = sf.read(spec["audio_in"], dtype="float32", always_2d=True)
         audio = data.T
@@ -384,7 +409,7 @@ def cmd_render(spec_path: str) -> None:
             audio = p(msgs, duration=dur, sample_rate=sr, num_channels=2)
         elif inst["type"] == "vst3":
             # render alone and keep the main stereo pair (multi-out instruments like HALion have 32+ outputs)
-            audio, _ = _run_dd([{**inst, "is_instrument": True}], None, sr, bpm, dur, midi)
+            audio, _ = _run_dd([{**inst, "is_instrument": True}], None, sr, bpm, dur, midi, tempo)
         else:
             pending.append({**inst, "is_instrument": True})
     for fx in spec.get("fx", []):
@@ -392,14 +417,14 @@ def cmd_render(spec_path: str) -> None:
             if fx.get("sidechain_in"):
                 warnings.append(f"{fx.get('name')} is hosted through pedalboard, which can't feed a sidechain: "
                                 f"key ignored")
-            audio, _ = _run_dd(pending, audio, sr, bpm, dur, midi)
+            audio, _ = _run_dd(pending, audio, sr, bpm, dur, midi, tempo)
             pending = []
             if audio is None:
                 audio = np.zeros((2, n), dtype=np.float32)
             audio = _pb_plugin(fx)(audio.astype(np.float32), sr)
         else:
             pending.append(fx)
-    audio, latency = _run_dd(pending, audio, sr, bpm, dur, midi)
+    audio, latency = _run_dd(pending, audio, sr, bpm, dur, midi, tempo)
     if audio is None:
         audio = np.zeros((2, n), dtype=np.float32)
     audio = np.nan_to_num(audio.astype(np.float32))

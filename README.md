@@ -113,7 +113,8 @@ says, and you can talk to a seat or to everyone from it.
 - **Track**: instrument picker, built-in synth/FX parameters, VST3 parameter browser, patch capture, audition.
 - **Render report**: loudness, true peak, band balance, per-track levels, warnings, output files.
 - **Space** renders the changed tracks and plays (unchanged tracks come from cache). The Loop button loops the loop region.
-  Playback is a render, not a live engine: the tag beside the transport says whether the audio is the current revision.
+  With LIVE off, playback is a render and the tag beside the transport says whether it is the current revision; LIVE plays
+  the session through the live engine in real time.
 - Ctrl+Z / Ctrl+Y undo/redo (shared with the agent's edits).
 
 Everything goes through the same API the agents use, and the editor follows the project and the studio board live, so you
@@ -288,9 +289,13 @@ projects/<name>/project.json, audio/, renders/, cache/, history/  (gitignored: s
 
 ## Limits
 
-- Playback is render-then-play (offline, cached per track), not a real-time audio engine. Edits to one track re-render only
-  that track.
-- Built-in synths ignore CC and pitch bend (VST3 and SFZ instruments respond to both). Plugin parameter automation isn't
-  exposed yet; track volume/pan automation is.
-- VST3 effects see the project's starting tempo for tempo-synced features.
-- Audio clips are placed and faded, but not time-stretched.
+- Built-in synths ignore CC and pitch bend (VST3 and SFZ instruments respond to both).
+- Automation (`automation(track, param, points, device=...)`: faders, pans, any setting of a built-in effect or synth, any
+  VST3 parameter) moves a VST3 parameter once per audio block (512 samples offline, the interface's buffer live) and a
+  built-in setting every 32 samples. Without the live engine built (the DawDreamer fallback), automated device settings
+  stay at their static value, and the render says so.
+- In the live engine VST3 effects get the tempo map as the host tempo, and the built-in delay keeps its time in beats
+  across tempo changes. Some plugins ignore the host tempo (SSL X-Delay did in a test; Waves H-Delay follows it).
+- Audio clips follow the tempo when given the tempo they were played at (`bpm`) and transpose by `pitch`, through Rubber
+  Band (pedalboard), offline and cached: formants are not kept, and the first stretch at a new ratio in a process spends
+  a few seconds measuring Rubber Band's rate error so beats land within about 2 ms.

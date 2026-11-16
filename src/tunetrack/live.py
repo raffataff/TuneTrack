@@ -4,8 +4,9 @@
 device resolved to a file path. `Engine` runs the process and talks to it, one JSON command per line.
 
 What the engine hosts itself: VST3 instruments and effects, the built-in synths and effects, faders, pans,
-automation, sends, buses, sidechain keys and the master chain. What it plays from a file: SFZ instruments and
-audio tracks, rendered dry by the offline worker (cached) and run through their effects live.
+automation, sends, buses, sidechain keys, the master chain, and SFZ instruments through sfizz when it is built
+with it. What it plays from a file: audio tracks, and SFZ instruments in a build without sfizz, rendered dry by
+the offline worker (cached) and run through their effects live.
 """
 from __future__ import annotations
 
@@ -36,31 +37,62 @@ def engine_exe() -> Path | None:
     return None
 
 
-_RUNS: dict[str, bool] = {}
+_RUNS: dict[str, dict | None] = {}  # build -> its ready line (None: Windows would not start it)
 
 BLOCKED = ("Windows did not let the engine start: Smart App Control blocks a program it has not seen before "
            "unless it is signed (every new build of engine/ is such a program). Until this build is allowed, "
            "renders use the DawDreamer worker and LIVE playback is unavailable.")
 
 
-def engine_runs() -> bool:
-    """Whether the built engine can be started on this machine. Checked once per build per process: started
-    without an audio device and with nothing on stdin, it exits at once."""
+def _ready_line(out) -> dict:
+    if isinstance(out, bytes):
+        out = out.decode("utf-8", "replace")
+    for line in (out or "").splitlines():
+        if not line.startswith("@@ "):  # the engine's own lines; a plugin may print anything
+            continue
+        try:
+            msg = json.loads(line[3:])
+        except ValueError:
+            continue
+        if isinstance(msg, dict) and msg.get("ev") == "ready":
+            return msg
+    return {}
+
+
+def _started() -> dict | None:
+    """What the built engine said when it started ({"ev": "ready", "sfz": bool, ...}), or None when it is not built
+    or Windows will not start it. Checked once per build per process: started without an audio device and with
+    nothing on stdin, it exits at once."""
     exe = engine_exe()
     if exe is None:
-        return False
+        return None
     st = exe.stat()
     k = f"{exe}:{st.st_mtime_ns}:{st.st_size}"
     if k not in _RUNS:
         try:
-            subprocess.run([str(exe), "--no-device"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            _RUNS[k] = True
-        except subprocess.TimeoutExpired:
-            _RUNS[k] = True  # it started; it just did not stop by itself
+            done = subprocess.run([str(exe), "--no-device"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, timeout=30,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            _RUNS[k] = _ready_line(done.stdout)
+        except subprocess.TimeoutExpired as e:
+            _RUNS[k] = _ready_line(e.stdout)  # it started; it just did not stop by itself
         except OSError:
-            _RUNS[k] = False
+            _RUNS[k] = None
     return _RUNS[k]
+
+
+def engine_runs() -> bool:
+    """Whether the built engine can be started on this machine."""
+    return _started() is not None
+
+
+def engine_plays_sfz() -> bool:
+    """Whether SFZ instruments play inside the engine (sfizz, built in when engine/third_party/sfizz has its
+    source) instead of arriving as stems from TuneTrack's own SFZ player. `sfz_player: "tunetrack"` in the library
+    config keeps the old player."""
+    if str(config.load_config().get("sfz_player", "auto")).lower() == "tunetrack":
+        return False
+    return engine_runs() and bool((_started() or {}).get("sfz"))
 
 
 def synth_per_sample() -> bool:
@@ -133,21 +165,124 @@ def _events(p: Project, t: Track, tm, sr: int, channel: int) -> list[int]:
     return [x for e in ev for x in e[2:]]
 
 
-def _fx_spec(d: Device, p: Project) -> dict | None:
-    """One insert as the engine loads it: a VST3, or a built-in effect by name with every setting spelled out."""
+def _lane_at(pts: list, at: float):
+    """A lane's value at a beat: straight lines between points, held before the first and after the last (a text
+    value holds until the next point)."""
+    if at <= pts[0][0]:
+        return pts[0][1]
+    for (b0, v0), (b1, v1) in zip(pts, pts[1:]):
+        if b0 <= at <= b1:
+            if isinstance(v0, str) or isinstance(v1, str) or b1 - b0 < 1e-9:
+                return v1 if at >= b1 else v0
+            return v0 + (v1 - v0) * (at - b0) / (b1 - b0)
+    return pts[-1][1]
+
+
+def _lanes(d: Device) -> dict[str, list]:
+    return {k: sorted(v, key=lambda q: q[0]) for k, v in (d.automation or {}).items() if v}
+
+
+def _auto(p: Project, d: Device, numeric: bool, label: str, warnings: list[str] | None, skip=()) -> dict:
+    """A device's automation as the engine reads it: {setting: [[sample, value], ...]}. Built-in devices take
+    numbers only; a plugin parameter takes 0..1 or the text it shows."""
+    tm, sr = p.tempo_map(), p.sample_rate
+    out = {}
+    for k, pts in _lanes(d).items():
+        if k in skip:
+            continue
+        if numeric and any(isinstance(v, str) for _b, v in pts):
+            if warnings is not None:
+                warnings.append(f"{label}: automation of {k} needs numbers, not text; ignored")
+            continue
+        out[k] = [[int(round(tm.sec(b) * sr)), float(v) if numeric else v] for b, v in pts]
+    return out
+
+
+def _delay_lane(p: Project, d: Device, params: dict) -> list | None:
+    """The built-in delay's time in seconds over the song, when it changes: its time is in beats, so it follows the
+    tempo map (a step at each tempo change) and any automation of `time`. None when it never changes."""
+    tm, sr = p.tempo_map(), p.sample_rate
+    lane = _lanes(d).get("time") or []
+    if len(tm.beats) < 2 and not lane:
+        return None
+
+    def time_at(b: float) -> float:
+        return float(_lane_at(lane, b)) if lane else float(params["time"])
+
+    out = [[0, time_at(0.0) * 60.0 / tm.bpm_at(0.0)]]
+    for b in sorted(set(tm.beats[1:]) | {float(x) for x, _ in lane}):
+        if b <= 0:
+            continue
+        s, t = int(round(tm.sec(b) * sr)), time_at(b)
+        if b in tm.beats:  # a step from the old tempo's time to the new one's
+            out.append([s, t * 60.0 / tm.bpms[tm.beats.index(b) - 1]])
+        out.append([s, t * 60.0 / tm.bpm_at(b)])
+    return out
+
+
+def _eq_auto(p: Project, d: Device, eng: str, label: str, warnings: list[str] | None) -> dict:
+    """builtin:eq automation when it runs on SSL / Nova: the settings at each point, translated as its static
+    settings are, become lanes of the plugin's own parameters (the text each shows), straight lines between."""
+    lanes = _lanes(d)
+    if not lanes:
+        return {}
+    tm, sr = p.tempo_map(), p.sample_rate
+    static = eqmap.translate(eng, d.params)[0]
+
+    def active(k: str, v: float) -> float:
+        # a band at 0 dB or a filter at its off point is left out of the plugin's settings; along a lane it stays
+        # in, a hair inside its range, so the plugin's band moves instead of switching
+        if k.endswith("_gain") and abs(v) < eqmap.FLAT:
+            return eqmap.FLAT
+        if k == "hpf" and v <= eqmap.HPF_OFF:
+            return eqmap.HPF_OFF + 0.01
+        if k == "lpf" and v >= eqmap.LPF_OFF:
+            return eqmap.LPF_OFF - 1.0
+        return v
+
+    rows = []
+    for b in sorted({b for pts in lanes.values() for b, _ in pts}):
+        settings = {**d.params, **{k: active(k, float(_lane_at(pts, b))) for k, pts in lanes.items()}}
+        rows.append((int(round(tm.sec(b) * sr)), eqmap.translate(eng, settings)[0]))
+    out = {}
+    for key in sorted(set(static) | {k for _s, r in rows for k in r}):
+        vals = [r.get(key) for _s, r in rows]
+        if all(v == static.get(key) for v in vals):
+            continue
+        if None in vals and warnings is not None:
+            warnings.append(f"{label}: on {eng}, '{key}' switches off and on along the automation; "
+                            f"it follows only where it is on")
+        out[key] = [[s, v] for (s, _r), v in zip(rows, vals) if v is not None]
+    return out
+
+
+def _fx_spec(d: Device, p: Project, label: str = "", warnings: list[str] | None = None) -> dict | None:
+    """One insert as the engine loads it: a VST3, or a built-in effect by name with every setting spelled out.
+    `auto` carries its automation (_auto)."""
     if d.bypass:
         return None
-    if d.type == "builtin" and not (d.name == "eq" and eqmap.plugin_entry(eqmap.engine_for(d, p))):
+    eng = eqmap.engine_for(d, p) if d.type == "builtin" and d.name == "eq" else "builtin"
+    if d.type == "builtin" and not (d.name == "eq" and eqmap.plugin_entry(eng)):
         if d.name not in synths.FX:
             raise KeyError(f"Unknown built-in effect {d.name!r}")
         params = {**synths.FX[d.name][1], **{k: float(v) for k, v in d.params.items()}}
+        out = {"type": "faust", "name": d.name, "params": params}
+        auto = _auto(p, d, True, label, warnings, skip=("time",) if d.name == "delay" else ())
         if d.name == "delay":
             params["delay_sec"] = params["time"] * 60.0 / p.tempo
-        return {"type": "faust", "name": d.name, "params": params}
+            if (lane := _delay_lane(p, d, params)) is not None:
+                auto["delay_sec"] = lane
+        if auto:
+            out["auto"] = auto
+        return out
     spec = resolve_device(d, p, False)
     if spec is None:
         return None
-    return {k: spec.get(k) for k in ("type", "path", "shell", "state", "params", "name")}
+    out = {k: spec.get(k) for k in ("type", "path", "shell", "state", "params", "name")}
+    auto = _eq_auto(p, d, eng, label, warnings) if eng != "builtin" else _auto(p, d, False, label, warnings)
+    if auto:
+        out["auto"] = auto
+    return out
 
 
 def _stem(r: Renderer, t: Track, spec: dict) -> str:
@@ -159,8 +294,9 @@ def _stem(r: Renderer, t: Track, spec: dict) -> str:
 
 
 def _audio_stem(r: Renderer, p: Project, t: Track, spec: dict) -> str:
-    key = hashlib.sha1(json.dumps({"clips": spec["clips"], "n": r.n, "sr": r.sr}, sort_keys=True,
-                                  default=str).encode()).hexdigest()[:20]
+    # where each clip lands (and how a stretched one plays) follows the tempo map
+    what = {"clips": spec["clips"], "n": r.n, "sr": r.sr, "tempo": [r.tm.beats, r.tm.bpms]}
+    key = hashlib.sha1(json.dumps(what, sort_keys=True, default=str).encode()).hexdigest()[:20]
     out = r.cache / f"live-in-{key}.wav"
     if not out.exists():
         part = out.with_suffix(".part.wav")
@@ -261,7 +397,7 @@ def fx_chain(p: Project, devices: list[Device], label: str, warnings: list[str])
     out = []
     for i, d in enumerate(devices):
         try:
-            spec = _fx_spec(d, p)
+            spec = _fx_spec(d, p, f"{label} fx {i}", warnings)
         except Exception as e:  # noqa: BLE001 - one broken insert shouldn't stop the session
             warnings.append(f"{label} fx {i}: {e}")
             continue
@@ -277,12 +413,18 @@ def fx_chain(p: Project, devices: list[Device], label: str, warnings: list[str])
 
 
 def strip_source(r: Renderer, t: Track, spec: dict, warnings: list[str]) -> dict:
-    """{"source", "fx"} of a source track's strip, from its render spec (Renderer.track_spec). SFZ instruments and
-    audio clips arrive as stems (rendered or assembled here and cached), everything else is hosted."""
+    """{"source", "fx"} of a source track's strip, from its render spec (Renderer.track_spec). Audio clips arrive as
+    stems (assembled here and cached), and so do SFZ instruments when the engine does not play them itself
+    (Renderer.sfz_in_engine); everything else is hosted."""
     p, tm, sr = r.p, r.tm, r.sr
     inst = spec.get("instrument")
     if t.kind == "audio":
         source = {"type": "stem", "file": _audio_stem(r, p, t, spec)}
+    elif inst["type"] == "sfz" and r.sfz_in_engine:
+        from .sfz import reads_cc
+        # full_cc7: sfizz's own CC7 volume link starts at 127, not 100 (SfzNode.cpp), where the file has none
+        source = {"type": "sfz", "path": inst["path"], "full_cc7": not reads_cc(inst["path"], 7),
+                  "events": _events(p, t, tm, sr, 0)}
     elif inst["type"] == "sfz":
         source = {"type": "stem", "file": _stem(r, t, spec)}
     elif inst["type"] == "synth":
@@ -293,6 +435,12 @@ def strip_source(r: Renderer, t: Track, spec: dict, warnings: list[str]) -> dict
     else:
         source = {**{k: inst.get(k) for k in ("type", "path", "shell", "state", "params", "name")},
                   "events": _events(p, t, tm, sr, int(inst.get("channel", 1)) - 1)}
+    if t.kind != "audio" and t.instrument is not None and t.instrument.automation:
+        where = f"track '{t.name}' instrument"
+        if inst["type"] == "sfz":
+            warnings.append(f"{where}: an SFZ instrument has no settings to automate (use cc); automation ignored")
+        elif auto := _auto(p, t.instrument, inst["type"] == "synth", where, warnings):
+            source["auto"] = auto
     return {"source": source, "fx": fx_chain(p, t.fx, f"track '{t.name}'", warnings)}
 
 
@@ -306,7 +454,9 @@ class Engine:
     """A running engine process. Not thread-safe per call id; one caller at a time is the intended use."""
 
     def __init__(self, device: str | None = None, no_device: bool = False, per_sample: bool = False,
-                 on_event=None):
+                 on_event=None, threads: int | None = None):
+        """threads: how many threads compute the session's strips side by side (None: one per physical core but
+        one, at most 8). Offline renders that run several engines at once share the cores out between them."""
         exe = engine_exe()
         if exe is None:
             raise EngineError("the live engine is not built: see engine/README.md")
@@ -317,6 +467,8 @@ class Engine:
             args += ["--device", device]
         if per_sample:
             args.append("--per-sample")
+        if threads:
+            args += ["--threads", str(int(threads))]
         self.on_event = on_event
         self.tick: dict = {}
         self.ready: dict = {}
@@ -404,6 +556,8 @@ class Engine:
         path.write_text(json.dumps(spec), encoding="utf-8")
         res = self.call("load", timeout=600, path=str(path))
         self.sr = spec["sr"]
+        if res.get("device"):
+            self.ready.update(res["device"])  # the device may have changed rate to match the project
         # strips that have notes: a render in which one of them is silent started too early. Switched-off strips
         # count only when their audio is tapped (Engine.render's `taps`).
         self.expect = {t["id"]: (t["name"], t["on"]) for t in spec["tracks"] if (t["source"] or {}).get("events")}

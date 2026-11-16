@@ -411,7 +411,7 @@ function workConsole(box, d, B, s) {
   const buses = d.tracks.filter((t) => t.kind === "bus");
   const sendsTo = (t, b) => t.sends.some((x) => x.id ? x.id === b.id : x.to === b.name);  // a bench read before sends carried ids has names only
   const rmKey = (attr, k, what) => `<button class="rm" ${attr}="${k}" title="Remove ${what}" aria-label="Remove ${what}">×</button>`;
-  const fxSlots = (list, fresh) => list.map((f, k) => `<span class="slotRow"><button class="slot ${f.bypass ? "byp" : ""} ${fresh && fresh(f) ? "new" : ""}" data-fx="${k}" aria-pressed="${!f.bypass}" title="${esc(f.label)}${f.bypass ? " (bypassed)" : ""}. Click to ${f.bypass ? "switch it in" : "bypass it"}.">${esc(f.label)}</button>${rmKey("data-fxrm", k, esc(f.label))}</span>`).join("");
+  const fxSlots = (list, fresh) => list.map((f, k) => `<span class="slotRow"><button class="slot ${f.bypass ? "byp" : ""} ${fresh && fresh(f) ? "new" : ""}" data-fx="${k}" aria-pressed="${!f.bypass}" title="${esc(f.label)}${f.bypass ? " (bypassed)" : ""}${f.auto ? `. Automated: ${esc(f.auto.join(", "))}` : ""}. Click to ${f.bypass ? "switch it in" : "bypass it"}.">${esc(f.label)}${f.auto ? " ~" : ""}</button>${rmKey("data-fxrm", k, esc(f.label))}</span>`).join("");
   // the keys that change a strip's shape: add an effect, add a send (tracks only), route the output
   const addKeys = (t) => {
     const free = t ? buses.filter((b) => b.id !== t.id && !sendsTo(t, b)) : [];

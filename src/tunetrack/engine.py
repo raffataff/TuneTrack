@@ -22,7 +22,15 @@ from .synths import fx_dsp, synth_dsp
 # ---- device resolution ------------------------------------------------------------------------------------
 
 def resolve_device(dev: Device, p: Project, instrument: bool) -> dict | None:
-    """Device -> fully resolved spec the worker can load (paths, states, compiled DSP text)."""
+    """Device -> fully resolved spec the worker can load (paths, states, compiled DSP text). Its automation rides
+    along as written (beats), so a changed lane renders the track again."""
+    spec = _resolve_device(dev, p, instrument)
+    if spec is not None and dev.automation:
+        spec["automation"] = dev.to_json().get("automation", {})
+    return spec
+
+
+def _resolve_device(dev: Device, p: Project, instrument: bool) -> dict | None:
     if dev.bypass:
         return None
     if dev.type == "synth":
@@ -89,10 +97,8 @@ def offline_backend() -> str:
     return "engine"
 
 
-def _worker_only(spec: dict) -> bool:
-    """A job the worker renders whoever renders the rest: an SFZ instrument with no inserts (TuneTrack's own SFZ
-    player; the engine plays the result as a stem)."""
-    return (spec.get("instrument") or {}).get("type") == "sfz" and not spec.get("fx")
+def _is_sfz(spec: dict) -> bool:
+    return (spec.get("instrument") or {}).get("type") == "sfz"
 
 
 def _fingerprint(obj) -> str:
@@ -196,13 +202,19 @@ def audio_track_input(p: Project, t: Track, n: int) -> np.ndarray:
         f = Path(c.file)
         if not f.is_absolute():
             f = p.root / f
-        data = _read(f, sr)
-        a = int(round(c.offset * sr))
-        start = int(round(tm.sec(c.start) * sr))
-        length = int(round((tm.sec(c.end) - tm.sec(c.start)) * sr))
-        seg = data[:, a:a + length].copy()
-        if seg.shape[1] == 0:
-            continue
+        if c.bpm or c.pitch:
+            start = int(round(tm.sec(c.start) * sr))
+            seg = _stretched_clip(p, c, f, tm, sr)
+            if seg is None:
+                continue
+        else:
+            data = _read(f, sr)
+            a = int(round(c.offset * sr))
+            start = int(round(tm.sec(c.start) * sr))
+            length = int(round((tm.sec(c.end) - tm.sec(c.start)) * sr))
+            seg = data[:, a:a + length].copy()
+            if seg.shape[1] == 0:
+                continue
         seg *= 10 ** (c.gain_db / 20)
         k = min(int(c.fade_in * sr), seg.shape[1])
         if k > 0:
@@ -214,6 +226,179 @@ def audio_track_input(p: Project, t: Track, n: int) -> np.ndarray:
         if start < n:
             buf[:, start:end] += seg[:, : end - start]
     return buf
+
+
+_STRETCH_PAD = 0.25  # seconds of source context either side of a tempo segment, dropped after stretching
+_STRETCH_XF = 0.01  # crossfade where two tempo segments meet
+
+
+def _stretch_plan(c, tm, sr: int) -> tuple[int, list[tuple[int, float]]]:
+    """(source samples, [(first source sample, stretch factor)] per constant-tempo stretch of a clip)."""
+    if not c.bpm:
+        return int(round((tm.sec(c.end) - tm.sec(c.start)) * sr)), [(0, 1.0)]
+    segs = [(0, tm.bpm_at(c.start) / c.bpm)]
+    for b, bpm in zip(tm.beats, tm.bpms):
+        if c.start + 1e-9 < b < c.end - 1e-9:
+            i = int(round((b - c.start) * 60 / c.bpm * sr))
+            if i > segs[-1][0]:
+                segs.append((i, bpm / c.bpm))
+            else:
+                segs[-1] = (segs[-1][0], bpm / c.bpm)
+    return int(round(c.length * 60 / c.bpm * sr)), segs
+
+
+_STRETCH_CAL: dict[tuple, tuple[float, float]] = {}  # (sr, factor, pitch) -> (pitch nudge, drift)
+
+
+def _rubberband(x: np.ndarray, sr: int, f: float, pitch: float) -> np.ndarray:
+    import pedalboard
+    return pedalboard.time_stretch(np.ascontiguousarray(x, dtype=np.float32), sr, stretch_factor=float(f),
+                                   pitch_shift_in_semitones=float(pitch), high_quality=True,
+                                   preserve_formants=False)  # formant keeping drops a pure tone ~9 dB
+
+
+def _stretch_drift(sr: int, f: float, pitch: float) -> float:
+    """How far Rubber Band's real rate is off the asked one (its realtime engine rounds its hops: up to ~0.3%,
+    so ~10 ms late or early per 3 s), measured on a click train: output seconds of error per output second."""
+    per = int(0.25 * max(1.0, f) * sr)
+    x = np.zeros((2, per * 24), np.float32)  # shorter trains misjudge it: the rate settles over seconds
+    burst = (0.8 * np.sin(2 * np.pi * 3000 * np.arange(96) / sr)).astype(np.float32)
+    for i in range(0, x.shape[1], per):
+        x[:, i:i + 96] = burst
+    e = np.abs(_rubberband(x, sr, f, pitch)[0])
+    want = np.arange(1, 23) * per / f / sr
+    got, drift, win = [], 0.0, int(0.1 * sr)
+    for s in want:  # follow the drift so far so a click is always found near where it now is
+        c = int(round(s * (1 + drift) * sr))
+        w = e[max(0, c - win):c + win]
+        if w.size == 0 or w.max() <= 0:
+            break
+        got.append((max(0, c - win) + int(np.argmax(w > 0.5 * w.max()))) / sr)
+        if len(got) > 2:
+            drift = np.polyfit(want[:len(got)], np.array(got) - want[:len(got)], 1)[0]
+    return float(drift) if len(got) > 4 else 0.0
+
+
+def _stretch_cal(sr: int, f: float, pitch: float) -> tuple[float, float]:
+    """(pitch nudge in semitones, drift) to run a stretch with. The drift is undone by resampling, which moves
+    the pitch by the same ratio; a nudge of a few hundredths of a semitone is picked so that what is left of
+    both is below ~0.5 cent."""
+    k = (sr, round(f, 9), round(pitch, 6))
+    if k not in _STRETCH_CAL:
+        best = None
+        for nudge in (0.0, 0.01, -0.01, 0.02, -0.02, 0.03, -0.03):
+            d = _stretch_drift(sr, f, pitch + nudge)
+            err = abs(nudge / 12 * math.log(2) + math.log1p(d))
+            if best is None or err < best[0]:
+                best = (err, nudge, d)
+            if err < 5e-4:
+                break
+        _STRETCH_CAL[k] = (best[1], best[2])
+    return _STRETCH_CAL[k]
+
+
+def _rescale(y: np.ndarray, r: float) -> np.ndarray:
+    """y played r times as fast (r close to 1), by band-limited resampling."""
+    from fractions import Fraction
+
+    from scipy.signal import resample_poly
+    q = Fraction(1 / r).limit_denominator(5000)
+    if q == 1:
+        return y
+    return resample_poly(y, q.numerator, q.denominator, axis=1).astype(np.float32)
+
+
+def _time_stretch(src: np.ndarray, sr: int, segs: list[tuple[int, float]], pitch: float) -> np.ndarray:
+    """Rubber Band stretch. Each constant-tempo segment is stretched on its own with a constant factor (exact
+    timing; a per-sample factor array lags tempo steps by tens of ms) and the pieces crossfade at the seams.
+    Rubber Band's rate error is measured once per factor and pitch and resampled away."""
+
+    def run(x, f):
+        if abs(f - 1) < 1e-12 and not pitch:
+            return x
+        nudge, d = _stretch_cal(sr, f, pitch)
+        y = _rubberband(x, sr, f, pitch + nudge)
+        return _rescale(y, 1 + d) if abs(d) > 1e-5 else y
+    if len(segs) == 1:
+        return run(src, segs[0][1])
+    L = src.shape[1]
+    bounds = [i for i, _ in segs] + [L]
+    outs = [0.0]
+    for k, (i0, f) in enumerate(segs):
+        outs.append(outs[-1] + (bounds[k + 1] - i0) / f)
+    total = int(round(outs[-1]))
+    out = np.zeros((2, total), np.float32)
+    pad, h = int(_STRETCH_PAD * sr), max(1, int(_STRETCH_XF * sr / 2))
+    last = len(segs) - 1
+    for k, (i0, f) in enumerate(segs):
+        lo, hi = max(0, i0 - pad), min(L, bounds[k + 1] + pad)
+        y = run(src[:, lo:hi], f)
+        g0 = 0 if k == 0 else max(0, int(round(outs[k])) - h)
+        g1 = total if k == last else min(total, int(round(outs[k + 1])) + h)
+        if g1 <= g0:
+            continue
+        y0 = int(round((i0 - lo) / f - outs[k])) + g0  # index in y of output sample g0
+        piece = np.zeros((2, g1 - g0), np.float32)
+        a, b = max(0, y0), min(y.shape[1], y0 + g1 - g0)
+        if b > a:
+            piece[:, a - y0:b - y0] = y[:, a:b]
+        w = np.ones(g1 - g0, np.float32)
+        m = min(2 * h, g1 - g0)
+        if k > 0:
+            w[:m] = np.linspace(0, 1, 2 * h, dtype=np.float32)[:m]
+        if k < last:
+            w[-m:] = np.linspace(1, 0, 2 * h, dtype=np.float32)[-m:]
+        out[:, g0:g1] += piece * w[None, :]
+    return out
+
+
+def _stretched_clip(p: Project, c, f: Path, tm, sr: int) -> np.ndarray | None:
+    """An audio clip with `bpm` (follows the tempo map) and/or `pitch` (semitones), fitted to its song span,
+    before gain and fades. Stretched audio is cached as cache/stretch-<key>.wav. None: nothing to play."""
+    import os
+    import uuid
+
+    import pedalboard
+    span = int(round((tm.sec(c.end) - tm.sec(c.start)) * sr))
+    if span <= 0:
+        return None
+    src_len, segs = _stretch_plan(c, tm, sr)
+    passthrough = not c.pitch and all(abs(x - 1.0) < 1e-12 for _, x in segs)
+
+    def fit(y: np.ndarray) -> np.ndarray:
+        if y.shape[1] < span:
+            y = np.pad(y, ((0, 0), (0, span - y.shape[1])))
+        return np.ascontiguousarray(y[:, :span], dtype=np.float32)
+
+    st = f.stat()
+    key = hashlib.sha1(json.dumps({"file": str(f.resolve()), "mtime": st.st_mtime_ns, "size": st.st_size,
+                                   "offset": c.offset, "src": src_len, "bpm": c.bpm, "pitch": c.pitch, "sr": sr,
+                                   "segs": segs, "span": span, "pedalboard": pedalboard.__version__, "v": 1},
+                                  sort_keys=True).encode()).hexdigest()[:20]
+    out = p.root / "cache" / f"stretch-{key}.wav"
+    if not passthrough and out.exists():
+        try:
+            return fit(sf.read(str(out), dtype="float32", always_2d=True)[0].T)
+        except (OSError, RuntimeError):
+            pass  # half-written or locked: stretch again
+    data = _read(f, sr)
+    a = int(round(c.offset * sr))
+    if a >= data.shape[1]:
+        return None
+    src = data[:, a:a + src_len]
+    if src.shape[1] < src_len:
+        src = np.pad(src, ((0, 0), (0, src_len - src.shape[1])))
+    if passthrough:
+        return fit(src.copy())
+    y = fit(_time_stretch(src, sr, segs, c.pitch))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_name(f"{out.stem}.{os.getpid()}-{uuid.uuid4().hex[:8]}.part.wav")
+    try:
+        sf.write(str(part), y.T, sr, subtype="FLOAT")
+        part.replace(out)
+    except OSError:
+        part.unlink(missing_ok=True)  # another process won the race; its file is the same audio
+    return y
 
 
 def _env(points: list[list[float]], p: Project, n: int, default: float) -> np.ndarray | float:
@@ -343,16 +528,29 @@ class Renderer:
         self.failed: set[str] = set()
         self.backend = backend or offline_backend()
         self.by = None  # what rendered it, in every engine cache key (None: the worker, keys as they always were)
+        # SFZ instruments play in the engine (sfizz) when it is built with it; else TuneTrack's own SFZ player
+        # renders them in the worker and the engine plays that as a stem
+        self.sfz_in_engine = False
         if self.backend == "engine":
-            from .live import engine_stamp
+            from .live import engine_plays_sfz, engine_stamp
             self.by = engine_stamp()
+            self.sfz_in_engine = engine_plays_sfz()
         self._fx_eng = None  # the engine bus and master chains render in, kept for one run() or export()
+
+    def _worker_only(self, spec: dict) -> bool:
+        """A job the worker renders whoever renders the rest: an SFZ instrument with no inserts, when the engine
+        does not play SFZ itself (TuneTrack's own SFZ player; the engine plays the result as a stem)."""
+        return _is_sfz(spec) and not spec.get("fx") and not self.sfz_in_engine
 
     def key(self, spec: dict) -> str:
         """The cache key of a render spec. The engine's renders are kept apart from the worker's (a voice or a
-        sample may differ), and from those of another engine build."""
-        if self.by and not _worker_only(spec):
-            return _fingerprint({**spec, "rendered_by": self.by})
+        sample may differ), from those of another engine build, and SFZ played by sfizz from SFZ played by
+        TuneTrack's own player."""
+        if self.by and not self._worker_only(spec):
+            by = {"rendered_by": self.by}
+            if self.sfz_in_engine and _is_sfz(spec):
+                by["sfz_player"] = "sfizz"
+            return _fingerprint({**spec, **by})
         return _fingerprint(spec)
 
     def close(self) -> None:
@@ -414,7 +612,7 @@ class Renderer:
             with _cache_entry(out) as part:
                 if part is None:  # another process (a second agent's take, the editor) rendered it while we waited
                     info["cached"] = True
-                elif self.backend == "engine" and not _worker_only(spec):
+                elif self.backend == "engine" and not self._worker_only(spec):
                     res = self._engine_tracks([(t, spec, part)])
                     got = res["tracks"][t.id]
                     if got.get("error"):
@@ -483,19 +681,19 @@ class Renderer:
         jobs = {t.id: (t, spec, part) for t, spec, part in batch}
         strips: dict[str, dict] = {}
 
-        # what the worker renders goes first and in parallel, as it always did: SFZ tracks without inserts
-        # (finished here) and the dry SFZ stems the engine plays under the inserts of the others
+        # when the engine does not play SFZ itself, what the worker renders goes first and in parallel: SFZ tracks
+        # without inserts (finished here) and the dry SFZ stems the engine plays under the inserts of the others
         def worker_side(tid: str) -> None:
             t, spec, part = jobs[tid]
             try:
-                if _worker_only(spec):
+                if self._worker_only(spec):
                     out["tracks"][tid] = self._worker_track(t, spec, self.key(spec), part)
                 else:
                     self.render_track(t, {**spec, "fx": []})
             except Exception as e:  # noqa: BLE001
                 out["tracks"][tid] = {"error": str(e)}
 
-        sfz = [tid for tid, (_t, spec, _p) in jobs.items() if (spec.get("instrument") or {}).get("type") == "sfz"]
+        sfz = [] if self.sfz_in_engine else [tid for tid, (_t, spec, _p) in jobs.items() if _is_sfz(spec)]
         if sfz:
             with ThreadPoolExecutor(max_workers=max(1, int(config.load_config().get("render_workers", 4)))) as ex:
                 list(ex.map(worker_side, sfz))
@@ -537,8 +735,11 @@ class Renderer:
         for tid in strips:
             groups.setdefault(find(tid), []).append(tid)
         workers = max(1, min(int(config.load_config().get("render_workers", 4)), len(groups)))
+        # each engine computes its strips side by side too: the cores are shared out between the engines
+        self._engine_threads = engine_threads(workers)
         loads: list[list[str]] = [[] for _ in range(workers)]
-        weight = lambda ids: sum(3 if strips[i]["source"].get("type") == "vst3" else 1 for i in ids)  # noqa: E731
+        cost = {"vst3": 3, "sfz": 2}
+        weight = lambda ids: sum(cost.get(strips[i]["source"].get("type"), 1) for i in ids)  # noqa: E731
         for ids in sorted(groups.values(), key=weight, reverse=True):
             min(loads, key=weight).extend(ids)
 
@@ -587,7 +788,8 @@ class Renderer:
         seen = 0
         try:
             if own:
-                eng = live.Engine(no_device=True, per_sample=live.synth_per_sample())
+                eng = live.Engine(no_device=True, per_sample=live.synth_per_sample(),
+                                  threads=getattr(self, "_engine_threads", None))
             seen = len(eng.late_warnings)
             loaded = eng.load_spec(spec, path)
             res = eng.render(None, self.n, taps={k: str(v) for k, v in taps.items()})
@@ -635,7 +837,8 @@ class Renderer:
             elif not any(s["id"] == kid for s in strips):
                 strips.append({"id": kid, "name": kid, "kind": "audio", "source": {"type": "stem", "file": f}, "fx": []})
         if self._fx_eng is None or not self._fx_eng.alive():
-            self._fx_eng = live.Engine(no_device=True, per_sample=live.synth_per_sample())
+            # one chain at a time, in order: nothing to share out
+            self._fx_eng = live.Engine(no_device=True, per_sample=live.synth_per_sample(), threads=1)
         try:
             res = self._engine_render(self._engine_spec(strips), {"in": part}, {"in": owner}, self._fx_eng)
         finally:
@@ -995,6 +1198,16 @@ class Renderer:
                 rep["warnings"].append("loop: " + seam["warning"])
         self.final = mix
         return rep
+
+
+def engine_threads(engines: int) -> int:
+    """Threads for each of `engines` engines rendering at once: the machine's cores shared out between them
+    (`engine_threads` in the library config overrides)."""
+    import os
+    set_ = int(config.load_config().get("engine_threads", 0) or 0)
+    if set_ > 0:
+        return set_
+    return max(1, min(8, (os.cpu_count() or 2) // max(1, engines)))
 
 
 def sidechain_links(p: Project) -> list[tuple[str, Device, str]]:

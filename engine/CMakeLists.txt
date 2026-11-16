@@ -18,9 +18,11 @@ juce_add_console_app(tunetrack-engine
 
 target_sources(tunetrack-engine PRIVATE
     src/Main.cpp
+    src/Lanes.cpp
     src/Session.cpp
     src/FaustNodes.cpp
-    src/Params.cpp)
+    src/Params.cpp
+    src/SfzNode.cpp)
 
 target_include_directories(tunetrack-engine PRIVATE src gen third_party/faust)
 
@@ -42,6 +44,9 @@ if(MSVC)
     target_link_options(tunetrack-engine PRIVATE /DEBUG /OPT:REF /OPT:ICF)
     target_link_libraries(tunetrack-engine PRIVATE dbghelp)
 endif()
+
+include(cmake/Sfizz.cmake)
+tt_add_sfizz(tunetrack-engine)
 
 target_link_libraries(tunetrack-engine
     PRIVATE

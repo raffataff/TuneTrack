@@ -176,7 +176,11 @@ def test_engine_renders_are_cached_apart_from_the_workers(proj):
     spec = a.track_spec(t)
     assert a.key(spec) != b.key(spec) and b.key(spec) == engine._fingerprint(spec)
     sfz = {**spec, "instrument": {"type": "sfz", "path": "x.sfz"}, "fx": []}
-    assert a.key(sfz) == b.key(sfz)  # the worker renders SFZ either way: one cache file for both
+    if a.sfz_in_engine:  # sfizz plays it in the engine, TuneTrack's own player in the worker
+        assert a.key(sfz) != b.key(sfz)
+        a.sfz_in_engine = False
+        assert a.key({**sfz, "fx": spec["fx"]}) != engine.Renderer(proj, backend="engine").key({**sfz, "fx": spec["fx"]})
+    assert a.key(sfz) == b.key(sfz)  # without sfizz the worker renders SFZ either way: one cache file for both
 
 
 @ENGINE_RUNS
@@ -287,3 +291,259 @@ def test_synth_releases_ring_out_unless_per_sample_is_asked_for(tmp_path, monkey
         tails[on] = float(np.abs(audio[:, int(0.6 * sr):int(0.75 * sr)]).max())
     assert tails[False] > 1e-3, tails
     assert tails[True] < 1e-6, tails
+
+
+@ENGINE_RUNS
+def test_strips_computed_side_by_side_sound_the_same_as_on_one_thread(proj, tmp_path):
+    """Source strips that no insert keys into are computed in lanes, on several threads at once; a strip whose
+    insert listens to another stays in the session's graph. Either way every tap and the master come out the same,
+    whatever the number of threads, and the mix still matches the offline renderer."""
+    import soundfile as sf
+    for i, line in enumerate(["D5:e F5 A5 D6 C6 A5 F5 E5 | D5:q A4 D5:h", "A3:h C4 | D4:w", "F2:q F2 C3 F2 | D2:w"]):
+        api.track_add(f"Pluck {i}", "synth:pluck")
+        api.write(f"Pluck {i}", line)
+    api.fx_add("Pluck 1", {"type": "builtin", "name": "compressor", "params": DUCK}, sidechain="Kick")
+    p = api.load()
+    spec, warnings = live.build_spec(p)
+    assert not warnings
+    n = spec["end"]
+    taps = {t["id"]: t["name"] for t in spec["tracks"] if t["source"]}
+    got = {}
+    for threads in (1, 4):
+        eng = live.Engine(no_device=True, per_sample=True, threads=threads)
+        try:
+            res = eng.load_spec(spec, tmp_path / "spec.json")
+            assert res["threads"] == threads and not res["warnings"]
+            assert res["lanes"] == len(taps) - 1  # Pluck 1 listens to the kick
+            out = eng.render(tmp_path / f"master{threads}.wav", n, retries=0,
+                             taps={tid: str(tmp_path / f"{tid}-{threads}.wav") for tid in taps})
+            assert not out.get("silent"), out
+        finally:
+            eng.close()
+        got[threads] = {k: sf.read(str(tmp_path / f"{k}-{threads}.wav"), dtype="float32")[0] for k in taps}
+        got[threads]["master"] = sf.read(str(tmp_path / f"master{threads}.wav"), dtype="float32")[0]
+    for k in got[1]:
+        assert np.abs(got[1][k]).max() > 1e-3, k
+        assert np.array_equal(got[1][k], got[4][k]), k
+    ref = engine.Renderer(p, backend="dawdreamer")
+    ref.run()
+    assert live.compare(ref.master, got[4]["master"].T, ref.sr)["residual_db"] < -60
+
+
+def _tone_spec(path: Path, sr: int, hz: float, seconds: float) -> dict:
+    import soundfile as sf
+    t = np.arange(int(sr * seconds)) / sr
+    sf.write(str(path), np.stack([0.3 * np.sin(2 * np.pi * hz * t)] * 2, axis=1).astype(np.float32), sr)
+    return {"sr": sr, "block": 512, "ts": [4, 4], "end": len(t), "tempo": [[0, 0.0, 120.0]], "loop": None,
+            "tracks": [{"id": "t1", "name": "Tone", "kind": "audio", "on": True, "out": "master", "sends": [],
+                        "db": 0.0, "pan": 0.0, "vol_auto": [], "pan_auto": [], "fx": [],
+                        "source": {"type": "stem", "file": str(path)}}],
+            "master": {"db": 0.0, "fx": []}}
+
+
+@ENGINE_RUNS
+@pytest.mark.parametrize("project_sr, device_sr", [(48000, 44100), (44100, 48000)])
+def test_a_device_at_another_rate_hears_the_project_at_its_own_pitch(tmp_path, project_sr, device_sr):
+    """The session runs at the project's rate; a device that cannot is fed through a converter. Pulled through the
+    device path without a device: a 1 kHz tone stays 1 kHz at the device's rate, clean, at its level."""
+    import soundfile as sf
+    eng = live.Engine(no_device=True)
+    try:
+        eng.load_spec(_tone_spec(tmp_path / "tone.wav", project_sr, 1000.0, 2.0), tmp_path / "spec.json")
+        eng.call("pull", device_sr=device_sr, block=441 if device_sr == 44100 else 480, length=device_sr,
+                 out=str(tmp_path / "heard.wav"))
+    finally:
+        eng.close()
+    heard, sr = sf.read(str(tmp_path / "heard.wav"), dtype="float64")
+    assert sr == device_sr and len(heard) == device_sr
+    x = heard[device_sr // 10:, 0]  # past the converter's start
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x)))) ** 2
+    freqs = np.fft.rfftfreq(len(x), 1 / device_sr)
+    assert abs(freqs[np.argmax(spec)] - 1000.0) < 2.0
+    near = spec[np.abs(freqs - 1000.0) < 30].sum()
+    assert 10 * np.log10(spec.sum() - near + 1e-30) - 10 * np.log10(near) < -70  # no clicks, no aliasing
+    assert np.sqrt(np.mean(x ** 2)) == pytest.approx(0.3 / np.sqrt(2), rel=0.002)
+
+
+@ENGINE_RUNS
+def test_going_down_a_rate_does_not_fold_what_the_device_cannot_play(tmp_path):
+    """A 96 kHz project on a 48 kHz device: a 30 kHz tone would fold back to 18 kHz; it is filtered out first."""
+    import soundfile as sf
+    eng = live.Engine(no_device=True)
+    try:
+        eng.load_spec(_tone_spec(tmp_path / "tone.wav", 96000, 30000.0, 1.0), tmp_path / "spec.json")
+        eng.call("pull", device_sr=48000, block=480, length=24000, out=str(tmp_path / "heard.wav"))
+    finally:
+        eng.close()
+    heard, _ = sf.read(str(tmp_path / "heard.wav"), dtype="float64")
+    assert 20 * np.log10(np.abs(heard[4800:]).max() / 0.3) < -60
+
+
+SFIZZ = pytest.mark.skipif(not live.engine_plays_sfz(), reason="the engine is built without sfizz (engine/README.md)")
+
+
+def _sfz(folder: Path, round_robin: bool = False) -> Path:
+    """A one-sample SFZ instrument (a decaying 440 Hz tone at A4, stereo), or with round_robin a second sample at
+    660 Hz that sfizz picks at random (lorand/hirand) half of the time."""
+    import soundfile as sf
+    sr = 48000
+    t = np.arange(int(sr * 1.5)) / sr
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, hz in (("a.wav", 440.0), ("b.wav", 660.0)):
+        x = 0.4 * np.sin(2 * np.pi * hz * t) * np.exp(-1.5 * t)
+        sf.write(str(folder / name), np.stack([x, x], axis=1).astype(np.float32), sr)
+    body = ("<group> pitch_keycenter=69 ampeg_release=0.05\n<region> sample=a.wav lorand=0 hirand=0.5\n"
+            "<region> sample=b.wav lorand=0.5 hirand=1\n") if round_robin else \
+        "<region> sample=a.wav pitch_keycenter=69 ampeg_release=0.05\n"
+    path = folder / ("rr.sfz" if round_robin else "tone.sfz")
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _peak_hz(x: np.ndarray, sr: int) -> float:
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
+    return float(np.fft.rfftfreq(len(x), 1 / sr)[np.argmax(spec)])
+
+
+@ENGINE_RUNS
+@SFIZZ
+def test_sfizz_plays_an_sfz_track_in_the_engine_in_tune_and_at_the_players_level(tmp_path, monkeypatch):
+    """With sfizz built in, an SFZ track is an instrument of the engine (no stem). Against TuneTrack's own SFZ
+    player (the worker): every note at the same pitch and level (the same velocity curve). `sfz_player:
+    "tunetrack"` brings the stem back."""
+    from tunetrack import config
+    api.project_new("Sampler", folder=str(tmp_path / "song"), tempo=120)
+    api.track_add("Keys", f"sfz:{_sfz(tmp_path / 'inst')}")
+    api.write("Keys", "A4:q!f E5 A3:h | r:w")  # 0, 0.5, 1 s; the A3 plays the sample an octave down
+    p = api.load()
+    spec, warnings = live.build_spec(p)
+    assert not warnings and spec["tracks"][0]["source"]["type"] == "sfz"
+    got = engine.Renderer(p, backend="engine")
+    rep = got.run()
+    assert not rep["warnings"], rep["warnings"]
+    ref = engine.Renderer(p, backend="dawdreamer")
+    ref.run()
+    tid, sr = p.tracks[0].id, p.sample_rate
+    a, b = got.pre[tid][0], ref.pre[tid][0]
+    for start, hz in ((0.0, 440.0), (0.5, 659.26), (1.0, 220.0)):
+        x, y = a[int((start + 0.05) * sr):int((start + 0.45) * sr)], b[int((start + 0.05) * sr):int((start + 0.45) * sr)]
+        assert abs(_peak_hz(x, sr) - hz) < 3 and abs(_peak_hz(y, sr) - hz) < 3, start
+        level = 20 * np.log10(np.sqrt(np.mean(x ** 2)) / np.sqrt(np.mean(y ** 2)))
+        assert abs(level) < 0.5, (start, level)
+    real = config.load_config
+    monkeypatch.setattr(config, "load_config", lambda: {**real(), "sfz_player": "tunetrack"})
+    assert live.build_spec(api.load())[0]["tracks"][0]["source"]["type"] == "stem"
+
+
+@ENGINE_RUNS
+@SFIZZ
+def test_an_sfz_tracks_round_robins_depend_on_nothing_but_its_own_notes(tmp_path):
+    """sfizz draws random round robins from one generator per process; the engine gives every SFZ instrument its
+    own. A track comes out bit for bit the same alone or beside another SFZ track, on one thread or four, and on a
+    second render in the same engine; and both of its samples are heard."""
+    import soundfile as sf
+    sr, n = 48000, 48000 * 5
+    path = str(_sfz(tmp_path / "inst", round_robin=True))
+    strip = {"kind": "midi", "on": False, "out": "master", "sends": [], "db": 0.0, "pan": 0.0, "vol_auto": [],
+             "pan_auto": [], "fx": []}
+
+    def notes(step: float) -> list[int]:
+        ev = []
+        for i in range(int(4.5 / step)):
+            ev += [int(i * step * sr), 0x90, 69, 100, int((i * step + step * 0.8) * sr), 0x80, 69, 0]
+        return ev
+
+    tracks = [{**strip, "id": "one", "name": "One", "source": {"type": "sfz", "path": path, "events": notes(0.25)}},
+              {**strip, "id": "two", "name": "Two", "source": {"type": "sfz", "path": path, "events": notes(0.15)}}]
+    got = []
+    for threads, which in ((1, tracks), (4, tracks), (1, tracks[:1])):
+        spec = {"sr": sr, "block": 512, "ts": [4, 4], "end": n, "tempo": [[0, 0.0, 120.0]], "loop": None,
+                "tracks": which, "master": {"db": 0.0, "fx": []}}
+        eng = live.Engine(no_device=True, threads=threads)
+        try:
+            res = eng.load_spec(spec, tmp_path / "spec.json")
+            assert not res["warnings"], res["warnings"]
+            for k in range(2 if threads == 4 else 1):
+                eng.render(None, n, retries=0, taps={"one": str(tmp_path / f"one-{len(got)}.wav")})
+                got.append(sf.read(str(tmp_path / f"one-{len(got)}.wav"), dtype="float32")[0])
+        finally:
+            eng.close()
+    for g in got[1:]:
+        assert np.array_equal(got[0], g)
+    picks = {round(_peak_hz(got[0][int((i * 0.25 + 0.02) * sr):int((i * 0.25 + 0.18) * sr), 0], sr) / 220)
+             for i in range(18)}
+    assert picks == {2, 3}, picks  # 440 Hz and 660 Hz notes
+
+
+@ENGINE_RUNS
+@SFIZZ
+def test_an_sfz_note_plays_past_its_preloaded_start_offline(tmp_path):
+    """sfizz keeps the first 8192 frames of each sample in memory and streams the rest. Offline the render runs far
+    faster than the stream, so each block must wait for what its notes asked for (freewheeling); else a held note
+    drops out 0.17 s in until the stream catches up, differently on every render."""
+    import soundfile as sf
+    sr, n = 48000, 48000 * 4
+    t = np.arange(sr * 20) / sr
+    (tmp_path / "inst").mkdir()
+    sf.write(str(tmp_path / "inst" / "long.wav"), np.stack([0.3 * np.sin(2 * np.pi * 440 * t)] * 2, axis=1)
+             .astype(np.float32), sr, subtype="FLOAT")
+    (tmp_path / "inst" / "long.sfz").write_text("<region> sample=long.wav pitch_keycenter=69\n", encoding="utf-8")
+    strip = {"kind": "midi", "on": False, "out": "master", "sends": [], "db": 0.0, "pan": 0.0, "vol_auto": [],
+             "pan_auto": [], "fx": []}
+    spec = {"sr": sr, "block": 512, "ts": [4, 4], "end": n, "tempo": [[0, 0.0, 120.0]], "loop": None,
+            "tracks": [{**strip, "id": "t", "name": "Long", "source": {
+                "type": "sfz", "path": str(tmp_path / "inst" / "long.sfz"), "events": [0, 0x90, 69, 127, 3 * sr, 0x80, 69, 0]}}],
+            "master": {"db": 0.0, "fx": []}}
+    eng = live.Engine(no_device=True)
+    try:
+        eng.load_spec(spec, tmp_path / "spec.json")
+        eng.render(None, n, retries=0, taps={"t": str(tmp_path / "t.wav")})
+    finally:
+        eng.close()
+    x = sf.read(str(tmp_path / "t.wav"), dtype="float64")[0][:, 0]
+    win = sr // 20
+    rms = np.sqrt(np.mean(x[int(0.05 * sr):int(2.95 * sr)][: (int(2.9 * sr) // win) * win].reshape(-1, win) ** 2, axis=1))
+    assert rms.min() > 0.9 * rms.max(), (rms.min(), rms.max())  # no drop-out anywhere in the held note
+    assert rms.max() == pytest.approx(0.3 / np.sqrt(2), rel=0.01)
+
+
+NOVA = Path(r"C:\Program Files\Common Files\VST3\TDR Nova.vst3")
+
+
+@ENGINE_RUNS
+@pytest.mark.skipif(not NOVA.exists(), reason="TDR Nova (an effect with a mono sidechain input)")
+def test_a_mono_sidechain_input_hears_both_sides_of_its_key(tmp_path):
+    """TDR Nova's key input is one channel. It hears (L + R) / 2 of a stereo key, as the offline worker feeds it:
+    a key on the right side only ducks exactly as the same key at half the level on both sides does."""
+    import soundfile as sf
+    sr, n = 48000, 48000 * 2
+    t = np.arange(n) / sr
+    tone = np.stack([0.3 * np.sin(2 * np.pi * 220 * t)] * 2, axis=1).astype(np.float32)
+    burst = (0.8 * np.sin(2 * np.pi * 90 * t) * ((t % 0.5) < 0.25)).astype(np.float32)
+    sf.write(str(tmp_path / "tone.wav"), tone, sr)
+    zero = np.zeros_like(burst)
+    keys = {"right": np.stack([zero, burst], axis=1), "both": np.stack([burst / 2, burst / 2], axis=1),
+            "none": np.stack([zero, zero], axis=1)}
+    nova = {"type": "vst3", "path": str(NOVA), "shell": None, "state": None, "name": "TDR Nova", "key": "k",
+            "params": {"Wide Band Dyn": "On", "Wide Band Threshold": "-40", "Sidechain Mode": 0.5}}
+    strip = {"on": True, "out": "master", "sends": [], "db": 0.0, "pan": 0.0, "vol_auto": [], "pan_auto": []}
+    out = {}
+    eng = live.Engine(no_device=True)
+    try:
+        for name, key in keys.items():
+            sf.write(str(tmp_path / f"key-{name}.wav"), key.astype(np.float32), sr)
+            spec = {"sr": sr, "block": 512, "ts": [4, 4], "end": n, "tempo": [[0, 0.0, 120.0]], "loop": None,
+                    "tracks": [{**strip, "id": "t", "name": "Tone", "kind": "audio", "fx": [nova],
+                                "source": {"type": "stem", "file": str(tmp_path / "tone.wav")}},
+                               {**strip, "id": "k", "name": "Key", "kind": "audio", "fx": [], "on": False,
+                                "source": {"type": "stem", "file": str(tmp_path / f"key-{name}.wav")}}],
+                    "master": {"db": 0.0, "fx": []}}
+            res = eng.load_spec(spec, tmp_path / "spec.json")
+            assert not res["warnings"], res["warnings"]
+            eng.render(None, n, retries=0, taps={"t": str(tmp_path / f"t-{name}.wav")})
+            out[name] = sf.read(str(tmp_path / f"t-{name}.wav"), dtype="float64")[0]
+    finally:
+        eng.close()
+    level = {k: float(np.sqrt(np.mean(v[sr // 2:] ** 2))) for k, v in out.items()}
+    assert level["right"] < level["none"] * 0.9, level  # the key on the right is heard: Nova ducks
+    assert live.compare(out["both"].T, out["right"].T, sr)["residual_db"] < -60, level

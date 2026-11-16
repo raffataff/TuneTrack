@@ -334,9 +334,12 @@ def fx_remove(track: str, index: int, project: str | None = None) -> dict:
 
 @tool
 def automation(track: str, param: str = "volume_db", points: list | None = None, clear: bool = False,
-               project: str | None = None) -> dict:
-    """Track volume_db or pan automation: points [["1:1", -20], ["5:1", -6]] (linear ramps). clear=True resets."""
-    return api.automation(track, param, points, clear, project)
+               project: str | None = None, device: Any = None) -> dict:
+    """Automation: points [["1:1", -20], ["5:1", -6]] (linear ramps). clear=True resets. Without device: the
+    fader's volume_db or pan. device=<effect index> (track="master" for master effects) or "instrument": param is
+    that device's setting, e.g. cutoff on builtin:filter, mix on a reverb; a VST3 takes 0..1 or its shown text
+    ("2 kHz"). An automated setting ignores its static value."""
+    return api.automation(track, param, points, clear, project, device)
 
 
 # ---- notes -----------------------------------------------------------------------------------------------------
@@ -434,10 +437,12 @@ def notes_edit(track: str, op: str, start: Any = None, end: Any = None, low: Any
 
 @tool
 def clip_edit(clip: str, op: str, to: Any = None, track: str | None = None, times: int = 1, length: Any = None,
-              at: Any = None, name: str | None = None, project: str | None = None) -> dict:
+              at: Any = None, name: str | None = None, bpm: float | None = None, pitch: float | None = None,
+              project: str | None = None) -> dict:
     """Clip ops: move(to[, track]) copy(to[, track]) duplicate(times) resize(length) split(at) delete
-    rename(name) mute unmute."""
-    return api.clip_edit(clip, op, project, to, track, times, length, at, name)
+    rename(name) mute unmute stretch(bpm, pitch) - audio: bpm = its own tempo, follows the song's (0 = off);
+    pitch = semitones."""
+    return api.clip_edit(clip, op, project, to, track, times, length, at, name, bpm, pitch)
 
 
 @tool
@@ -453,9 +458,11 @@ def arrange(op: str, start: Any, end: Any, to: Any = None, tracks: list[str] | N
 
 @tool
 def audio_import(track: str, file: str, at: Any = 0, gain_db: float = 0.0, fade_in: float = 0.0,
-                 fade_out: float = 0.0, project: str | None = None) -> dict:
-    """Place an audio file (wav/flac/ogg/aiff) on an audio track; it's copied into the project."""
-    return api.audio_import(track, file, at, project, True, gain_db, fade_in, fade_out)
+                 fade_out: float = 0.0, bpm: float | None = None, pitch: float = 0.0,
+                 project: str | None = None) -> dict:
+    """Place an audio file (wav/flac/ogg/aiff) on an audio track; it's copied into the project.
+    bpm: its own tempo, so it follows the song's; pitch: semitones."""
+    return api.audio_import(track, file, at, project, True, gain_db, fade_in, fade_out, bpm, pitch)
 
 
 @tool

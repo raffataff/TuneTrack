@@ -4,10 +4,11 @@
 // through the audio interface or renders it faster than real time. The Python side drives it with one JSON
 // command per line on stdin; replies and events come back on stdout as lines starting with "@@ ".
 //
-//   tunetrack-engine [--no-device] [--device <name part>] [--per-sample]
-//   tunetrack-engine --render <spec.json> <out.wav> [--per-sample]
+//   tunetrack-engine [--no-device] [--device <name part>] [--per-sample] [--threads <n>]
+//   tunetrack-engine --render <spec.json> <out.wav> [--per-sample] [--threads <n>]
 //   tunetrack-engine --devices
 //   tunetrack-engine --describe <plugin.vst3> <out.xml>   (used by the engine itself)
+#include "Resampler.h"
 #include "Session.h"
 
 #include <iostream>
@@ -191,7 +192,9 @@ public:
         if (auto* d = deviceManager.getCurrentAudioDevice())
             return object ({ { "type", d->getTypeName() }, { "name", d->getName() }, { "sr", d->getCurrentSampleRate() },
                              { "block", d->getCurrentBufferSizeSamples() },
-                             { "out_latency", d->getOutputLatencyInSamples() } });
+                             { "out_latency", d->getOutputLatencyInSamples() },
+                             { "rate", transport.sampleRate },           // the session's; converted when it differs
+                             { "converted", ratio != 1.0 } });
         return object ({});
     }
 
@@ -217,6 +220,7 @@ public:
             juce::AudioBuffer<float> view (chans, 2, chunk);
             view.clear();
             midi.clear();
+            session.runLanes (chunk);
             session.graph.processBlock (view, midi);
             if (playing)
             {
@@ -232,24 +236,77 @@ public:
         transport.pos.store (pos);
     }
 
+    // ---- sample-rate conversion ----
+    // The session always runs at the project's rate, so what is heard is what offline renders measure. A device
+    // that cannot run at that rate (Windows Audio in shared mode runs at the system mixer's) is fed through a
+    // converter (Resampler.h): the session is computed in its own blocks into a FIFO, and each device block takes
+    // what it needs from there.
+    void setUpConversion (double devRate, int devBlock)
+    {
+        deviceRate = devRate;
+        ratio = devRate > 0.0 ? transport.sampleRate / devRate : 1.0;  // project samples per device sample
+        if (std::abs (ratio - 1.0) < 1.0e-9)
+            ratio = 1.0;
+        fifoCount = 0;
+        if (ratio == 1.0)
+            return;
+        resampler.setUp (ratio);
+        const int history = resampler.halfWidth();
+        fifo.setSize (2, 2 * history + (int) std::ceil (devBlock * ratio) + work.getNumSamples() + 16);
+        fifo.clear();
+        fifoCount = history;  // silence before the start, for the kernel to look back on
+        converted.setSize (2, devBlock);
+    }
+
+    // Device thread (or the `pull` test): the next n samples at the device's rate, into `converted`.
+    void pullConverted (int n)
+    {
+        while (fifoCount < resampler.needed (n))
+        {
+            const int k = juce::jmin (work.getNumSamples(), fifo.getNumSamples() - fifoCount);
+            if (k <= 0)
+            {
+                converted.clear();
+                return;
+            }
+            renderBlock (k);
+            for (int c = 0; c < 2; ++c)
+                fifo.copyFrom (c, fifoCount, work, c, 0, k);
+            fifoCount += k;
+        }
+        for (int c = 0; c < 2; ++c)
+            resampler.process (fifo.getReadPointer (c), converted.getWritePointer (c), n);
+        const int drop = juce::jlimit (0, fifoCount, resampler.advance (n));
+        for (int c = 0; c < 2; ++c)
+        {
+            float* d = fifo.getWritePointer (c);
+            std::memmove (d, d + drop, sizeof (float) * (size_t) (fifoCount - drop));
+        }
+        fifoCount -= drop;
+    }
+
     void audioDeviceIOCallbackWithContext (const float* const*, int, float* const* out, int numOut, int n,
                                            const juce::AudioIODeviceCallbackContext&) override
     {
         const juce::ScopedNoDenormals noDenormals;
-        if (n > work.getNumSamples())
+        const auto& from = ratio == 1.0 ? work : converted;
+        if (n > from.getNumSamples())
         {
             for (int c = 0; c < numOut; ++c)
                 if (out[c] != nullptr)
                     juce::FloatVectorOperations::clear (out[c], n);
             return;
         }
-        renderBlock (n);
+        if (ratio == 1.0)
+            renderBlock (n);
+        else
+            pullConverted (n);
         for (int c = 0; c < numOut; ++c)
         {
             if (out[c] == nullptr)
                 continue;
             if (c < 2)
-                juce::FloatVectorOperations::clip (out[c], work.getReadPointer (c), -1.0f, 1.0f, n);  // safety only
+                juce::FloatVectorOperations::clip (out[c], from.getReadPointer (c), -1.0f, 1.0f, n);  // safety only
             else
                 juce::FloatVectorOperations::clear (out[c], n);
         }
@@ -257,12 +314,42 @@ public:
 
     void audioDeviceAboutToStart (juce::AudioIODevice* d) override
     {
-        const int block = juce::jmax (512, d->getCurrentBufferSizeSamples());
+        const double devRate = d->getCurrentSampleRate();
+        const int devBlock = d->getCurrentBufferSizeSamples();
+        const double rate = transport.sampleRate;  // the session runs at the project's rate, whatever the device's
+        const int block = juce::jmax (512, (int) std::ceil (devBlock * rate / juce::jmax (1.0, devRate)) + 1);
         work.setSize (2, block);
-        session.prepare (d->getCurrentSampleRate(), block, false);
+        session.prepare (rate, block, false);
+        setUpConversion (devRate, devBlock);
     }
 
     void audioDeviceStopped() override {}
+
+    // Message thread, on load: the session moves to the project's rate. The device is asked for it first; one that
+    // cannot run at it keeps its own rate and is converted to.
+    void matchRate (double rate)
+    {
+        transport.sampleRate = rate;
+        auto* d = deviceManager.getCurrentAudioDevice();
+        if (d == nullptr)
+        {
+            session.prepare (rate, session.blockSize, session.offline);
+            return;
+        }
+        if (d->getCurrentSampleRate() != rate && d->getAvailableSampleRates().contains (rate))
+        {
+            const auto before = deviceManager.getAudioDeviceSetup();
+            auto setup = before;
+            setup.sampleRate = rate;
+            // restarts the device; audioDeviceAboutToStart prepares the session at the new rate
+            if (deviceManager.setAudioDeviceSetup (setup, true).isEmpty() && deviceManager.getCurrentAudioDevice() != nullptr
+                && deviceManager.getCurrentAudioDevice()->getCurrentSampleRate() == rate)
+                return;
+            deviceManager.setAudioDeviceSetup (before, true);
+        }
+        deviceManager.removeAudioCallback (this);  // the restart prepares the session at the project's rate
+        deviceManager.addAudioCallback (this);
+    }
 
     // ---- offline render ----
     // The graph runs on this (message) thread while offline: the device stops calling it, and the session is
@@ -419,6 +506,8 @@ public:
                     return fail (cmd, "cannot read spec " + f.getFullPathName());
             }
             session.perSampleSynths = perSample || (bool) spec["per_sample"];
+            if (const double rate = spec["sr"].isVoid() ? 0.0 : (double) spec["sr"]; rate > 0.0 && rate != session.sampleRate)
+                matchRate (rate);  // before any device is made, so plugins start at the project's rate
             const auto res = session.apply (spec);
             beats.clear();
             if (auto* a = spec["tempo"].getArray())
@@ -431,9 +520,8 @@ public:
             if (session.settleRemainingMs() > 0)
                 juce::Timer::callAfterDelay (session.settleRemainingMs() + 20, [this] { settle(); });
             juce::DynamicObject::Ptr o = res.getDynamicObject();
-            if (auto* d = deviceManager.getCurrentAudioDevice(); d != nullptr && d->getCurrentSampleRate() != transport.sampleRate)
-                o->setProperty ("device_problem", "the audio device runs at " + juce::String (d->getCurrentSampleRate())
-                                                      + " Hz but the project is " + juce::String (transport.sampleRate) + " Hz");
+            if (deviceManager.getCurrentAudioDevice() != nullptr)
+                o->setProperty ("device", juce::var (deviceInfo().get()));
             return reply (cmd, o);
         }
         if (op == "play")
@@ -471,7 +559,52 @@ public:
             o->setProperty ("device", juce::var (deviceInfo().get()));
             o->setProperty ("latency", session.latency());
             o->setProperty ("settle_ms", session.settleRemainingMs());
+            o->setProperty ("threads", session.threads());
             return reply (cmd, o);
+        }
+        if (op == "pull")
+        {
+            // A check of the device path without a device: play from the start as a device at `device_sr` would
+            // hear it, `length` device samples in blocks of `block`, written to `out`.
+            if (deviceManager.getCurrentAudioDevice() != nullptr)
+                return fail (cmd, "pull runs without an audio device only");
+            const double devRate = (double) cmd["device_sr"];
+            const int devBlock = cmd["block"].isVoid() ? 480 : (int) cmd["block"];
+            const int64 total = (int64) (double) cmd["length"];
+            if (devRate <= 0.0 || devBlock <= 0 || total <= 0)
+                return fail (cmd, "pull needs device_sr, block and length");
+            const juce::ScopedNoDenormals noDenormals;
+            setUpConversion (devRate, devBlock);
+            juce::AudioBuffer<float> result (2, (int) total);
+            transport.seekRequest = 0;
+            transport.playing = true;
+            stopAtEnd = false;
+            for (int64 done = 0; done < total;)
+            {
+                const int most = ratio == 1.0 ? juce::jmin (devBlock, work.getNumSamples()) : devBlock;
+                const int k = (int) juce::jmin<int64> (most, total - done);
+                if (ratio == 1.0)
+                    renderBlock (k);
+                else
+                    pullConverted (k);
+                for (int c = 0; c < 2; ++c)
+                    result.copyFrom (c, (int) done, ratio == 1.0 ? work : converted, c, 0, k);
+                done += k;
+            }
+            transport.playing = false;
+            stopAtEnd = true;
+            setUpConversion (transport.sampleRate, devBlock);
+            const juce::File outFile (cmd["out"].toString());
+            outFile.deleteFile();
+            std::unique_ptr<juce::OutputStream> stream (outFile.createOutputStream().release());
+            juce::WavAudioFormat wav;
+            const auto options = juce::AudioFormatWriterOptions().withSampleRate (devRate).withNumChannels (2)
+                                     .withBitsPerSample (32).withSampleFormat (juce::AudioFormatWriterOptions::SampleFormat::floatingPoint);
+            auto writer = stream != nullptr ? wav.createWriterFor (stream, options) : nullptr;
+            if (writer == nullptr)
+                return fail (cmd, "cannot write " + outFile.getFullPathName());
+            writer->writeFromAudioSampleBuffer (result, 0, result.getNumSamples());
+            return reply (cmd, object ({ { "out", outFile.getFullPathName() } }));
         }
         if (op == "ticks")
         {
@@ -600,6 +733,10 @@ public:
     Session session;
     juce::AudioDeviceManager deviceManager;
     juce::AudioBuffer<float> work { 2, 512 };
+    double deviceRate = 0.0, ratio = 1.0;  // ratio: project samples per device sample (1 = no conversion)
+    Resampler resampler;
+    juce::AudioBuffer<float> fifo, converted;
+    int fifoCount = 0;
     juce::MidiBuffer midi;
     std::vector<TempoPt> beats;
     int64 pos = 0;
@@ -629,6 +766,12 @@ int main (int argc, char* argv[])
 
     auto* app = new tt::EngineApp();  // never destroyed: quit() ends the process
     app->perSample = args.contains ("--per-sample");
+    {
+        // threads that compute lanes, this one included; by default one per physical core but one, at most 8
+        const int t = args.indexOf ("--threads");
+        const int asked = t >= 0 && t + 1 < args.size() ? args[t + 1].getIntValue() : 0;
+        app->session.setThreads (asked > 0 ? asked : juce::jlimit (1, 8, juce::SystemStats::getNumPhysicalCpus() - 1));
+    }
 
     if (args.contains ("--devices"))
     {
@@ -674,12 +817,13 @@ int main (int argc, char* argv[])
         const auto err = app->openDevice (d >= 0 && d + 1 < args.size() ? args[d + 1] : juce::String(), 48000.0);
         auto ready = app->deviceInfo();
         ready->setProperty ("ev", "ready");
+        ready->setProperty ("sfz", tt::sfzAvailable());
         if (err.isNotEmpty())
             ready->setProperty ("device_problem", err);
         tt::EngineApp::send (juce::var (ready.get()));
     }
     else
-        tt::EngineApp::send (juce::var (tt::EngineApp::object ({ { "ev", "ready" } }).get()));
+        tt::EngineApp::send (juce::var (tt::EngineApp::object ({ { "ev", "ready" }, { "sfz", tt::sfzAvailable() } }).get()));
 
     std::thread ([app]
     {

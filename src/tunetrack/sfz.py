@@ -454,6 +454,20 @@ def _xfade_cc(r: Region, cc):
     return g
 
 
+_READS: dict[tuple, bool] = {}
+
+
+def reads_cc(path: str | Path, cc: int) -> bool:
+    """Whether any region of the instrument reads controller `cc` itself (an opcode such as amplitude_oncc7,
+    locc7, pan_smoothcc7). sfizz links CC7, CC10 and CC11 to volume, pan and expression only where it does not."""
+    p = Path(path)
+    k = (str(p), p.stat().st_mtime_ns if p.exists() else 0, cc)
+    if k not in _READS:
+        pat = re.compile(rf"cc{cc}(?!\d)")
+        _READS[k] = any(pat.search(name) for r in Instrument(p).regions for name in r.op)
+    return _READS[k]
+
+
 def describe(path: str | Path) -> dict:
     inst = Instrument(path)
     lo, hi = inst.key_range()
