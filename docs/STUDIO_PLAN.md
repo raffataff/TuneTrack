@@ -4,20 +4,15 @@ Read this first if you are picking up the studio work in a new session. It is se
 wants, what was decided and why, what exists, what is verified, what to build next, and what only the owner can
 unblock. Keep it current: when a stage lands or a decision changes, edit this file in the same change.
 
-Last updated: 2026-11-14. `studio-core` (stages 1 to 2c first cut) is merged to `main` (PR #4, 8c1ad6b).
-The work after it is on branch `desk-takes`, off `main` at 8c1ad6b: takes on the Desk, the Mix stopping rule, no
-pictures for launched agents, then (same day, after two live sessions) seat benches, Needs You answers that fit
-the situation, full-length talkback, reports and the crew scorecard, and the fixes those sessions showed; then (night) a
-third live session on the new briefs, takes that can no longer miss the session, a cap on repeat questions, and the
-chord track on the Desk. All of that is committed and pushed (676d974, `origin/desk-takes`; no PR open).
-**Uncommitted on `desk-takes` since then** (late night; the owner has not asked for a commit): the Mix console bench
-with working controls, the pass count a launched Mix agent is told with each render, `take_new` giving a launched
-agent the take already cut for it, the Desk sending the revision it read with edits that name a thing by its place,
-the live smoke for the Claude runner, and tool schemas listed without their labels. And from 2026-11-14, after the
-owner's first whole session on paid models (The Lonely Walk, section 5): **the usage cuts** (tool answers on one
-line, a short board for launched agents, the Producer started on an audition with the take in front of it, briefs
-that stop agents narrating, reporting and re-reading), the rest of the Mix console (add and remove effects and
-sends, routing), and the render report's `file_format`.
+Last updated: 2026-11-16. Everything up to the live engine is merged to `main`: `studio-core` (PR #4), then
+`desk-takes` (PR #5, 47e445a: takes on the Desk, benches, Needs You per situation, reports and scorecard, the usage
+cuts, the Mix console, per-seat craft text, the take fixes below, and stage 3's first cut), then a dependency bump
+(PR #6, d4ff438).
+**Uncommitted on branch `crew-usage`** (off `origin/main` at d4ff438; the owner has not asked for a commit): tools
+that point at a take treat the take's own session, named by name or path, as the take (a live Mix agent edited
+the session unheard that way), `listen()` for a bar range, a launched agent's MCP instructions cut to 300
+characters, takes handed in together heard in one Producer run, and the open tasks shown to the seats that add
+tasks.
 
 ---
 
@@ -111,10 +106,11 @@ On `main`, except what sections 5 and 6 mark `desk-takes`, which is uncommitted 
 |---|---|
 | `src/tunetrack/roles.py` | The nine seats; tool groups; `tools_for(seat)`. |
 | `src/tunetrack/studio.py` | The board, in `<session>/studio/state.json` + `events.jsonl`: seats and occupants, tasks with dependencies, messages (talkback), attention items (Needs You), activity log. `me()` / `seat_join()` say which seat a process speaks for (`TUNETRACK_SEAT`, else the user). |
-| `src/tunetrack/takes.py` | Takes in `<session>/takes/<id>/` (`project.json`, `base.json`, `take.json`); `merge()` (three-way), `changes()` (readable diff), `take_new / use / diff / sync / submit / accept / reject / discard`, and `take_pending()`: every take whose work is not in the session, with where it stands and whether anyone is dealing with it. |
+| `src/tunetrack/takes.py` | Takes in `<session>/takes/<id>/` (`project.json`, `base.json`, `take.json`); `merge()` (three-way), `changes()` (readable diff), `take_new / use / diff / sync / submit / accept / reject / discard`, `take_pending()`: every take whose work is not in the session, with where it stands and whether anyone is dealing with it, and `take_cleanup()`: deletes the folders of accepted and closed takes (the user only; lists unless told to delete). |
 | `src/tunetrack/crew/detect.py` | Finds Claude Code, Codex and Kilo CLIs and their models; cached in `library/agents.json`. |
 | `src/tunetrack/crew/runners.py` | Launches an agent CLI headless (`Launch` → `Run`), normalises its event stream. Runners: `claude`, `codex`, `kilo`, and `script` (a Python file standing in for a model, for tests). |
-| `src/tunetrack/crew/briefs.py` | What a launched agent is told: seat instructions, the Producer playbook, the sections of `skill/SKILL.md` that seat needs, and the task message. |
+| `src/tunetrack/crew/briefs.py` | What a launched agent is told: seat instructions, the Producer playbook, the Mix stopping rule, the seat's craft text, and the task message. |
+| `src/tunetrack/crew/craft.py` | How each seat does good work, written per seat (2026-11-14) instead of cut from `skill/SKILL.md`: the Composer gets melody, harmony and the notation; Mix gets levels, EQ engines, sidechain and loudness; and so on. A test keeps each text to the tools that seat has. Briefs went from 5,500-15,500 characters to 3,500-12,000 (Composer 14,700 to 6,100). |
 | `src/tunetrack/crew/floor.py` | The floor manager: `Floor(session).run()` starts agents on ready tasks, logs their activity, routes handed-in takes, handles failure. `kickoff(brief)` gives the Producer its first task. Holds the one-manager lock (`FloorBusy`, `managed()`), skips seats on hold, `stop()` / `stop_seat()` requeue without counting the attempt, and `_recover()` requeues tasks a dead manager left "working". |
 | `src/tunetrack/crew/host.py` | The crew hosted in a long-lived process (the editor's server): `crew_start(brief)`, `crew_stop()`, `crew_state()`, `seat_hold(seat)`. Runs `Floor.run(keep_alive=True)` in a thread per session. |
 | `src/tunetrack/bench.py` | `seat_bench(seat)`: a read-only snapshot of a seat's work (its take in progress, else its handed-in take, else the session) with what the take changed marked: notes added and removed, each mix value next to what it was, instruments, form, last render. What the seat's first workstation tab draws. The Mix console's controls edit through the Desk's own calls, not through this module. |
@@ -122,7 +118,7 @@ On `main`, except what sections 5 and 6 mark `desk-takes`, which is uncommitted 
 | `src/tunetrack/mcp_server.py` | 20 new tools (70 total; `report_write / report_list / report_read` for every seat, `take_discard` for the Producer). `apply_seat()` strips a seated agent's server down to its seat's tools; seated agents also get seat instructions. |
 | `src/tunetrack/server.py` | `/api/events` (server-sent events: project version + board activity, and with `?take=` the version of the take the Desk has open), board and crew functions callable from the editor (`STUDIO`), `board` and `crew` in `/api/state`, `studio_view()` for cheap redraws. A take on the Desk: `/api/state?take=tk3` and `/api/version?take=tk3`, a `take` field on `/api/call` that points the Desk's own calls at that take, and `take_cut()`. Stops hosted crews on exit. |
 | `src/tunetrack/web/` | The studio UI. `index.html` (one header, two rooms), `style.css` (the rack look; all drawn in CSS, no fonts or images fetched), `studio.js` (Studio room: rack, seat workstations, Needs You, monitor/talkback, A/B audition), `app.js` (Desk room: arrangement / piano roll / mixer, and the take bar that says whether the Desk is editing the session or a take). |
-| `src/tunetrack/cli.py` | `tunetrack crew detect / status / run [--brief] [--parallel] [--max-runs]`; `call` and `functions` now reach `studio` and `takes` too. |
+| `src/tunetrack/cli.py` | `tunetrack crew detect / status / run [--brief] [--parallel] [--max-runs]`; `tunetrack takes clean [--project] [--days N] [--yes]`; `call` and `functions` now reach `studio` and `takes` too. |
 | `src/tunetrack/model.py`, `engine.py`, `api.py` | Small changes, below. |
 
 Changes to existing code that are easy to miss:
@@ -231,6 +227,37 @@ Usage (2026-11-14; what a model reads is not written for people, see section 8):
 - `render()` reports `file_format` (format, sample rate, channels, bits), and `project_set`'s docstring says what
   `tail` is: the most a one-shot render runs past the end, cut sooner once the sound has died.
 - `api.track_update(output=...)` refuses a route that leads back into the track itself.
+
+Loose ends closed (2026-11-14, on `main`):
+
+- `floor._left_behind`: an open take whose task is over and whose seat is not at work. Empty, it is closed (as
+  before). With an agent's work in it, the floor hands it in for the seat once (`handed_in_by_floor` on the take),
+  saying the task was set done or cancelled, so it reaches the Producer or Needs You. A person's take is left alone.
+- `floor._undecided`: a Producer run that ends an audition without `take_accept` or `take_reject` is started once
+  more with a message saying so; a second undecided run closes the audition task and puts the take on Needs You.
+- Audition tickets on Needs You carry DISCARD as well as ACCEPT and RETURN (`attention_resolve` option `c`).
+- `takes.take_cleanup` / `tunetrack takes clean`: open and handed-in takes are never touched; ids are not reused.
+
+On `crew-usage` (2026-11-16, uncommitted):
+
+- `api._path`: when this process's tools point at a take, `project=` naming that take's own session (its folder
+  name, path or `project.json`) resolves to the take. `"session"` / `"."` still mean the session itself, and any
+  other project is not redirected. Seen live: a Mix agent passed `project="shop-loop"` on all 44 calls; every edit
+  went to the session, `take_sync` then emptied its take, it closed its own task (allowed: the take held nothing)
+  and the floor put the take away. Nobody heard the mix.
+- `listen(start=, end=, section=)`: sections, `bar_lufs` (with `bars` saying where it starts) and masking for that
+  range only; probe renders still cover the tracks asked for. With `section_bars`, `energy_arc` is left out.
+- `mcp_server.LAUNCHED`: a launched agent's MCP instructions are four lines (quality bar, positions, middle C).
+  The general workflow they replaced (3,000 characters) named tools most seats do not have, and the notation is in
+  the brief of each seat that writes notes.
+- `floor._more_auditions`: auditions ready at the same moment (seats that worked in parallel hand in together) are
+  heard in one Producer run, up to `AUDITIONS_PER_RUN` (5); the run's start event lists them under `also`. The
+  first take's diff comes as before, the others follow in the same message, and the Producer moves between them
+  with `take_use`. Each accept or return closes its own audition task; one left undecided goes the way of an
+  undecided audition (`_settle_also`), and a stop requeues them all uncounted. The Lonely Walk ran five auditions
+  back to back, each reading the brief, tools and session again.
+- `briefs._open_tasks`: the task message of a seat with `task_add` (Producer, Review) ends with the open tasks, one
+  line each (`- T3 mix queued after T2: <title>`, titles cut at 70), audition tasks left out.
 
 ### How a session flows
 
@@ -406,12 +433,32 @@ Verified:
   is no bus left, × removes it, OUT routes to a bus and back, a bus is not offered itself, × removes an effect and
   UNDO restores it, +FX on the master opens the picker and adds the effect, the take's change count follows. No
   console errors.
+- Live, 2026-11-14 (`cuts-check`, `kilo/kilo-auto/free`, the usage cuts, old craft slices; cut off when the app
+  restarted, 5 runs): answers 650 characters per call (1,262 before), an audition 3 steps and 44k tokens (10 and
+  202k), `studio_status` 630 characters. Steps per run not comparable: auto routing sent each run to another model.
+  It showed the Mix agent editing the session past its take (fixed on `crew-usage`, section 4).
+- Live, 2026-11-16 (`craft-check`, pinned to `kilo/nvidia/nemotron-3.5-super-vl:free`, the model of most of the
+  13 Nov baseline; craft text, lean MCP instructions, the path fix): 10 runs, 1,047 s, $0, 2.65M input tokens, as
+  the baseline. Like for like: the Composer's writing run 12 steps and 320k tokens (20 and 960k), an audition 3-5
+  steps and 60-98k (10 and 202k), Review one run of 4 steps and 57k (two runs, 421k), planning 175k (277k in two
+  runs). Mix 17 steps and 512k (14 and 436k), with 4 renders against its 3. No polling, no asks to the user, one
+  report. The savings went into duplicate tasks (about 1.4M tokens): see the table below. In a browser the same
+  day: an audition ticket's DISCARD closes the take without merging and the other ticket's ACCEPT still merges.
+
+- Live, 2026-11-16 (`dup-check`, same model and brief, with the open-task list and batched auditions): 10 runs,
+  1,264 s, 2.80M input tokens. No duplicate tasks: the Producer returned the first mix to Mix with a reason instead
+  of adding a second Mix task, the one task it added (shorten the bass tie at the seam) was new work, and Review's
+  two fix tasks covered problems no open task did. The cue went Composer, Mix (returned once), seam fix, Review
+  within the 10 runs, every take accepted or returned and none left open. Per run the model varies a lot on the
+  same task (the Composer took 12 steps in one session and 23 in the next).
 
 Not verified:
 
-- **The usage cuts have not been seen in a live session.** They have tests driven by stand-in agents; whether real
-  models keep to three-line summaries and stop filing reports is the first thing to read in the next session's
-  logs (`studio/logs/*.jsonl`; the measuring script is described in section 9).
+- Batched auditions on a live session: no two takes were handed in at the same moment in `dup-check`.
+- **The loop-seam figure drives extra work.** In both 2026-11-16 sessions an 8-bar loop's `edge_level_diff_db`
+  (7-8 dB, bar 8 into bar 1) set off a seam fix by the Composer, a returned mix and a Review task. Nobody has
+  listened to whether that jump is audible on a loop whose downbeat is simply louder than its last bar. Worth a
+  person's ears before agents spend more runs on it.
 - The fixes for takes that miss the session, the question cap and the put-away of empty takes have tests (some
   driven by stand-in agents) but have not been seen in a live session.
 - A person stepping into a take while its agent is at work (allowed; edits are serialised by the project lock,
@@ -463,6 +510,15 @@ What the two sessions of 2026-11-13 afternoon tripped over, and what was done (a
 | The Producer asked, was answered, re-checked everything and asked again: three runs on one accepted take. Review's waits for answers were counted as "tried 3 times without finishing" | Two questions per task, then only blockers; an answer resets the task's attempts; the restarted run is told the answer is settled. |
 | Found by a flaky test: two seats on one model that ran dry at the same moment each raised their own ticket | One lock around look-then-raise. |
 
+What the short sessions of 2026-11-14 and 16 tripped over, and what was done (`crew-usage`):
+
+| Trip | Outcome |
+|---|---|
+| A Mix agent passed `project="shop-loop"` (its session's name) on all 44 calls: every edit went to the session, its take ended empty and was put away, nobody auditioned the mix | Fixed in `api._path`: from a take, the take's own session means the take |
+| Auditioning the Composer's take, the Producer added a second Mix task beside the planned one (it cannot see the board in an audition); Review then filed a seam fix and a masking fix the Producer had already handed out. 12 tasks for a job planned as 4, two Mix runs on the same bars, about half the session's tokens | The task message of a seat that can add tasks (Producer, Review) lists the open tasks; the Producer's playbook says to `task_update(detail=...)` the waiting task, Review names the task that covers a finding instead of adding one |
+| Mix rendered 4 and 5 times against a limit of 3 (told, not refused) | Left; not-done item 7 below |
+| The Composer's seam fix ran 481 s with 6 renders and was stopped by the time limit | Not looked into; it was one of the duplicate tasks |
+
 What The Lonely Walk cost (2026-11-14), measured from its run logs, and what was done. The session read
 **21.8 M input tokens** (20.0 M of them cached) and wrote 109 k, over 1,054 agent steps. Every step re-reads the
 whole run so far, so a step saved is about 20 k tokens and a character saved in an early answer is paid back on
@@ -482,15 +538,15 @@ every later step.
 
 Not done, in order of what they would save:
 
-1. **See it live** and re-measure. One short session on a cheap model; compare steps per run and characters per
-   answer with the table above.
-2. Per-seat craft text. A brief is 9,000 to 15,000 characters, most of it slices of `skill/SKILL.md` sent with
-   every step. Shorter slices written per seat.
+1. Done 2026-11-14 (partly): **seen live** on free Kilo models (section 5, the cuts-check session). Answers are
+   half the size and an audition is 3 steps. Steps per run could not be compared: see the note there.
+2. Done 2026-11-14: per-seat craft text (`crew/craft.py`).
 3. The second half of the schema trim (optional parameters as `anyOf [type, null]`): needs one live run per runner.
-4. `listen()` for a bar range. An agent that wants bars 13-24 per bar gets all 48. And `energy_arc` repeats what
-   `sections` says when sections are bars.
-5. One Producer run for several takes handed in together (five auditions ran back to back at 01:18-01:23).
+4. Done 2026-11-16 (`crew-usage`): `listen()` for a bar range, and no `energy_arc` when sections are bars.
+5. Done 2026-11-16 (`crew-usage`): one Producer run for several takes handed in together (up to five).
 6. A cheaper model in the Producer seat for auditions only, the top one for planning and the final listen.
+7. A Mix agent that renders past its limit is told to stop and is not refused (seen live: five renders against
+   three). Refusing the fourth render is the next step if it keeps happening on paid models.
 
 What the session's own review (R22) says the studio lacks, not built:
 
@@ -503,13 +559,11 @@ Known gaps and risks:
 
 - Each answer to a Needs You item still restarts the seat that asked (one agent run). The cap and the "settled"
   line bound it; answers to several items from one seat are not batched into one run.
-- A take left open with work in it after its task was cancelled or closed by the Producer is flagged
-  (`take_pending` marks it `loose`, an export warns) but nobody is asked about it.
+- A take the floor handed in for a seat and that was then returned, with its task still closed, stays open and
+  `loose`: it is not handed in a second time, and nobody is asked again.
 - The chord lane edits the chord track only. Notes already written do not follow a changed chord; `score()`
   shows what no longer fits. Chords typed as roman numerals are kept as typed.
 - On the console, effect settings are still the Desk mixer's. The other benches are views.
-- A Producer run that ends an audition without accepting or returning the take leaves it handed in with nobody
-  asked (the task is closed with the run's last words; the take shows on the seat's TAKES tab).
 - A person in the Mix seat who moves a fader with SESSION picked edits the session directly, as on the Desk; the
   bench does not steer them into a take.
 
@@ -517,12 +571,12 @@ Known gaps and risks:
   the smoke); not re-measured since. Mostly cached.
   Measured 2026-11-13 (characters / 4): what TuneTrack itself sends is 5k (Spotting) to 12k (Composer) of that:
   for the Composer 2.9k of tool descriptions, 4.5k of tool schemas after the label trim (6.1k before) and 3.5k of
-  brief, 2.9k of which is the `skill/SKILL.md` slice. The rest is the agent CLI's own prompt. Still to take: the
+  brief, 2.9k of which is the `skill/SKILL.md` slice (now 0.8k of craft text). The rest is the agent CLI's own
+  prompt. Still to take: the
   SDK writes every optional parameter as `anyOf [type, null]` with `default: null`; collapsing that would halve the
   schemas again (to 16,200 characters for all tools) but a client that checks arguments against the listed schema
-  would then refuse an explicit null, so it needs one live run per runner (Claude, Codex, Kilo) first. After that,
-  shorter per-seat skill slices.
-- Takes are never deleted from disk (closed ones stay for reference); no cleanup command yet.
+  would then refuse an explicit null, so it needs one live run per runner (Claude, Codex, Kilo) first.
+- Takes are deleted only by `tunetrack takes clean --yes` (or `takes.take_cleanup`); nothing runs it on its own.
 - Tool lists per seat are coarse (`track_update` covers both fader and instrument). The real guard is the
   out-of-department flag at `take_diff`.
 - Kilo has no strict mode: MCP servers in the owner's own `kilo.jsonc` would also load (it has none today).
@@ -534,7 +588,6 @@ Known gaps and risks:
 - The hosted crew stops when the editor's server stops. Nothing restarts it; RUN does, and recovery requeues
   what was cut off.
 - Talkback WAKE costs one agent run per message to an idle seat. It is a visible toggle, on by default.
-- Per-seat craft guidance is just slices of `skill/SKILL.md`; only the Producer has a written playbook.
 
 ---
 
@@ -552,8 +605,9 @@ Stages 1, 2, 2b (except the Claude runner) and 2c (first cut) are done. Each sta
 - Done 2026-11-13 night: a short session on the new briefs (section 5). Agents no longer ask the user to listen
   or poll while waiting, and reviews arrive as reports. Left: seeing the take and question fixes in a live session.
 - Done 2026-11-14: the owner's first whole session on paid models (The Lonely Walk), measured, and the usage cuts
-  that followed (section 5). Mix's pass count held (2 renders a run). Left: a short live session to see the cuts
-  work, then the "not done" list under the usage table.
+  that followed (section 5). Mix's pass count held (2 renders a run).
+- Done 2026-11-14/16: two short live sessions on free models to see the cuts (section 5). They work where they do
+  not depend on the model (answer size, the audition). Left: the "not done" list under the usage table.
 
 ### Stage 2c: the rack UI
 
@@ -575,7 +629,7 @@ Stages 1, 2, 2b (except the Claude runner) and 2c (first cut) are done. Each sta
      take once paid runs report usage; picking a crew from history automatically.
   6. Later niceties: workflow/audio cable view, movable modules (stage 6), push-to-talk.
 
-### Stage 3: live engine (first cut built 2026-11-14, uncommitted on `desk-takes`)
+### Stage 3: live engine (first cut built 2026-11-14, on `main` since PR #5)
 
 Decided in the spike: **bare JUCE 9, no Tracktion Engine.** `project.json` stays the one model; the engine is a
 player that loads a flat spec. Tracktion would have been a second model to keep in step, harder to null against
@@ -659,7 +713,7 @@ browser that auditions live, genre style sheets as per-seat skills.
 | Orchestral palette | Install Spitfire LABS / BBC SO Discover (needs their Spitfire sign-in), then `tunetrack scan` and capture patches. |
 | Stage 5 | Install `ffmpeg` on PATH. |
 | New tools in their own apps | Restart Claude so the MCP server reloads (it runs from this checkout). |
-| Keeping the work | Say when to commit what is uncommitted on `desk-takes`, and whether to open a PR for the branch. |
+| Keeping the work | Say when to commit what is uncommitted on `crew-usage`, and whether to open a PR for it. |
 
 ---
 
@@ -713,16 +767,21 @@ short live session on the new briefs is done, and so are three of the known gaps
 that miss the session, a run per Needs You answer), and late that night the Mix console's working controls, the
 pass count told to Mix with each render, the Claude runner smoke, and the Desk's revision guard. On 2026-11-14 the
 owner ran a whole orchestral session on paid Codex models (The Lonely Walk) and asked for less text and fewer
-wasted runs: the usage cuts and the rest of the console are built (section 5). Next: one short live session to see
-the cuts in the logs, the "not done" list under the usage table (craft text per seat first), then the rest of
-"Known gaps" (a take cleanup command, loose takes nobody is asked about, an audition that ends undecided), and a
-whole session with Claude in a seat. Stage 3's first cut is built; its "Left" list is in section 6.
+wasted runs: the usage cuts and the rest of the console are built (section 5), and so are per-seat craft text, the
+take cleanup command, loose takes handed in by the floor and undecided auditions (all on `main` since PR #5). On
+2026-11-16 two live sessions showed agents editing the session from a take by naming it, and duplicate tasks;
+both fixed on `crew-usage` and the second seen gone live. Next: the owner's ears on the loop-seam figure (section
+5, "Not verified"), the schema trim (needs one live run per runner), a whole session with Claude in a seat, then
+stage 3's "Left" list in section 6.
 
 To measure a session's usage: each run's log is `<session>/studio/logs/<task>-<attempt>-<seat>.jsonl` (the agent
 CLI's own event stream). For Codex, `turn.completed` carries `usage`, and each `item.completed` of type
 `mcp_tool_call` carries the tool, its arguments and its answer. Count calls and answer characters per tool and
 per seat, and input tokens per run: `uv run python output/_preview/usage.py <session folder>` (untracked, like
-the other throwaways there; forty lines to rewrite if it is gone).
+the other throwaways there; forty lines to rewrite if it is gone). For Kilo, `step_finish` carries `tokens` and the
+model it was routed to, and `tool_use` the tool, input and output: `output/_preview/usage_kilo.py`.
+**Pin a model when comparing sessions.** `kilo/kilo-auto/free` routes each run to a different free model, and step
+counts per run follow the model far more than the brief (an 83-step Composer run on one, 20 on another).
 
 To try it on a scratch session, add a temporary entry to `.claude/launch.json` (it is tracked: remove the entry
 before any commit) that runs one of the throwaways in `output/_preview/` with `uv run python`; `output/` is not

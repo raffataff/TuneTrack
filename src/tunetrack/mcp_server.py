@@ -57,6 +57,12 @@ message_send is talkback between seats, and ask_human() puts a real choice or bl
 list while you carry on with whatever doesn't depend on it.
 """
 
+LAUNCHED = """TuneTrack: a multitrack music workstation driven by tools. Your brief says how your seat works.
+Positions are beats or "bar:beat" ("9:1"); C4 = middle C (MIDI 60).
+Quality bar: real phrases with contour and rhythmic identity, functional bass, voice-led harmony, contrast between
+sections, dynamics, instruments in their ranges, headroom. No generic filler loops.
+"""
+
 SEATED = """You are the {title} of this studio session ({room}).
 {purpose}
 
@@ -88,9 +94,10 @@ def _instructions() -> str:
         return INSTRUCTIONS
     r = roles.ROLES[seat]
     if _launched():
-        # Its brief (crew/briefs.py) already says how a seat and the studio work; said twice it is paid for on
-        # every step. What is left is how the tools fit together, the notation and the quality bar.
-        return INSTRUCTIONS.replace(" + piano_roll_png - view it", "").split("\nThe studio:")[0]
+        # Its brief (crew/briefs.py, crew/craft.py) says how its seat and the studio work, the notation if it
+        # writes notes and what to check; each tool says what it does. Said twice it is paid for on every step,
+        # and the general workflow names tools a seat does not have (project_new, status for a seat without it).
+        return LAUNCHED
     rest = INSTRUCTIONS
     return SEATED.format(title=r.title, room=r.room.lower(), purpose=r.purpose,
                          owns=", ".join(sorted(r.owns)) or "you change nothing: you listen and report") + rest
@@ -632,7 +639,8 @@ def analyze(images: bool = True, start: Any = None, end: Any = None, project: st
 
 @tool
 def listen(reference: str | None = None, probe: bool = True, section_bars: int | None = None,
-           tracks: list[str] | None = None, project: str | None = None) -> dict:
+           tracks: list[str] | None = None, start: Any = None, end: Any = None, section: str | None = None,
+           project: str | None = None) -> dict:
     """Your ears: measures the rendered audio instead of the notes. Run it after render() and act on its warnings.
     sections: loudness (LUFS), brightness, stereo width, notes per bar and each track's level per marker section
     (or every section_bars bars), bar_lufs (one value per bar), energy_arc; flags neighbouring sections that barely
@@ -642,8 +650,10 @@ def listen(reference: str | None = None, probe: bool = True, section_bars: int |
     verify: bars where a track has notes but no sound, and a probe render of every pitch each track uses (tracks:
     limit it to these): pitches that are silent or much quieter (out of range), slow attacks, instruments sounding
     transposed, and what each drum note really sounds like (kick/snare/hat/cymbal/click) vs its name.
-    reference: path to a recording to compare loudness, loudness range, crest, band balance, brightness, width."""
-    return api.listen(project, reference, probe, section_bars, tracks)
+    reference: path to a recording to compare loudness, loudness range, crest, band balance, brightness, width.
+    start/end ("13:1", "25:1") or a marker section: sections, bar_lufs and masking for those bars only. To look
+    closely at a few bars, pass the range with section_bars=1 instead of asking for a block per bar of the song."""
+    return api.listen(project, reference, probe, section_bars, tracks, start, end, section)
 
 
 @tool

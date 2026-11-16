@@ -28,6 +28,7 @@ from ..model import LockTimeout, _os_lock, _os_unlock
 from . import briefs, runners
 
 TEXT_LIMIT = 400  # an error line
+AUDITIONS_PER_RUN = 5  # takes the Producer hears in one run when several are handed in together
 SAYS_LIMIT = studio.EVENT_TEXT  # what an agent says is read in the monitor: keep all of it
 
 
@@ -223,7 +224,7 @@ class Floor:
         """We hold the session, so an agent's task still marked "working" belongs to a manager that died (the
         editor was closed mid-run). Put it back in the queue and clear the seat's lamp."""
         with self._lock:
-            mine = {r["task"] for r in self._runs.values()}
+            mine = {r["task"] for r in self._runs.values()} | {t for r in self._runs.values() for t in r.get("also", [])}
             seated = set(self._runs)
         st = studio.read(self.session)
         lost = [t["id"] for t in st["tasks"] if t["state"] == "working" and t["id"] not in mine
@@ -302,6 +303,7 @@ class Floor:
         occ = s["occupant"]
         in_take = s["mode"] == "propose" and bool(roles.get(seat).owns)
         take = audition = asked = None
+        more: list[tuple[dict, dict, dict | None]] = []
         try:
             if task.get("audition"):
                 # The knock on the Producer's door: it is started with what was handed in already in front of it
@@ -315,6 +317,7 @@ class Floor:
                     return False
                 audition = takes.take_diff(tk["id"], self.session)
                 asked = next((t for t in st["tasks"] if t["id"] == tk.get("task")), None)
+                more = self._more_auditions(task, st)
             if in_take:
                 take = next((t for t in studio.take_index(self.path)
                              if t["id"] == task.get("take") and t.get("state") == "open"), None)
@@ -335,7 +338,7 @@ class Floor:
                 system=briefs.system(seat, in_take, s.get("notes", "")),
                 prompt=briefs.task_prompt(task, studio.studio_status(self.session), take,
                                           [done[d] for d in task.get("depends", []) if d in done],
-                                          unread, audition, asked),
+                                          unread, audition, asked, more),
                 cwd=str(work), env=env, allow_tools=["mcp__tunetrack"],
                 mcp={"tunetrack": {"command": sys.executable, "args": ["-m", "tunetrack.mcp_server"], "env": env}},
                 log=str(self.path / "studio" / "logs" / f"{task['id']}-{task.get('attempts', 0) + 1}-{seat}.jsonl"))
@@ -348,17 +351,56 @@ class Floor:
             return False
         self.launches += 1
         studio.task_update(task["id"], state="working", session=self.session)
+        for t, _a, _q in more:
+            studio.task_update(t["id"], state="working", session=self.session)
         studio.seat_presence(seat, "online", session=self.session, pid=run.pid)
         studio.log("run", self.session, seat=seat, task=task["id"], what="start",
-                   agent=studio.occupant_label(occ), take=take["id"] if take else None)
+                   agent=studio.occupant_label(occ), take=take["id"] if take else None,
+                   **({"also": [t["id"] for t, _a, _q in more]} if more else {}))
         rec = {"run": run, "task": task["id"], "started": time.time(), "take": take["id"] if take else None,
-               "seen": [m["id"] for m in unread]}
+               "seen": [m["id"] for m in unread], "also": [t["id"] for t, _a, _q in more]}
         rec["thread"] = threading.Thread(target=self._watch, args=(seat, rec), daemon=True,
                                          name=f"floor-{seat}-{task['id']}")
         with self._lock:
             self._runs[seat] = rec
         rec["thread"].start()
         return True
+
+    def _more_auditions(self, task: dict, st: dict) -> list[tuple[dict, dict, dict | None]]:
+        """Other auditions ready for the Producer at the same moment (seats that worked in parallel hand in
+        together): heard in the same run, so its brief, tools and the session are read once, not once a take.
+        Each comes as (its task, take_diff of its take, the task that take was made for)."""
+        out = []
+        index = {t["id"]: t for t in studio.take_index(self.path)}
+        tasks = {t["id"]: t for t in st["tasks"]}
+        for t in studio.ready_tasks(self.session):
+            if len(out) >= AUDITIONS_PER_RUN - 1:
+                break
+            tk = index.get(t.get("audition") or "")
+            if (t["id"] == task["id"] or t["seat"] != task["seat"] or not tk or tk.get("state") != "submitted"
+                    or t.get("attempts", 0) >= self.max_attempts):
+                continue
+            out.append((t, takes.take_diff(tk["id"], self.session), tasks.get(tk.get("task") or "")))
+        return out
+
+    def _settle_also(self, rec: dict, ok: bool, paused: bool, said: str) -> None:
+        """The other auditions heard in a run that has ended. One the Producer decided is closed already (a take's
+        accept, return or discard closes its audition task). One it left undecided goes the way of an undecided
+        audition when the run ended well (asked once more, then the user); after a fault or a stop it is
+        requeued, and a stop does not count the attempt."""
+        for tid in rec.get("also") or []:
+            t = next((x for x in studio.read(self.session)["tasks"] if x["id"] == tid), None)
+            if not t or t["state"] != "working":
+                continue
+            if ok and self._undecided(t, said):
+                continue
+            with studio._Board(self.session) as b:
+                x = b.task(tid)
+                x["state"], x["updated"] = "queued", round(time.time(), 3)
+                if paused:
+                    x["attempts"] = max(0, x.get("attempts", 0) - 1)
+                b.emit("task", id=tid, seat=x["seat"], state="queued", title=x["title"], by="floor",
+                       reason="paused" if paused else "its run ended without a decision")
 
     def _watch(self, seat: str, rec: dict) -> None:
         tools, errors, last_text, done = 0, [], "", {"ok": False, "returncode": None, "result": ""}
@@ -406,6 +448,7 @@ class Floor:
                    error=why or None)
         if done.get("ok") and not why:  # the messages in its task message have been read: not sent again next time
             studio.messages_read(seat, rec.get("seen") or [], self.session)
+        self._settle_also(rec, bool(done.get("ok")) and not why, bool(rec.get("paused") or held), said)
         if task["state"] != "working":
             return  # the agent moved its task itself (submitted, done, needs_you, failed): nothing to tidy
         if rec.get("paused") or held:  # stopped by the user or the plan, not by a fault: requeued, attempt not counted

@@ -646,8 +646,10 @@ def compare_reference(ours: dict, ref: dict, target: float) -> list[str]:
 # ---- the report ---------------------------------------------------------------------------------------------------
 
 def report(p: Project, r, reference: str | None = None, probe: bool = True, section_bars: int | None = None,
-           tracks: list[str] | None = None) -> dict:
-    """Everything above for a project whose Renderer has run (r.master, r.post, r.pre)."""
+           tracks: list[str] | None = None, span: tuple[float, float] | None = None) -> dict:
+    """Everything above for a project whose Renderer has run (r.master, r.post, r.pre). span: (start, end) in beats
+    to report only the sections that overlap it, its bars in bar_lufs and masking measured inside it; levels stay
+    those of the whole mix."""
     sr, tm, bpb = r.sr, r.tm, p.beats_per_bar
     end = max(p.end, bpb)
     end_s = tm.sec(end)
@@ -683,6 +685,8 @@ def report(p: Project, r, reference: str | None = None, probe: bool = True, sect
     onsets = np.array(sorted(s for t in audible_midi for s, _ in _track_notes(t)))
     sections = []
     for name, s, e in section_spans(p, end, section_bars):
+        if span and (e <= span[0] + 1e-6 or s >= span[1] - 1e-6):
+            continue
         a, b = int(tm.sec(s) * sr), int(tm.sec(e) * sr)
         seg = master[:, a:b]
         fr = (fbeats >= s) & (fbeats < e)
@@ -723,6 +727,8 @@ def report(p: Project, r, reference: str | None = None, probe: bool = True, sect
                          f"intended, ease the last bar toward the first so the wrap doesn't sound like a cut")
 
     # masking
+    if span:
+        in_song = in_song & (fbeats >= span[0]) & (fbeats < span[1])
     mask_tracks, pairs, mwarn = masking(spectra, buses, leads, fbars, in_song)
     warns += mwarn
 
@@ -751,6 +757,12 @@ def report(p: Project, r, reference: str | None = None, probe: bool = True, sect
     out = {"levels": f"as delivered: mix normalised to {target} LUFS (before the limiter)",
            "energy_arc": arc, "sections": sections, "bar_lufs": bar_lufs,
            "masking": {"tracks": mask_tracks, "pairs": pairs}, "verify": verify}
+    if section_bars:
+        del out["energy_arc"]  # it would repeat each block's lufs, which the blocks already give
+    if span:
+        first, last = int(span[0] // bpb), min(n_bars, math.ceil(span[1] / bpb - 1e-9))
+        out["bars"] = f"{first + 1}-{last}"  # bar_lufs starts at the first of these
+        out["bar_lufs"] = bar_lufs[first:last]
     if reference:
         from .engine import _read
         ref_audio = _read(Path(reference), sr)

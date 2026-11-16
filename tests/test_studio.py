@@ -396,8 +396,11 @@ def test_a_launched_agent_is_not_sent_pictures_it_cannot_open(song, monkeypatch)
     rep = mcp_server.analyze()
     assert "piano_roll_png" not in rep and "spectrogram_png" not in rep and "out_of_key" in json.dumps(rep)
     told = mcp_server._instructions()
-    assert "piano_roll_png" not in told and "TTN notation" in told
+    assert "piano_roll_png" not in told and "Quality bar" in told and len(told) < 500
     assert "You are the Composer" not in told and "The studio:" not in told  # its brief says both: not paid for twice
+    assert "TTN notation" not in told and "project_new" not in told  # the notation is in a writing seat's brief
+    from tunetrack.crew import briefs
+    assert "Notation for write()" in briefs.system("composer", True)
 
 
 def test_a_launched_mix_agent_is_told_which_listening_pass_it_is_on(song, monkeypatch):
@@ -501,6 +504,30 @@ def test_track_refs_and_take_paths_as_agents_write_them(song):
         for ref in (tk, f"takes/{tk}", "takes\\" + tk):
             assert api._path(ref) == (Path(song) / "takes" / tk).resolve()
         assert api._path("session") == Path(song).resolve()
+    finally:
+        api.set_default_project(None)
+
+
+def test_naming_its_own_session_from_a_take_means_the_take(song, monkeypatch, tmp_path):
+    """Seen live (2026-11-14): a Mix agent in its take passed project="shop-loop" (the session's name) on every
+    call. Every edit went to the session unheard, its take stayed empty and was put away, and nobody auditioned the
+    mix. Naming the session from a take now means the take; "session" still reaches the session."""
+    monkeypatch.setattr(api.config, "PROJECTS_DIR", Path(song).parent)
+    tk = takes.take_new("mix", use=True)  # this process's tools now edit the take
+    d = Path(tk["project"]).resolve()
+    try:
+        for ref in (Path(song).name, song, str(Path(song) / "project.json")):
+            assert api._path(ref) == d, ref
+        api.track_update("Piano", volume_db=-7, project=Path(song).name)
+        on_disk = lambda f: json.loads((f / "project.json").read_text(encoding="utf-8"))["tracks"][0]["volume_db"]  # noqa: E731
+        assert on_disk(Path(song)) != -7 and on_disk(d) == -7
+        assert api._path("session") == Path(song).resolve()  # said outright: the session itself
+        assert [c["kind"] for c in takes.take_diff()["changes"]] == ["mix"]
+        api.set_default_project(None)  # outside a take, the name is the session as before
+        assert api._path(Path(song).name) == Path(song).resolve()
+        other = api.project_new("Elsewhere", folder=str(tmp_path / "other"))
+        api.set_default_project(d)
+        assert api._path(str(tmp_path / "other")) == (tmp_path / "other").resolve()  # another project is not redirected
     finally:
         api.set_default_project(None)
 
