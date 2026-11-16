@@ -15,10 +15,15 @@ namespace tt
 using juce::int64;
 
 // Progress notes on stderr when TT_TRACE is set: the way to see which plugin call a crash or a hang is in.
-inline void trace (const juce::String& what)
+inline bool tracing()
 {
     static const bool on = juce::SystemStats::getEnvironmentVariable ("TT_TRACE", {}).isNotEmpty();
-    if (on)
+    return on;
+}
+
+inline void trace (const juce::String& what)
+{
+    if (tracing())
     {
         fputs (what.toRawUTF8(), stderr);
         fputc ('\n', stderr);

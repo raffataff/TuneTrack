@@ -68,6 +68,8 @@ class Clip:
     gain_db: float = 0.0
     fade_in: float = 0.0  # seconds
     fade_out: float = 0.0
+    bpm: float | None = None  # the tempo the audio was played at: set = it follows the project's tempo, pitch kept
+    pitch: float = 0.0  # transpose in semitones (length kept)
 
     @property
     def end(self) -> float:
@@ -92,6 +94,10 @@ class Clip:
         else:
             d.update(file=self.file, offset=_r(self.offset), gain_db=_r(self.gain_db),
                      fade_in=_r(self.fade_in), fade_out=_r(self.fade_out))
+            if self.bpm:
+                d["bpm"] = _r(self.bpm)
+            if self.pitch:
+                d["pitch"] = _r(self.pitch)
         return d
 
     @classmethod
@@ -105,6 +111,8 @@ class Clip:
         c.gain_db = float(d.get("gain_db", 0))
         c.fade_in = float(d.get("fade_in", 0))
         c.fade_out = float(d.get("fade_out", 0))
+        c.bpm = float(d["bpm"]) if d.get("bpm") else None
+        c.pitch = float(d.get("pitch", 0))
         return c
 
 
@@ -119,6 +127,8 @@ class Device:
     params: name -> value. For vst3, values are normalised 0..1 or a display string ("-12 dB") matched to the plugin.
     sidechain: id of the (non-bus) track whose pre-fader audio feeds this effect's sidechain input (effects only).
     engine: for builtin eq only - what it runs on ("builtin", "ssl", "nova"; see eqmap.py). None = the project's.
+    automation: param name -> [[beat, value], ...], straight lines between points. Values as in params (a vst3
+        parameter takes 0..1 or the text it shows). An automated parameter ignores its entry in params.
     """
     type: str
     name: str
@@ -127,6 +137,7 @@ class Device:
     bypass: bool = False
     sidechain: str | None = None
     engine: str | None = None
+    automation: dict[str, list[list]] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         d: dict = {"type": self.type, "name": self.name}
@@ -140,6 +151,9 @@ class Device:
             d["sidechain"] = self.sidechain
         if self.engine:
             d["engine"] = self.engine
+        if self.automation:
+            d["automation"] = {k: [[_r(b), v if isinstance(v, str) else _r(v)] for b, v in sorted(pts, key=lambda q: q[0])]
+                               for k, pts in self.automation.items() if pts}
         return d
 
     @classmethod
@@ -148,7 +162,9 @@ class Device:
             return None
         return cls(type=d["type"], name=d["name"], patch=d.get("patch"), params=dict(d.get("params", {})),
                    bypass=bool(d.get("bypass", False)), sidechain=d.get("sidechain") or None,
-                   engine=d.get("engine") or None)
+                   engine=d.get("engine") or None,
+                   automation={str(k): [[float(b), v if isinstance(v, str) else float(v)] for b, v in pts]
+                               for k, pts in (d.get("automation") or {}).items()})
 
     def label(self) -> str:
         if self.type == "sfz":

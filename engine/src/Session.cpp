@@ -53,6 +53,32 @@ AutoPts points (const juce::var& v)
     return out;
 }
 
+// How late the audio reaching each node of a graph is: the most plugin latency along any audio path into it (JUCE
+// delays the other paths to match). MIDI paths add none.
+class LatencyBefore
+{
+public:
+    explicit LatencyBefore (juce::AudioProcessorGraph& g) : graph (g), conns (g.getConnections()) {}
+
+    int operator() (juce::AudioProcessorGraph::NodeID id)
+    {
+        if (auto it = memo.find (id.uid); it != memo.end())
+            return it->second;
+        memo[id.uid] = 0;
+        int most = 0;
+        for (auto& c : conns)
+            if (c.destination.nodeID == id && ! c.source.isMIDI())
+                if (auto* src = graph.getNodeForId (c.source.nodeID))
+                    most = juce::jmax (most, (*this) (c.source.nodeID) + src->getProcessor()->getLatencySamples());
+        return memo[id.uid] = most;
+    }
+
+private:
+    juce::AudioProcessorGraph& graph;
+    std::vector<juce::AudioProcessorGraph::Connection> conns;
+    std::map<juce::uint32, int> memo;
+};
+
 juce::String paramKeys (const juce::var& params)
 {
     juce::StringArray keys;
@@ -118,7 +144,11 @@ bool Session::describe (const juce::String& path, const juce::File& out)
 Session::~Session()
 {
     editors.clear();
+    schedule.set (nullptr);
+    autos.set (nullptr);
     graph.clear();
+    slots.clear();
+    lanes.clear();
 }
 
 void Session::prepare (double sr, int block, bool off)
@@ -128,8 +158,8 @@ void Session::prepare (double sr, int block, bool off)
     offline = off;
     graph.releaseResources();
     graph.setPlayConfigDetails (0, 2, sr, block);
-    graph.setNonRealtime (off);
-    graph.prepareToPlay (sr, block);
+    graph.setNonRealtime (off);       // each LaneNode tells its lane's devices
+    graph.prepareToPlay (sr, block);  // each LaneNode prepares its lane and reports its latency
     updateLatencies();
 }
 
@@ -137,7 +167,8 @@ void Session::prepare (double sr, int block, bool off)
 
 Session::Slot* Session::take (const juce::String& owner, const juce::String& identity, const juce::String& ref, const Maker& make)
 {
-    auto key = owner + "|" + identity;
+    // a device never moves between the session's graph and a lane: one that must is made afresh
+    auto key = owner + "|" + (building != &graph ? "lane|" : "") + identity;
     key << "#" << seen[key]++;
     if (auto it = slots.find (key); it != slots.end())
     {
@@ -158,11 +189,12 @@ Session::Slot* Session::take (const juce::String& owner, const juce::String& ide
     proc->setPlayHead (&transport);
     Slot s;
     trace ("add " + ref);
-    s.node = graph.addNode (std::move (proc), std::nullopt, Graph::UpdateKind::none);
+    s.node = building->addNode (std::move (proc), std::nullopt, Graph::UpdateKind::none);
+    s.in = building;
     s.ref = ref;
     s.key = key;
     s.fresh = true;
-    topologyChanged = true;
+    changed.insert (building);
     return &(next[key] = std::move (s));
 }
 
@@ -274,6 +306,7 @@ std::unique_ptr<juce::AudioPluginInstance> Session::loadPlugin (const juce::var&
 void Session::applyPluginParams (Slot& s, const juce::var& params)
 {
     auto* proc = s.node->getProcessor();
+    s.staticValues.clear();
     if (auto* o = params.getDynamicObject())
         for (auto& kv : o->getProperties())
         {
@@ -294,13 +327,157 @@ void Session::applyPluginParams (Slot& s, const juce::var& params)
                     continue;
                 }
                 p->setValue (v);
+                s.staticValues[idx] = v;
                 if (note.isNotEmpty())
                     warnings.add (s.ref + ": " + note);
             }
             else
+            {
                 p->setValue ((float) (double) kv.value);
+                s.staticValues[idx] = p->getValue();
+            }
         }
     s.applied = juce::JSON::toString (params, true);
+}
+
+void Session::resolveAutomation (Slot& s)
+{
+    const auto sig = juce::JSON::toString (s.autoSpec, true);
+    if (sig == s.autoSig)
+        return;
+    s.autoSig = sig;
+    s.autoParams.clear();
+    auto* proc = s.node->getProcessor();
+    auto* o = s.autoSpec.getDynamicObject();
+    if (o == nullptr)
+        return;
+    for (auto& kv : o->getProperties())
+    {
+        juce::String error;
+        const int idx = findParam (*proc, kv.name.toString(), error);
+        if (idx < 0)
+        {
+            warnings.add (s.ref + ": automation: " + error);
+            continue;
+        }
+        auto* p = proc->getParameters()[idx];
+        if (s.preAuto.count (idx) == 0)
+            s.preAuto[idx] = p->getValue();
+        // the text a plugin shows ("-12 dB", "2 kHz") becomes the 0..1 value that shows it, once per distinct text
+        std::map<juce::String, float> texts;
+        juce::StringArray notes;
+        AutoPts pts;
+        if (auto* a = kv.value.getArray())
+            for (auto& pt : *a)
+            {
+                auto* pair = pt.getArray();
+                if (pair == nullptr || pair->size() < 2)
+                    continue;
+                const auto& v = (*pair)[1];
+                float x;
+                if (v.isString())
+                {
+                    const auto text = v.toString();
+                    if (auto it = texts.find (text); it != texts.end())
+                        x = it->second;
+                    else
+                    {
+                        juce::String note, err;
+                        x = texts[text] = valueForText (*p, text, note, err);
+                        if (x < 0.0f)
+                            warnings.add (s.ref + ": automation: " + err);
+                        else if (note.isNotEmpty())
+                            notes.addIfNotAlreadyThere (note);
+                    }
+                    if (x < 0.0f)
+                        continue;
+                }
+                else
+                    x = juce::jlimit (0.0f, 1.0f, (float) (double) v);
+                pts.emplace_back ((juce::int64) (double) (*pair)[0], x);
+            }
+        for (auto& n : notes)
+            warnings.add (s.ref + ": automation: " + n);
+        std::stable_sort (pts.begin(), pts.end(), [] (auto& a, auto& b) { return a.first < b.first; });
+        if (! pts.empty())
+            s.autoParams.emplace_back (idx, std::move (pts));
+    }
+}
+
+void Session::publishAutomation()
+{
+    struct Build
+    {
+        std::shared_ptr<AutoPlan> plan = std::make_shared<AutoPlan>();
+        juce::String sig;
+    };
+    std::map<Graph*, Build> builds;
+    std::map<Graph*, std::unique_ptr<LatencyBefore>> walks;
+    auto latencyOf = [&] (Slot& s)
+    {
+        auto& w = walks[s.in];
+        if (w == nullptr)
+            w = std::make_unique<LatencyBefore> (*s.in);
+        return (*w) (s.node->nodeID);
+    };
+
+    for (auto& [key, s] : slots)
+    {
+        if (! s.deferred.isVoid())
+            continue;  // its state is still loading: finishSettle publishes it
+        if (auto* f = dynamic_cast<FaustNode*> (s.node->getProcessor()))
+        {
+            std::map<juce::String, AutoPts> lanes;
+            if (auto* o = s.autoSpec.getDynamicObject())
+                for (auto& kv : o->getProperties())
+                    if (auto pts = numericPoints (kv.value); ! pts.empty())
+                        lanes[kv.name.toString()] = std::move (pts);
+            if (lanes.empty() && s.faustSig.isEmpty())
+                continue;
+            const int lat = lanes.empty() ? 0 : latencyOf (s);
+            const auto sig = juce::JSON::toString (s.autoSpec, true) + "|" + juce::String (lat);
+            if (sig != s.faustSig)
+            {
+                s.faustSig = sig;
+                for (auto& bad : f->automate (lanes, lat))
+                    warnings.add (s.ref + ": automation: no setting '" + bad + "'");
+            }
+            continue;
+        }
+        if (s.autoParams.empty() && s.preAuto.empty())
+            continue;
+        auto& b = builds[s.in];
+        const int lat = s.autoParams.empty() ? 0 : latencyOf (s);
+        auto& params = s.node->getProcessor()->getParameters();
+        b.plan->keep.push_back (s.node);
+        std::set<int> now;
+        for (auto& [idx, pts] : s.autoParams)
+        {
+            b.plan->params.push_back ({ s.node, params[idx], pts, lat });
+            now.insert (idx);
+        }
+        for (auto& [idx, before] : s.preAuto)
+            if (now.count (idx) == 0)
+            {
+                auto it = s.staticValues.find (idx);
+                b.plan->restore.push_back ({ params[idx], it != s.staticValues.end() ? it->second : before });
+            }
+        // a setting changed under an automated parameter moved it: a new plan sets every value again
+        b.sig << key << "|" << s.autoSig << "|" << lat << "|" << s.applied << ";";
+    }
+
+    auto publish = [&] (Graph* g, Shared<AutoPlan>& to, juce::String& had)
+    {
+        auto it = builds.find (g);
+        const auto sig = it != builds.end() ? it->second.sig : juce::String();
+        if (sig == had)
+            return;
+        had = sig;
+        to.set (it != builds.end() ? std::shared_ptr<const AutoPlan> (it->second.plan) : nullptr);
+    };
+    publish (&graph, autos, autoSig);
+    for (auto& [id, lane] : lanes)
+        publish (&lane->graph, lane->autos, lane->autoSig);
 }
 
 Session::Slot* Session::device (const juce::String& owner, const juce::String& ref, const juce::var& dev, bool instrument, bool keyed)
@@ -319,16 +496,21 @@ Session::Slot* Session::device (const juce::String& owner, const juce::String& r
         if (s == nullptr)
             return nullptr;
         s->plugin = true;
+        s->autoSpec = dev["auto"];
         if (s->fresh && state.isNotEmpty())
         {
             s->deferred = params;
             ++freshStates;
             settleUntil = juce::Time::currentTimeMillis() + settleBaseMs() + settleEachMs() * freshStates;
         }
-        else if (s->applied != juce::JSON::toString (params, true) && s->deferred.isVoid())
-            applyPluginParams (*s, params);
         else if (! s->deferred.isVoid())
             s->deferred = params;
+        else
+        {
+            if (s->applied != juce::JSON::toString (params, true))
+                applyPluginParams (*s, params);
+            resolveAutomation (*s);
+        }
         return s;
     }
 
@@ -356,6 +538,19 @@ Session::Slot* Session::device (const juce::String& owner, const juce::String& r
                       return n;
                   });
     }
+    else if (type == "sfz")
+    {
+        const juce::File file (str (dev, "path"));
+        const int voices = (int) num (dev, "voices", 128);
+        const bool fullCC7 = flag (dev, "full_cc7", true);
+        s = take (owner, "sfz|" + file.getFullPathName() + "|" + juce::String (file.getLastModificationTime().toMilliseconds())
+                      + "|" + juce::String (voices) + (fullCC7 ? "|cc7" : ""), ref,
+                  [&] (juce::String& e) -> std::unique_ptr<juce::AudioProcessor>
+                  { return SfzNode::load (file, sampleRate, blockSize, voices, fullCC7, offline, e); });
+        if (s != nullptr && dev["auto"].getDynamicObject() != nullptr)
+            warnings.add (ref + ": automation: an SFZ instrument has no settings to automate (use CC)");
+        return s;
+    }
     else if (type == "stem")
     {
         const juce::File file (str (dev, "file"));
@@ -376,9 +571,12 @@ Session::Slot* Session::device (const juce::String& owner, const juce::String& r
 
     if (s != nullptr)
         if (auto* f = dynamic_cast<FaustNode*> (s->node->getProcessor()))
+        {
+            s->autoSpec = dev["auto"];  // follows from publishAutomation, once the latency before it is known
             if (auto* o = params.getDynamicObject())
                 for (auto& kv : o->getProperties())
                     f->setParam (kv.name.toString(), (float) (double) kv.value);
+        }
     return s;
 }
 
@@ -388,13 +586,14 @@ void Session::link (Graph::Node* from, Graph::Node* to)
 {
     if (from == nullptr || to == nullptr)
         return;
-    const int outs = from == outNode.get() ? 0 : mainOuts (*from->getProcessor());
-    const int ins = to == outNode.get() ? 2 : mainIns (*to->getProcessor());
+    const bool toOutput = dynamic_cast<Graph::AudioGraphIOProcessor*> (to->getProcessor()) != nullptr;
+    const int outs = mainOuts (*from->getProcessor());
+    const int ins = toOutput ? 2 : mainIns (*to->getProcessor());
     for (int c = 0; c < ins && outs > 0; ++c)  // a mono source feeds both sides; a mono input hears the left
-        wires.push_back ({ { from->nodeID, juce::jmin (c, outs - 1) }, { to->nodeID, c } });
+        wiring->push_back ({ { from->nodeID, juce::jmin (c, outs - 1) }, { to->nodeID, c } });
 }
 
-void Session::linkKey (Graph::Node* from, Graph::Node* fx)
+void Session::linkKey (Graph::Node* from, Graph::Node* fx, const juce::String& owner, const juce::String& ref)
 {
     if (from == nullptr || fx == nullptr)
         return;
@@ -411,8 +610,19 @@ void Session::linkKey (Graph::Node* from, Graph::Node* fx)
         base = p.getChannelIndexInProcessBlockBuffer (true, 1, 0);
         count = bus->getNumberOfChannels();
     }
+    if (count == 1 && outs >= 2)
+    {
+        // a mono key input hears both sides, (L + R) / 2, as the offline worker feeds it (not the left alone)
+        if (auto* m = take (owner, "mono|" + ref, ref + "/key",
+                            [] (juce::String&) -> std::unique_ptr<juce::AudioProcessor> { return std::make_unique<MonoNode>(); }))
+        {
+            link (from, m->node.get());
+            wiring->push_back ({ { m->node->nodeID, 0 }, { fx->nodeID, base } });
+        }
+        return;
+    }
     for (int c = 0; c < juce::jmin (2, count) && outs > 0; ++c)
-        wires.push_back ({ { from->nodeID, juce::jmin (c, outs - 1) }, { fx->nodeID, base + c } });
+        wiring->push_back ({ { from->nodeID, juce::jmin (c, outs - 1) }, { fx->nodeID, base + c } });
 }
 
 juce::var Session::apply (const juce::var& spec)
@@ -423,7 +633,10 @@ juce::var Session::apply (const juce::var& spec)
     strips.clear();
     probeWants.clear();
     wires.clear();
-    topologyChanged = false;
+    nextLanes.clear();
+    changed.clear();
+    building = &graph;
+    wiring = &wires;
     freshStates = 0;
 
     // ---- transport ----
@@ -451,7 +664,7 @@ juce::var Session::apply (const juce::var& spec)
         transport.loopEnd = 0;
     }
 
-    struct KeyWant { juce::String track; Graph::Node::Ptr fx; juce::String ref; };
+    struct KeyWant { juce::String track; Graph::Node::Ptr fx; juce::String ref, owner; };
     std::vector<KeyWant> keys;
     struct Route { juce::String from, to; float db; bool send; int n; };
     std::vector<Route> routes;
@@ -472,11 +685,21 @@ juce::var Session::apply (const juce::var& spec)
                 {
                     link (prev.get(), s->node.get());
                     if (key.isNotEmpty() && key != "silent")
-                        keys.push_back ({ key, s->node, ref });
+                        keys.push_back ({ key, s->node, ref, id });
                     prev = s->node;
                 }
             }
         return prev;
+    };
+
+    // an insert that listens to another strip keeps its strip in the session's graph, where JUCE lines the key up
+    auto listens = [] (const juce::var& fxList)
+    {
+        if (auto* fx = fxList.getArray())
+            for (auto& dev : *fx)
+                if (const auto key = str (dev, "key"); key.isNotEmpty() && key != "silent")
+                    return true;
+        return false;
     };
 
     // ---- strips ----
@@ -486,14 +709,38 @@ juce::var Session::apply (const juce::var& spec)
             const auto id = str (t, "id");
             Strip strip;
             Graph::Node::Ptr prev;
+            building = &graph;
+            wiring = &wires;
             if (str (t, "kind") == "bus")
             {
                 if (auto* s = take (id, "head", id + "/in", gainNode))
                     prev = strip.head = s->node;
+                strip.tap = buildChain (id, t["fx"], prev);
             }
             else if (const auto src = t["source"]; src.isObject())
             {
                 const auto type = str (src, "type");
+                std::shared_ptr<Lane> lane;
+                if (! listens (t["fx"]))
+                {
+                    // computed in a lane of its own, side by side with the others (Lanes.h)
+                    if (auto it = lanes.find (id); it != lanes.end())
+                        lane = it->second;
+                    else
+                    {
+                        lane = std::make_shared<Lane> (transport);
+                        lane->prepare (sampleRate, blockSize);
+                        changed.insert (&lane->graph);
+                    }
+                    nextLanes[id] = lane;
+                    lane->weight = type == "vst3" ? 4 : type == "sfz" ? 2 : 1;
+                    if (auto* fx = t["fx"].getArray())
+                        for (auto& dev : *fx)
+                            lane->weight += str (dev, "type") == "vst3" ? 2 : 0;
+                    building = &lane->graph;
+                    wiring = &laneWires[id];
+                    wiring->clear();
+                }
                 if (auto* s = device (id, id + "/inst", src, true, false))
                 {
                     prev = s->node;
@@ -528,7 +775,7 @@ juce::var Session::apply (const juce::var& spec)
                                 static_cast<MidiSourceNode*> (m->node->getProcessor())->seq.set (seq);
                                 m->applied = sig;
                             }
-                            wires.push_back ({ { m->node->nodeID, Graph::midiChannelIndex }, { s->node->nodeID, Graph::midiChannelIndex } });
+                            wiring->push_back ({ { m->node->nodeID, Graph::midiChannelIndex }, { s->node->nodeID, Graph::midiChannelIndex } });
                             if (meter != nullptr)
                             {
                                 std::vector<const MidiEv*> ons;
@@ -544,8 +791,22 @@ juce::var Session::apply (const juce::var& spec)
                             }
                         }
                 }
+                prev = buildChain (id, t["fx"], prev);
+                if (lane != nullptr)
+                {
+                    link (prev.get(), lane->outNode.get());
+                    building = &graph;
+                    wiring = &wires;
+                    prev = nullptr;
+                    if (auto* ln = take (id, "lane|" + juce::String (lane->serial), id + "/lane",
+                                         [this, lane] (juce::String&) -> std::unique_ptr<juce::AudioProcessor>
+                                         { return std::make_unique<LaneNode> (lane, pool); }))
+                        prev = ln->node;
+                }
+                strip.tap = prev;
             }
-            strip.tap = buildChain (id, t["fx"], prev);
+            building = &graph;
+            wiring = &wires;
             if (auto* f = take (id, "fader", id + "/fader", faderNode))
             {
                 auto p = std::make_shared<FaderParams>();
@@ -610,71 +871,89 @@ juce::var Session::apply (const juce::var& spec)
         if (it == strips.end() || it->second.tap == nullptr)
             warnings.add (k.ref + ": sidechain key has no audio; the effect hears silence");
         else
-            linkKey (it->second.tap.get(), k.fx.get());
+            linkKey (it->second.tap.get(), k.fx.get(), k.owner, k.ref);
     }
     strips["master"] = master;
 
-    // ---- drop what is gone, rewire only if the wiring changed ----
+    // ---- drop what is gone, rewire only the graphs whose wiring changed ----
     for (auto& [key, s] : slots)
     {
         editors.erase (key);
-        graph.removeNode (s.node.get(), Graph::UpdateKind::none);
-        topologyChanged = true;
+        s.in->removeNode (s.node.get(), Graph::UpdateKind::none);
+        changed.insert (s.in);
     }
     slots = std::move (next);
     next.clear();
+    lanes = std::move (nextLanes);  // a lane dropped here lives on until neither the schedule nor its node holds it
+    nextLanes.clear();
+    for (auto it = laneWires.begin(); it != laneWires.end();)
+        it = lanes.count (it->first) > 0 ? std::next (it) : laneWires.erase (it);
 
-    auto order = [] (const Graph::Connection& a, const Graph::Connection& b) { return a < b; };
-    std::sort (wires.begin(), wires.end(), order);
-    if (topologyChanged || wires != wired)
-    {
-        for (auto& c : graph.getConnections())
-            graph.removeConnection (c, Graph::UpdateKind::none);
-        for (auto& c : wires)
-            if (! graph.addConnection (c, Graph::UpdateKind::none))
-                warnings.add ("engine: a connection was refused");
-        trace ("rebuild");
-        graph.rebuild();
-        trace ("rebuilt");
-        for (auto& c : graph.getConnections())
-        {
-            auto* from = graph.getNodeForId (c.source.nodeID);
-            auto* to = graph.getNodeForId (c.destination.nodeID);
-            trace ("  wire " + juce::String (c.source.nodeID.uid) + ":" + from->getProcessor()->getName() + "[" + juce::String (c.source.channelIndex)
-                   + "] -> " + juce::String (c.destination.nodeID.uid) + ":" + to->getProcessor()->getName() + "[" + juce::String (c.destination.channelIndex) + "]");
-        }
-        wired = wires;
-    }
-    updateLatencies();
+    rebuildAll();
+
+    // the lanes the audio thread computes from the next block on, heaviest first so the long ones start early
+    auto plan = std::make_shared<LaneSchedule>();
+    for (auto& [id, lane] : lanes)
+        plan->lanes.push_back (lane);
+    std::stable_sort (plan->lanes.begin(), plan->lanes.end(), [] (auto& a, auto& b) { return a->weight > b->weight; });
+    schedule.set (std::move (plan));
 
     auto* result = new juce::DynamicObject();
     result->setProperty ("warnings", juce::var (warnings));
     result->setProperty ("latency", totalLatency);
     result->setProperty ("nodes", (int) slots.size());
+    result->setProperty ("lanes", (int) lanes.size());
+    result->setProperty ("threads", pool.threads());
     result->setProperty ("settle_ms", settleRemainingMs());
     return juce::var (result);
 }
 
+void Session::rebuildAll()
+{
+    auto order = [] (const Graph::Connection& a, const Graph::Connection& b) { return a < b; };
+    auto rewire = [&] (Graph& g, std::vector<Graph::Connection>& want, std::vector<Graph::Connection>& have)
+    {
+        std::sort (want.begin(), want.end(), order);
+        if (changed.count (&g) > 0 || want != have)
+        {
+            for (auto& c : g.getConnections())
+                g.removeConnection (c, Graph::UpdateKind::none);
+            for (auto& c : want)
+                if (! g.addConnection (c, Graph::UpdateKind::none))
+                    warnings.add ("engine: a connection was refused");
+            have = want;
+        }
+        g.rebuild();  // nothing happens unless the wiring or a device's latency changed
+    };
+    trace ("rebuild");
+    // lanes first: the session's graph lines strips up by each lane's latency
+    for (auto& [id, lane] : lanes)
+        rewire (lane->graph, laneWires[id], lane->wired);
+    for (auto& [id, s] : strips)
+        if (s.tap != nullptr)
+            if (auto* ln = dynamic_cast<LaneNode*> (s.tap->getProcessor()))
+                ln->syncLatency();
+    rewire (graph, wires, wired);
+    changed.clear();
+    trace ("rebuilt");
+    for (auto& c : tracing() ? graph.getConnections() : std::vector<Graph::Connection>())
+    {
+        auto* from = graph.getNodeForId (c.source.nodeID);
+        auto* to = graph.getNodeForId (c.destination.nodeID);
+        trace ("  wire " + juce::String (c.source.nodeID.uid) + ":" + from->getProcessor()->getName() + "[" + juce::String (c.source.channelIndex)
+               + "] -> " + juce::String (c.destination.nodeID.uid) + ":" + to->getProcessor()->getName() + "[" + juce::String (c.destination.channelIndex) + "]");
+    }
+    updateLatencies();
+}
+
 void Session::updateLatencies()
 {
-    const auto conns = graph.getConnections();
-    std::map<juce::uint32, int> memo;
-    std::function<int (Graph::NodeID)> before = [&] (Graph::NodeID id) -> int
-    {
-        if (auto it = memo.find (id.uid); it != memo.end())
-            return it->second;
-        memo[id.uid] = 0;
-        int most = 0;
-        for (auto& c : conns)
-            if (c.destination.nodeID == id && ! c.source.isMIDI())
-                if (auto* src = graph.getNodeForId (c.source.nodeID))
-                    most = juce::jmax (most, before (c.source.nodeID) + src->getProcessor()->getLatencySamples());
-        return memo[id.uid] = most;
-    };
+    LatencyBefore before (graph);
     for (auto& [id, s] : strips)
         if (s.fader != nullptr)
             static_cast<FaderNode*> (s.fader->getProcessor())->latencyBefore = before (s.fader->nodeID);
     totalLatency = outNode != nullptr ? before (outNode->nodeID) : 0;
+    publishAutomation();
 }
 
 int Session::settleRemainingMs() const
@@ -690,10 +969,10 @@ juce::StringArray Session::finishSettle()
         {
             applyPluginParams (s, s.deferred);
             s.deferred = juce::var();
+            resolveAutomation (s);
         }
     // a plugin may only report its real latency once its state has loaded
-    graph.rebuild();
-    updateLatencies();
+    rebuildAll();
     return warnings;
 }
 
@@ -702,6 +981,8 @@ void Session::resetBuiltIns()
     for (auto& [key, s] : slots)
         if (auto* f = dynamic_cast<FaustNode*> (s.node->getProcessor()))
             f->reset();
+        else if (auto* z = dynamic_cast<SfzNode*> (s.node->getProcessor()))
+            z->reset();
 }
 
 // ---- the ready probe -----------------------------------------------------------------------------------------

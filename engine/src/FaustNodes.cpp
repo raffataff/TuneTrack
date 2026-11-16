@@ -20,6 +20,65 @@ ztimedmap GUI::gTimedZoneMap;
 
 namespace tt
 {
+// ---- automation ----------------------------------------------------------------------------------------------
+
+juce::StringArray FaustNode::automate (const std::map<juce::String, AutoPts>& lanes, int latency)
+{
+    juce::StringArray unknown;
+    auto s = std::make_shared<AutoState>();
+    s->latency = latency;
+    std::set<std::string> now;
+    for (auto& [name, pts] : lanes)
+    {
+        const auto label = name.toStdString();
+        auto zones = zonesFor (label);
+        if (zones.empty() || pts.empty())
+        {
+            if (zones.empty())
+                unknown.add (name);
+            continue;
+        }
+        s->ctls.push_back ({ std::move (zones), pts });
+        now.insert (label);
+    }
+    ever.insert (now.begin(), now.end());
+    for (auto& label : ever)
+        if (now.count (label) == 0)
+            if (float v; settingFor (label, v))
+                s->restore.push_back ({ zonesFor (label), v });
+    automated = std::move (now);
+    plan.set (std::move (s));
+    return unknown;
+}
+
+const FaustNode::AutoState* FaustNode::autoBegin (juce::int64& t0, bool& moving)
+{
+    const AutoState* s = plan.get();
+    if (s == nullptr)
+        return nullptr;
+    if (plan.takeChanged())
+        for (auto& [zones, v] : s->restore)
+            for (auto* z : zones)
+                *z = v;
+    if (s->ctls.empty())
+        return nullptr;
+    const auto* t = dynamic_cast<const Transport*> (getPlayHead());
+    t0 = (t != nullptr ? t->blockPos : 0) - s->latency;
+    moving = t != nullptr && t->blockPlaying;
+    return s;
+}
+
+void FaustNode::autoSet (const AutoState& s, juce::int64 t)
+{
+    t -= ((t % autoGrid) + autoGrid) % autoGrid;
+    for (auto& c : s.ctls)
+    {
+        const float v = autoValue (c.pts, t, c.hint);
+        for (auto* z : c.zones)
+            *z = v;
+    }
+}
+
 namespace
 {
 class FaustFx final : public FaustNode
@@ -38,7 +97,24 @@ public:
         if (it == zones.end())
             return false;
         values[it->first] = value;
-        *it->second = value;
+        if (! isAutomated (it->first))
+            *it->second = value;
+        return true;
+    }
+
+    std::vector<float*> zonesFor (const std::string& label) override
+    {
+        auto& zones = ui.getLabelMap();
+        auto it = zones.find (label);
+        return it == zones.end() ? std::vector<float*>() : std::vector<float*> { it->second };
+    }
+
+    bool settingFor (const std::string& label, float& v) override
+    {
+        auto it = values.find (label);
+        if (it == values.end())
+            return false;
+        v = it->second;
         return true;
     }
 
@@ -68,7 +144,27 @@ public:
         }
         for (int c = 0; c < outs; ++c)
             out[c] = buf.getWritePointer (c);
-        fx->compute (n, in, out);
+        juce::int64 t0 = 0;
+        bool moving = false;
+        const auto* a = autoBegin (t0, moving);
+        if (a == nullptr || ! moving)
+        {
+            if (a != nullptr)
+                autoSet (*a, t0);
+            fx->compute (n, in, out);
+            return;
+        }
+        float* pin[8];
+        float* pout[8];
+        for (int i = 0; i < n;)
+        {
+            const int k = autoSpan (t0 + i, n - i);
+            autoSet (*a, t0 + i);
+            for (int c = 0; c < ins; ++c)  pin[c] = in[c] + i;
+            for (int c = 0; c < outs; ++c) pout[c] = out[c] + i;
+            fx->compute (k, pin, pout);
+            i += k;
+        }
     }
 
 private:
@@ -106,6 +202,18 @@ struct Poly : public mydsp_poly
     {
         return ! fVoiceTable.empty() && fVoiceTable[0]->getLabelMap().count (label) > 0;
     }
+
+    std::vector<float*> zones (const std::string& label)
+    {
+        std::vector<float*> out;
+        for (auto* voice : fVoiceTable)
+        {
+            auto& m = voice->getLabelMap();
+            if (auto it = m.find (label); it != m.end())
+                out.push_back (it->second);
+        }
+        return out;
+    }
 };
 
 class FaustSynth final : public FaustNode
@@ -125,7 +233,24 @@ public:
         if (key == "freq" || key == "gain" || key == "gate" || ! poly->has (key))
             return false;
         values[key] = value;
-        poly->setAll (key, value);
+        if (! isAutomated (key))
+            poly->setAll (key, value);
+        return true;
+    }
+
+    std::vector<float*> zonesFor (const std::string& label) override
+    {
+        if (label == "freq" || label == "gain" || label == "gate")  // played by the notes
+            return {};
+        return poly->zones (label);
+    }
+
+    bool settingFor (const std::string& label, float& v) override
+    {
+        auto it = values.find (label);
+        if (it == values.end())
+            return false;
+        v = it->second;
         return true;
     }
 
@@ -145,11 +270,25 @@ public:
             return;
         float* out[2];
         int done = 0;
+        juce::int64 t0 = 0;
+        bool moving = false;
+        const auto* a = autoBegin (t0, moving);
+        if (a != nullptr)
+            autoSet (*a, t0);
+        if (! moving)
+            a = nullptr;  // set once for the block
         auto run = [&] (int upTo)
         {
             while (done < upTo)
             {
-                const int k = perSample ? 1 : juce::jmin (upTo - done, MIX_BUFFER_SIZE);
+                int k = perSample ? 1 : juce::jmin (upTo - done, MIX_BUFFER_SIZE);
+                if (a != nullptr)
+                {
+                    const juce::int64 t = t0 + done;
+                    if (done > 0 && ((t % autoGrid) + autoGrid) % autoGrid == 0)
+                        autoSet (*a, t);
+                    k = autoSpan (t, k);
+                }
                 out[0] = buf.getWritePointer (0, done);
                 out[1] = buf.getWritePointer (1, done);
                 poly->compute (k, nullptr, out);

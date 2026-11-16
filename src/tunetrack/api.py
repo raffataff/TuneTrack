@@ -340,6 +340,8 @@ def project_info(project: str | None = None, clips: bool = True) -> dict:
             d["instrument"] = t.instrument.label()
             if t.instrument.params:
                 d["instrument_params"] = t.instrument.params
+            if t.instrument.automation:
+                d["instrument_automation"] = sorted(t.instrument.automation)
         d["volume_db"] = t.volume_db
         if t.pan:
             d["pan"] = t.pan
@@ -626,13 +628,14 @@ def _eq_label(p: Project, f: Device) -> str:
 
 
 def _fx_label(p: Project, f: Device) -> str:
-    """An effect's label, with the plugin an EQ runs on and the track that keys its sidechain."""
+    """An effect's label, with the plugin an EQ runs on, the track that keys its sidechain and what is automated."""
+    auto = f" ~{','.join(sorted(f.automation))}" if f.automation else ""
     if eqmap.is_eq(f):
-        return _eq_label(p, f)
+        return _eq_label(p, f) + auto
     if not f.sidechain:
-        return f.label()
+        return f.label() + auto
     key = next((t.name for t in p.tracks if t.id == f.sidechain), f"missing track {f.sidechain}")
-    return f"{f.label()} <- sidechain {key}"
+    return f"{f.label()} <- sidechain {key}{auto}"
 
 
 def _sidechain_device_check(dev: Device) -> None:
@@ -779,22 +782,65 @@ def fx_remove(track: str, index: int, project: str | None = None) -> dict:
     return {"removed": removed.label(), "fx": labels}
 
 
-def automation(track: str, param: str = "volume_db", points: list | None = None, clear: bool = False,
-               project: str | None = None) -> dict:
-    """Track volume_db / pan automation. points: [[pos, value], ...] (linear between points)."""
-    if param not in ("volume_db", "pan"):
-        raise ValueError("param must be volume_db or pan (use cc for instrument expression)")
-    with _Edit(project) as p:
+def _auto_target(p: Project, track: str, device, param: str) -> tuple[Device, str, bool]:
+    """(device, its label, whether its values are numbers) for a device automation lane, or an error that says
+    what to pass."""
+    if device == "instrument" or device == "inst":
+        if track == "master":
+            raise ValueError("the master has no instrument; device is an index into its effects")
         t = p.track(track)
-        lane = [] if clear else t.automation.get(param, [])
+        dev = t.instrument
+        if dev is None:
+            raise ValueError(f"{t.name} has no instrument")
+        if dev.type == "sfz":
+            raise ValueError("an SFZ instrument has no settings to automate: shape it with cc() (CC1/CC11, bend)")
+    else:
+        try:
+            index = int(device)
+        except (TypeError, ValueError):
+            raise ValueError(f"device is an effect index (as fx_update takes) or 'instrument', not {device!r}") from None
+        dev = _fx_at(_fx_chain(p, track), track, index)
+    if dev.type == "synth":
+        known = [k for k in synths.SYNTHS[dev.name][2] if k not in ("freq", "gain", "gate")]
+    elif dev.type == "builtin":
+        known = list(synths.FX[dev.name][1])
+    else:
+        return dev, _fx_label(p, dev), False  # a plugin's parameters are checked when it loads (plugin_params lists them)
+    if param not in known:
+        raise ValueError(f"{dev.label()} has no setting {param!r}. Settings: {', '.join(known)}")
+    return dev, _fx_label(p, dev), True
+
+
+def automation(track: str, param: str = "volume_db", points: list | None = None, clear: bool = False,
+               project: str | None = None, device=None) -> dict:
+    """Automation lanes, straight lines between points: [[pos, value], ...]. device=None: the track's fader
+    (param volume_db or pan). device=<n>: effect n of the track's chain (track="master" for the master's), or
+    "instrument"; param is then one of its settings (as fx_update / track_update take them; a VST3 value is 0..1
+    or the text the plugin shows, e.g. "2 kHz"). An automated setting ignores its static value."""
+    with _Edit(project) as p:
+        if device is None:
+            if param not in ("volume_db", "pan"):
+                raise ValueError("param must be volume_db or pan for the fader; pass device=<effect index> or "
+                                 "'instrument' to automate a device setting (cc() shapes instrument expression)")
+            t = p.track(track)
+            lanes, who = t.automation, {"track": t.name}
+            numeric = True
+        else:
+            dev, _label, numeric = _auto_target(p, track, device, param)
+            lanes, who = dev.automation, {"track": track if track == "master" else p.track(track).name}
+        lane = [] if clear else list(lanes.get(param, []))
         for pos, v in points or []:
             b = p.pos(pos)
-            lane = [pt for pt in lane if abs(pt[0] - b) > 1e-6] + [[b, float(v)]]
+            if numeric or not isinstance(v, str):
+                v = float(v)
+            lane = [pt for pt in lane if abs(pt[0] - b) > 1e-6] + [[b, v]]
         if lane:
-            t.automation[param] = sorted(lane)
+            lanes[param] = sorted(lane, key=lambda q: q[0])
         else:
-            t.automation.pop(param, None)
-    return {"track": t.name, param: [[p.fmt_pos(b), v] for b, v in t.automation.get(param, [])]}
+            lanes.pop(param, None)
+        if device is not None:
+            who["device"] = _fx_label(p, dev)
+    return {**who, param: [[p.fmt_pos(b), v] for b, v in lanes.get(param, [])]}
 
 
 # ---- writing notes --------------------------------------------------------------------------------------------------
@@ -1040,9 +1086,10 @@ def notes_edit(track: str, op: str, start=None, end=None, low=None, high=None, p
 # ---- clips & arrangement -------------------------------------------------------------------------------------------
 
 def clip_edit(clip: str, op: str, project: str | None = None, to=None, track: str | None = None,
-              times: int = 1, length=None, at=None, name: str | None = None) -> dict:
+              times: int = 1, length=None, at=None, name: str | None = None, bpm=None, pitch=None) -> dict:
     """ops: move(to[, track]) | copy(to[, track]) | duplicate(times) | resize(length) | split(at) | delete |
-    rename(name) | mute | unmute"""
+    rename(name) | mute | unmute | stretch(bpm, pitch) (audio: bpm = source tempo to follow the project's
+    tempo, 0 = stop; pitch = semitones)"""
     with _Edit(project) as p:
         t, c = p.clip(clip)
         res: dict = {"clip": c.id}
@@ -1068,9 +1115,11 @@ def clip_edit(clip: str, op: str, project: str | None = None, to=None, track: st
             cut = p.pos(at) - c.start
             if not 0 < cut < c.length:
                 raise ValueError("split point must be inside the clip")
+            src_cut = (cut * 60 / c.bpm if c.bpm
+                       else p.tempo_map().sec(c.start + cut) - p.tempo_map().sec(c.start))  # source seconds
             right = Clip(id=p.new_id("c"), kind=c.kind, name=c.name, start=c.start + cut, length=c.length - cut,
-                         file=c.file, offset=c.offset + (p.tempo_map().sec(c.start + cut) - p.tempo_map().sec(c.start)),
-                         gain_db=c.gain_db, fade_out=c.fade_out)
+                         file=c.file, offset=c.offset + src_cut, gain_db=c.gain_db, fade_out=c.fade_out,
+                         bpm=c.bpm, pitch=c.pitch)
             right.notes = [Note(n.pitch, n.start - cut, n.dur, n.vel) for n in c.notes if n.start >= cut]
             right.cc = {k: [[b - cut, v] for b, v in pts if b >= cut] for k, pts in c.cc.items()}
             c.notes = [n for n in c.notes if n.start < cut]
@@ -1087,6 +1136,20 @@ def clip_edit(clip: str, op: str, project: str | None = None, to=None, track: st
             c.name = name or c.name
         elif op in ("mute", "unmute"):
             c.muted = op == "mute"
+        elif op == "stretch":
+            if c.kind != "audio":
+                raise ValueError("stretch is for audio clips (bpm = the tempo the audio was played at, pitch = "
+                                 "semitones)")
+            if bpm is None and pitch is None:
+                raise ValueError("stretch needs bpm (the tempo the audio was played at, 0 = stop following the "
+                                 "tempo) and/or pitch (semitones, -24..24)")
+            new_bpm, new_pitch = _stretch_args(c.bpm if bpm is None else bpm, c.pitch if pitch is None else pitch)
+            if new_bpm != c.bpm:  # keep the same stretch of source audio: its length in beats changes
+                tm = p.tempo_map()
+                secs = c.length * 60 / c.bpm if c.bpm else tm.sec(c.end) - tm.sec(c.start)
+                c.length = secs * new_bpm / 60 if new_bpm else tm.beat(tm.sec(c.start) + secs) - c.start
+            c.bpm, c.pitch = new_bpm, new_pitch
+            res.update(bpm=c.bpm, pitch=c.pitch, length_beats=round(c.length, 3))
         else:
             raise ValueError(f"Unknown clip op {op!r}")
     return res
@@ -1169,9 +1232,14 @@ def arrange(op: str, start, end, to=None, tracks: list | None = None, project: s
                     p.chord_track = harm.cut(p.chord_track, s, e)
                 p.chord_track = harm.put(p.chord_track, [{**x, "at": x["at"] + d} for x in got], d, d + span)
         if op in ("insert", "delete"):
+            lanes = []
             for t in ([p.track(x) for x in tracks] if tracks else p.tracks):
-                for lane, pts in list(t.automation.items()):
-                    t.automation[lane] = _shift_lane(pts, s, e, op)
+                lanes += [t.automation] + [d.automation for d in [t.instrument, *t.fx] if d is not None]
+            if not tracks:
+                lanes += [d.automation for d in p.master.get("fx", []) if isinstance(d, Device)]
+            for auto in lanes:
+                for lane, pts in list(auto.items()):
+                    auto[lane] = _shift_lane(pts, s, e, op)
             if not tracks:
                 _shift_timeline(p, s, e, op)
         for t in p.tracks:
@@ -1179,12 +1247,15 @@ def arrange(op: str, start, end, to=None, tracks: list | None = None, project: s
     return {"op": op, "range": f"{p.fmt_pos(s)} - {p.fmt_pos(e)}", "length_bars": round(p.end / p.beats_per_bar, 2)}
 
 
-def _lane_value(pts: list, at: float) -> float:
-    pts = sorted(pts)
+def _lane_value(pts: list, at: float):
+    """A lane's value at a beat (a text value, a plugin's shown setting, holds until the next point)."""
+    pts = sorted(pts, key=lambda q: q[0])
     if at <= pts[0][0]:
         return pts[0][1]
     for (b0, v0), (b1, v1) in zip(pts, pts[1:]):
         if b0 <= at <= b1:
+            if isinstance(v0, str) or isinstance(v1, str):
+                return v1 if at >= b1 else v0
             return v0 if b1 - b0 < 1e-9 else v0 + (v1 - v0) * (at - b0) / (b1 - b0)
     return pts[-1][1]
 
@@ -1206,7 +1277,7 @@ def _shift_lane(pts: list, s: float, e: float, op: str) -> list:
         if has_after and pts[0][0] < e:
             out.append([s, v])
     dedup: dict[float, float] = {}
-    for b, x in sorted(out):
+    for b, x in sorted(out, key=lambda q: q[0]):
         dedup[round(b, 9)] = x
     return [[b, x] for b, x in sorted(dedup.items())]
 
@@ -1298,8 +1369,11 @@ def _audio_dest(folder: Path, src: Path) -> Path:
 
 
 def audio_import(track: str, file: str, at=0, project: str | None = None, copy: bool = True, gain_db: float = 0.0,
-                 fade_in: float = 0.0, fade_out: float = 0.0) -> dict:
+                 fade_in: float = 0.0, fade_out: float = 0.0, bpm: float | None = None, pitch: float = 0.0) -> dict:
+    """Place an audio file on an audio track. bpm: the tempo it was played at, so it follows the project's
+    tempo (pitch kept); pitch: transpose in semitones (length kept)."""
     import soundfile as sf
+    bpm, pitch = _stretch_args(bpm, pitch)
     with _Edit(project) as p:
         t = p.track(track)
         if t.kind != "audio":
@@ -1316,11 +1390,27 @@ def audio_import(track: str, file: str, at=0, project: str | None = None, copy: 
         info = sf.info(str(src))
         s = p.pos(at)
         tm = p.tempo_map()
-        length = tm.beat(tm.sec(s) + info.duration) - s
+        length = info.duration * bpm / 60 if bpm else tm.beat(tm.sec(s) + info.duration) - s
         c = Clip(id=p.new_id("c"), kind="audio", name=src.stem, start=s, length=length, file=str(rel).replace("\\", "/"),
-                 gain_db=gain_db, fade_in=fade_in, fade_out=fade_out)
+                 gain_db=gain_db, fade_in=fade_in, fade_out=fade_out, bpm=bpm, pitch=pitch)
         t.clips.append(c)
     return {"clip": c.id, "length_beats": round(length, 3), "duration_s": round(info.duration, 2)}
+
+
+def _stretch_args(bpm, pitch) -> tuple[float | None, float]:
+    """Validated (bpm or None, pitch) for an audio clip's stretch; bpm 0/None = don't follow the tempo."""
+    try:
+        bpm = float(bpm) if bpm else None
+        pitch = float(pitch or 0)
+    except (TypeError, ValueError):
+        raise ValueError("bpm and pitch must be numbers: bpm = the tempo the audio was played at (20-400, 0 = "
+                         "don't follow the tempo), pitch = semitones (-24..24)") from None
+    if bpm is not None and not 20 <= bpm <= 400:
+        raise ValueError(f"bpm {bpm:g} is out of range: pass the tempo the audio was played at (20-400), or 0 "
+                         f"to stop following the project tempo")
+    if not -24 <= pitch <= 24:
+        raise ValueError(f"pitch {pitch:g} is out of range: pass semitones between -24 and 24")
+    return bpm, pitch
 
 
 def midi_import(file: str, at=0, project: str | None = None, instrument=None) -> dict:

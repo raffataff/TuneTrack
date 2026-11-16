@@ -60,6 +60,8 @@ def _fx(f: dict) -> dict:
     out = {"label": f"{f['name']} · {f['patch']}" if f.get("patch") else f["name"]}
     if f.get("bypass"):
         out["bypass"] = True
+    if f.get("automation"):
+        out["auto"] = sorted(f["automation"])
     return out
 
 

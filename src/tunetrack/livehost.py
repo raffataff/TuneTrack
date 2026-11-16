@@ -95,7 +95,8 @@ def state() -> dict:
         tk, dev = p.engine.tick, p.engine.ready
         out.update(playing=bool(tk.get("playing")), beat=tk.get("beat", 0.0), looping=bool(tk.get("looping")),
                    peaks=tk.get("peaks", {}), cpu=tk.get("cpu", 0.0), dropouts=tk.get("xruns", 0), rev=p.rev,
-                   device={k: dev.get(k) for k in ("type", "name", "sr", "block")} if dev.get("name") else None)
+                   device={k: dev.get(k) for k in ("type", "name", "sr", "block", "rate", "converted")}
+                   if dev.get("name") else None)
         if dev.get("device_problem") and not out["error"]:
             out["error"] = dev["device_problem"]
     return out

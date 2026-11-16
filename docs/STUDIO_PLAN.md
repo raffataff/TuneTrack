@@ -6,11 +6,12 @@ unblock. Keep it current: when a stage lands or a decision changes, edit this fi
 
 Last updated: 2026-11-16. Merged to `main`: `studio-core` (PR #4), `desk-takes` (PR #5, 47e445a: takes on the
 Desk, benches, Needs You per situation, reports and scorecard, the usage cuts, the Mix console, per-seat craft
-text, the take fixes below, and stage 3's first cut), a dependency bump (PR #6), and `crew-usage` (PR #7, 826a36e:
+text, the take fixes below, and stage 3's first cut), a dependency bump (PR #6), `crew-usage` (PR #7, 826a36e:
 the take-path fix, `listen()` for a bar range, lean MCP instructions, batched auditions, open tasks for the seats
-that add tasks).
-**Uncommitted on branch `offline-engine`** (off `main` at 826a36e; the owner has not asked for a commit): stage
-3.2, offline rendering through the engine (section 6, stage 3).
+that add tasks), and `offline-engine` (PR #8, 880e673: stage 3.2, offline rendering through the engine).
+**Uncommitted on branch `engine-lanes`** (off `main` at 880e673; the owner has not asked for a commit): most of
+stage 3.3 (section 6, stage 3, item 3): strips on several cores, sample-rate conversion, the mono sidechain key; and
+stage 3.4 (item 4): automation of any device setting, tempo-synced effects, time-stretch of audio clips.
 
 ---
 
@@ -96,7 +97,7 @@ Mastering/delivery, scheduling and Needs You belong to the studio, not to a seat
 
 ## 4. What exists now
 
-On `main`, except what section 6 marks `offline-engine`, which is uncommitted on that branch.
+On `main`, except what section 6 marks `engine-lanes`, which is uncommitted on that branch.
 
 ### Code map
 
@@ -354,7 +355,7 @@ outside the take's seat's department is flagged in `take_diff`, not blocked.
 
 Verified:
 
-- `uv run python -m pytest -q` → 300 pass (135 existed before this work; since 2026-11-16 the whole suite renders
+- `uv run python -m pytest -q` → 305 pass (135 existed before this work; since 2026-11-16 the whole suite renders
   through the engine when it is built, about 60 s). `tests/test_crew_host.py` covers the manager
   lock, hold, stop, recovery, the host, `board()`, `take_audition()`, the server's calls, and a take open on the
   Desk (edits, undo and playback land in the take; ids only; a stale page is refused; the stream follows it).
@@ -453,6 +454,10 @@ Verified:
 
 Not verified:
 
+- Stage 3.3 through a real audio device: lanes on the ASIO callback thread (dropouts, CPU) and a converted
+  device have only been checked offline and through the `pull` op. Nobody has heard LIVE since lanes.
+- Lanes with the owner's heavy plugins (HALion, BBC SO) rendering on worker threads: the suite's HALion probe test
+  passes, the big fuzeball session was not re-measured with lanes (its files were missing that day, section 8).
 - Batched auditions on a live session: no two takes were handed in at the same moment in `dup-check`.
 - **The loop-seam figure drives extra work.** In both 2026-11-16 sessions an 8-bar loop's `edge_level_diff_db`
   (7-8 dB, bar 8 into bar 1) set off a seam fix by the Composer, a returned mix and a Review task. Nobody has
@@ -551,7 +556,8 @@ What the session's own review (R22) says the studio lacks, not built:
 
 - A sampled instrument's release or envelope cannot be changed: `sfz_info` shows no such control, and a HALion
   "Amp Decay" set through `track_update(instrument_params=...)` read back unchanged. Two Sound runs ended empty.
-- EQ cannot be automated for a section; Mix used volume automation instead. Stage 3.
+- EQ cannot be automated for a section; Mix used volume automation instead. Built 2026-11-16 (stage 3.4):
+  `automation(..., device=)` automates any effect or instrument setting, the EQ's included.
 - An articulation per phrase (spiccato for bars 13-24 only) needs the bars moved to their own track by hand.
 
 Known gaps and risks:
@@ -639,8 +645,8 @@ Built (`engine/`, `src/tunetrack/live.py`, `tests/test_live.py`, `engine/README.
 - `tunetrack-engine.exe`: one process hosting the session in a JUCE graph. VST3 instruments and effects (states,
   shell plugins, settings by number or shown text), the built-in synths and effects (Faust turned into C++ by
   `engine/tools/gen_faust.py`, settings live), faders, balance pan, volume/pan automation, sends, buses, sidechain
-  keys, master chain, plugin latency lined up by JUCE. SFZ instruments and audio clips play as dry stems the
-  offline worker renders and caches; their inserts run live.
+  keys, master chain, plugin latency lined up by JUCE. Audio clips play as dry stems the offline worker renders
+  and caches; their inserts run live. SFZ instruments did too until stage 3.3 put sfizz in the engine (item 3).
 - Real time through ASIO (the SSL 2) or Windows Audio, transport with seek and loop, meters per strip, plugin
   windows (`editor`), saving a plugin's state (`save_state`), offline render from the same graph.
 - Hot swap: `Player.sync()` reloads when `project.json` has a new revision; devices that did not change keep
@@ -678,7 +684,7 @@ Left, in order:
    Not checked by a person yet; opening a take while live was checked on the server side only. Live plays the raw
    mix (no loudness normalisation or limiter, the tag's tooltip says so). Left: live peaks on the console bench
    (`studio.js`), Window buttons for master inserts, an output device picker.
-2. Done 2026-11-16 (`offline-engine`, uncommitted): **offline rendering goes through the engine.** What agents
+2. Done 2026-11-16 (`offline-engine`, PR #8): **offline rendering goes through the engine.** What agents
    measure (`render`, `listen`, `audition`, exports, stems, layers) is now rendered by the engine the owner hears.
    The Python mixer stays (faders, sends, buses, loudness, stems in numpy, as before); only the jobs moved:
    - Per-track audio before the fader comes out of the engine as **taps** (`render` op `taps`, written by the
@@ -708,10 +714,74 @@ Left, in order:
    engine's version of it.
    Left: the probe could replace most of the fixed settle wait (2 s + 0.4 s per plugin with a state) for
    instruments, but parameter overrides still wait for it; one engine computes on one core (item 3).
-3. SFZ in the engine (sfizz) instead of stems; multi-core graph; sample-rate conversion when the device cannot
-   run at the project's rate; a mono sidechain bus gets the left channel only. DawDreamer is still used for SFZ
-   renders, plugin scanning, `patch_capture`, preset import and `plugin_params`.
-4. The README limits this stage closes: plugin parameter automation, tempo-synced effects, time-stretch.
+3. Done 2026-11-16 (`engine-lanes`, uncommitted), stage 3.3:
+   - **Several cores** (`engine/src/Lanes.h`). Every source strip whose inserts listen to no other strip is a lane:
+     a graph of its own, computed before each block by `LanePool` on worker threads (one per physical core but one,
+     at most 8; `--threads`). The session's graph sees a lane as one device with the lane's latency, so alignment
+     is JUCE's as before. Keyed strips, buses and the master stay in the session's graph. Renders are bit for bit
+     the same on 1 and 4 threads. One engine, 16 built-in synth strips with three effects each, 39 s of music:
+     5.3 s on one thread, 3.5 s on two, 1.7 s on four, 1.05 s on eight. Offline, `engine.engine_threads` shares the
+     cores out between the `render_workers` engines (16 logical cores / 4 engines = 4 each); the bus and master
+     engine gets one. Live playback uses the default.
+   - **Sample-rate conversion.** The session runs at the project's rate. On load the device is asked for it (an
+     ASIO interface switches); one that cannot keeps its own rate and is fed through `Resampler.h` (Kaiser-windowed
+     sinc, cut-off under the lower Nyquist): level exact, flat to 18 kHz at 48 to 44.1 kHz, no fold-back (a 30 kHz
+     tone from a 96 kHz project under -60 dB at 48 kHz), 1-2% of a core. JUCE's own windowed sinc was tried first:
+     -0.09 dB at every frequency and no low-pass going down. The LIVE tag's tooltip says when playback is
+     converted. The old "device runs at X Hz" problem is gone.
+   - **Mono sidechain key**: a one-channel key input (TDR Nova's) hears (L + R) / 2, as the offline worker feeds it,
+     not the left alone. The test fails with the old wiring.
+   - **SFZ in the engine (sfizz 1.2.3)** instead of stems, live and offline (`engine/src/SfzNode.cpp`,
+     `engine/cmake/Sfizz.cmake`). The owner OK'd the download; the source release is unpacked in
+     `engine/third_party/sfizz/` (not in git; the plugin installer the owner ran there put only its uninstaller in
+     it, the plugins went to Common Files). Played at TuneTrack's player's level: sfizz's -7.35 dB master volume is
+     set to 0, and its own CC7 volume link starts at 127 where the file reads no CC7 (the General MIDI 100 was
+     -4.15 dB on everything). Renders are bit for bit repeatable: two patches to sfizz on configure (a random
+     generator per SFZ node; the offline wait covers loads still queued), and the node is told it runs offline
+     (a node added to a JUCE graph is not; without it sfizz streamed in real time and a held note dropped out 0.17 s
+     in, differently each render; there is a test). `sfz_player: "tunetrack"` keeps the old player. Measured
+     against it: The Lonely Walk's six VSCO/piano tracks within 0.1 dB, master equal, render 6.3 s (8.1 s); VSCO
+     violins and cello pizz, jRhodes and Salamander within 0.5 dB (Salamander's loudness curve 0.85 alike: sfizz
+     plays its ARIA velocity/CC opcodes); Virtuosity drums +3.3 dB; Meatbass pizz, near silent in the old player
+     (-71 dB: its envelope is CC-driven), now plays. Not checked: live playback through the audio interface
+     (real-time streaming; the `pull` op runs offline). DawDreamer is still used for plugin scanning,
+     `patch_capture`, preset import and `plugin_params`.
+4. Done 2026-11-16 (`engine-lanes`, uncommitted), stage 3.4: the README limits.
+   - **Device automation.** `Device.automation` (`{setting: [[beat, value]]}`) on any effect or instrument, set with
+     `automation(track, param, points, device=<effect index> | "instrument")` (`track="master"` for master effects).
+     Built-in settings are checked on the edit (an unknown one gets the list); a VST3 parameter goes by name, index
+     or shown text and is checked on load (a warning). An automated setting ignores its static value. In the engine
+     (`engine/src/Automation.h`): a VST3 parameter is set at each block's start (512 samples offline), built-ins move
+     every 32 samples of song time inside the node, so their renders do not depend on the block size. The value is
+     read at the song time of the audio arriving at the device: a step after plugins with 0 to 184 samples of latency
+     lands on the same sample. A cleared lane goes back to the setting, or to the value before automation (checked on
+     a running engine). builtin:eq on SSL / Nova: the lanes are the translated plugin settings at each point, and a
+     band at 0 dB or a filter at its off point stays in a hair inside its range, so a sweep from flat works. Lanes
+     are in the render cache key, arrange insert/delete moves them, `project_info` and effect labels show
+     `~setting`, the console's slot shows `~`. The DawDreamer fallback holds the setting and says so; SFZ
+     instruments have none (cc). Measured: a gain ramp -40 to 0 dB within 0.3 dB at each point; Nova's mid band from
+     flat to +12 dB on a 1 kHz tone; Nova's Output Gain by its shown text (`tests/test_automation.py`).
+   - **Tempo-synced effects.** The engine's play head carried the tempo map since stage 3; now checked: Waves
+     H-Delay synced to the host at 1/4 follows a change from 120 to 60 bpm (it glides to a new time, so its first
+     echo after a change or a load is ~25 ms early). SSL X-Delay ignored the host tempo even at a steady 60 bpm, in
+     DawDreamer too (the plugin, or a setting not found). The built-in delay's time is in beats: `live._delay_lane`
+     steps `delay_sec` at each tempo change and follows `time` automation (before, it kept the first tempo's time).
+     The DawDreamer worker gets the tempo map too (`set_bpm` per tick) for the plugins it hosts; Waves plugins run
+     through pedalboard there and see no host tempo.
+   - **Time-stretch** (built by an Opus subagent, reviewed): `Clip.bpm` (the tempo the audio was played at: the clip
+     follows the tempo map, pitch kept) and `Clip.pitch` (semitones); `audio_import(bpm=, pitch=)`,
+     `clip_edit(op="stretch")`; split moves the right half's offset in source seconds. Rubber Band through
+     pedalboard's `time_stretch`, one constant-tempo segment at a time with 10 ms crossfades (its per-sample factor
+     array lagged tempo steps by ~15 ms). Rubber Band's own rate is off by 0.05-0.3% (22-31 ms by the end of 30 s):
+     it is measured once per ratio per process on a click train and resampled away, with a pitch nudge of up to
+     0.03 semitones; beats land within 0.8-2 ms, pitch within 1-2 cents. A 38 s clip takes ~2.2 s, plus 3-5 s the
+     first time a process meets a ratio; each stretched clip is cached (`cache/stretch-<key>.wav`). Formants are not
+     kept (keeping them dropped a pure tone 9 dB). A new `bpm` keeps the clip's source audio, so its length in beats
+     changes. `tests/test_stretch.py`.
+   - Found on the way: the engine's audio stem key (`live-in-*`) left out the tempo map, so a tempo change before a
+     clip could replay a stale stem. Fixed (audio stems are assembled again once).
+   Not done: no UI to draw or edit automation (agents and the API only); VST3 automation is per block, not sample
+   accurate; nobody has heard any of it.
 
 ### Stage 4: tracking
 
@@ -736,10 +806,11 @@ browser that auditions live, genre style sheets as per-seat skills.
 |---|---|
 | Claude as a crew agent | Done: the CLI is logged in (`crew detect` says `auth: ok`, and one run worked, 2026-11-13). |
 | Stage 3 | Done 2026-11-14: Build Tools, CMake and JUCE 9 are installed. Done 2026-11-16: Smart App Control switched off (it blocked a fresh engine build, and with it LIVE). Left: choose the repo's licence (below). |
-| Orchestral palette | Install Spitfire LABS / BBC SO Discover (needs their Spitfire sign-in), then `tunetrack scan` and capture patches. |
+| Orchestral palette | `BBC Symphony Orchestra (64 Bit).vst3` is in the VST3 folder as of 2026-11-16 (not scanned or tried yet); Spitfire LABS is not. Then `tunetrack scan` and capture patches. |
+| SFZ in the engine | Done 2026-11-16: sfizz's source is in `engine/third_party/sfizz/`. Left: hear an SFZ track on LIVE (real-time streaming is not checked). |
 | Stage 5 | Install `ffmpeg` on PATH. |
 | New tools in their own apps | Restart Claude so the MCP server reloads (it runs from this checkout). |
-| Keeping the work | Say when to commit what is uncommitted on `offline-engine`, and whether to open a PR for it. |
+| Keeping the work | Say when to commit what is uncommitted on `engine-lanes`, and whether to open a PR for it. |
 
 ---
 
@@ -748,6 +819,13 @@ browser that auditions live, genre style sheets as per-seat skills.
 - **Commands from an agent's shell**: `uv run tunetrack ...`, `.venv/Scripts/tunetrack.exe` and now `uv run pytest`
   are blocked there by Windows Application Control. Use `uv run python -m tunetrack.cli <command>` and
   `uv run python -m pytest -q`.
+- **Untracking files deletes them on the next merge.** Stage 3.2's commit (58c95f5) took `projects/` and
+  `library/crew_history.json` out of git with the files left on disk; merging it into `main`, where they were still
+  tracked, made git delete them from the working folder (found 2026-11-16: 14 sessions' `project.json`, 8 audio
+  clips, the crew history). Restored the same day with the owner's OK: from `58c95f5^`, and The Lonely Walk from
+  its newest `history/` snapshot (rev 39; git had rev 31; its last save after that is lost). All 15 sessions load
+  with their audio. Before a commit that untracks files, copy them somewhere outside the repo, and check they are
+  still on disk after the merge.
 - **Don't commit or push unless the owner asks.** The repo is public (`raffataff/TuneTrack`): no secrets, no
   licensed sample content, and never the owner's email (use the GitHub noreply address already in git config).
 - **Don't disturb the owner's open project.** `library/state.json` holds what their editor shows; `project_new`
@@ -798,9 +876,13 @@ take cleanup command, loose takes handed in by the floor and undecided auditions
 2026-11-16 two live sessions showed agents editing the session from a take by naming it, and duplicate tasks;
 both fixed on `crew-usage` (PR #7) and the second seen gone live. Later that day stage 3.2 was built on
 `offline-engine`: offline renders go through the engine (section 6, stage 3, item 2). The owner chose ringing synth
-releases (`synth_per_sample` off). Next: their ears on the loop-seam figure (section 5, "Not verified"), a short
-live crew session on the engine backend (none has run on it yet), the schema trim (needs one live run per
-runner), a whole session with Claude in a seat, then stage 3 item 3.
+releases (`synth_per_sample` off). PR #8 merged it. Later still, stage 3.3 on `engine-lanes`: strips on several
+cores, sample-rate conversion, the mono sidechain key, and SFZ through sfizz in the engine (section 6, stage 3,
+item 3); then stage 3.4 on the same branch: automation of any device setting, tempo-synced effects, time-stretch
+(item 4; 326 tests pass). The same day the session files were found deleted from disk by the merge
+(section 8) and restored. Next: the owner's ears on LIVE with lanes and an SFZ track, their ears on the loop-seam
+figure (section 5, "Not verified"), a short live crew session on the engine backend, the schema trim (needs one
+live run per runner), a whole session with Claude in a seat.
 
 To measure a session's usage: each run's log is `<session>/studio/logs/<task>-<attempt>-<seat>.jsonl` (the agent
 CLI's own event stream). For Codex, `turn.completed` carries `usage`, and each `item.completed` of type

@@ -35,3 +35,6 @@ projects/
 
 # scratch output from other tools (design mockups etc.)
 output/
+
+# the sfizz source release (50 MB) and the sfizz plugin installer's uninstaller: engine/README.md says how to get it
+engine/third_party/sfizz/

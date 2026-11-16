@@ -378,7 +378,8 @@ function drawClip(g, t, c, y, L, col) {
   g.strokeStyle = sel ? "#ffffff" : col; g.lineWidth = sel ? 2 : 1; g.strokeRect(x + 1.5, y + 3.5, w - 3, L - 9); g.lineWidth = 1;
   g.fillStyle = "#0c0c0d"; g.font = "11px Segoe UI, system-ui, sans-serif";
   g.save(); g.beginPath(); g.rect(x + 2, y + 3, w - 4, L - 8); g.clip();
-  g.fillText(c.name || (c.kind === "audio" ? (c.file || "").split("/").pop() : ""), x + 5, y + 14);
+  g.fillText((c.name || (c.kind === "audio" ? (c.file || "").split("/").pop() : ""))
+    + (c.bpm ? ` · ${+c.bpm.toFixed(2)} bpm` : "") + (c.pitch ? ` · ${c.pitch > 0 ? "+" : ""}${+c.pitch.toFixed(2)} st` : ""), x + 5, y + 14);
   if (c.kind === "midi" && c.notes.length) {
     let lo = 127, hi = 0; for (const n of c.notes) { lo = Math.min(lo, n[0]); hi = Math.max(hi, n[0]); }
     const span = Math.max(12, hi - lo + 2), top = y + 19, h = L - 26;
@@ -924,6 +925,7 @@ function liveTick() {
 function liveTag(el, what) {
   const L = S.eng, st = L.st, d = st.device;
   el.title = (st.on && d ? `${d.name} · ${d.sr} Hz · ${d.block} samples · CPU ${Math.round((st.cpu || 0) * 100)}% · ${st.dropouts || 0} dropout(s)\n` : "")
+    + (st.on && d && d.converted ? `The project is ${d.rate} Hz and this output cannot run at that rate: playback is converted to ${d.sr} Hz.\n` : "")
     + (st.error ? st.error + "\n" : "") + "Live is the raw mix: no loudness normalisation or limiter, unlike an export.";
   const cut = (s) => s.length > 40 ? s.slice(0, 39) + "…" : s;
   const [text, cls] = st.loading || L.busy ? ["LIVE · LOADING", "tag stale"] : st.error ? ["LIVE · " + cut(st.error), "tag bad"]
