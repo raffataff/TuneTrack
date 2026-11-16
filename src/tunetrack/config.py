@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "sample_dirs": [str(INSTRUMENT_DIR)],
     "skip_plugins": [],
     "render_workers": 4,
+    "synth_per_sample": False,  # true: built-in synths cut long releases short, as the DawDreamer renderer did
     "default_sample_rate": 48000,
 }
 

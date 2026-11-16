@@ -192,11 +192,32 @@ public:
 
     Shared<MidiSeq> seq;
 
+    // A test note for the "is this instrument ready" probe (Session::probeBegin). Offline only: set and read on
+    // the message thread while no audio device is running the graph.
+    void startProbe (int channel, int note, int velocity, int64 length)
+    {
+        probe = { channel, note, velocity, length, false };
+        probing = true;
+    }
+
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer& midi) override
     {
         midi.clear();
         const int n = transport.blockLen;
         const int64 pos = transport.blockPos;
+        if (probing)
+        {
+            if (! probe.started)
+                midi.addEvent (juce::MidiMessage::noteOn (probe.channel, probe.note, (juce::uint8) probe.velocity), 0);
+            probe.started = true;
+            if (probe.left <= n)
+            {
+                midi.addEvent (juce::MidiMessage::noteOff (probe.channel, probe.note), (int) juce::jmax<int64> (0, probe.left - 1));
+                probing = false;
+            }
+            probe.left -= n;
+            return;
+        }
         const MidiSeq* s = seq.get();
         const bool swapped = seq.takeChanged();
 
@@ -282,6 +303,39 @@ private:
     size_t index = 0;
     int64 expected = -1;
     bool wasPlaying = false;
+    struct Probe { int channel = 1, note = 60, velocity = 100; int64 left = 0; bool started = false; } probe;
+    bool probing = false;
+};
+
+// ---- Meter: passes audio through; measures it while the ready probe runs --------------------------------------
+
+class MeterNode : public TtProcessor
+{
+public:
+    MeterNode() : TtProcessor ("meter", 2, 2) {}
+
+    bool on = false;  // message thread, offline only (see MidiSourceNode::startProbe)
+    double sum = 0.0;
+    int64 count = 0;
+    float peak = 0.0f;
+
+    void start() { sum = 0.0; count = 0; peak = 0.0f; on = true; }
+
+    void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
+    {
+        if (! on)
+            return;
+        const int n = buf.getNumSamples();
+        for (int c = 0; c < juce::jmin (2, buf.getNumChannels()); ++c)
+        {
+            const float* x = buf.getReadPointer (c);
+            for (int i = 0; i < n; ++i)
+                if (std::isfinite (x[i]))
+                    sum += (double) x[i] * x[i];
+            peak = juce::jmax (peak, buf.getMagnitude (c, 0, n));
+        }
+        count += n;
+    }
 };
 
 // ---- Stem: plays an audio file that starts at song position 0 -------------------------------------------------
@@ -375,6 +429,13 @@ public:
     std::atomic<float> peak[2] { 0.0f, 0.0f };
     std::atomic<int> bad { 0 };  // samples that arrived as NaN / infinity and were silenced
 
+    // Offline renders only (message thread, no device running): the strip's audio before the fader, written to a
+    // file from song position 0 for `left` samples. The first `skip` samples are the latency of the plugins
+    // before this point, so the file lines up with the music as the offline renderer's per-track files do.
+    std::unique_ptr<juce::AudioFormatWriter> tap;
+    int64 tapSkip = 0, tapLeft = 0;
+    float tapPeak = 0.0f;
+
     void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
     {
         const FaderParams* p = params.get();
@@ -393,6 +454,18 @@ public:
         }
         if (dirty > 0)
             bad.fetch_add (dirty, std::memory_order_relaxed);
+        if (tap != nullptr && tapLeft > 0)
+        {
+            const int from = (int) juce::jmin<int64> (tapSkip, n);
+            tapSkip -= from;
+            const int k = (int) juce::jmin<int64> (tapLeft, n - from);
+            if (k > 0)
+            {
+                tap->writeFromAudioSampleBuffer (buf, from, k);
+                tapPeak = juce::jmax (tapPeak, buf.getMagnitude (from, k));
+                tapLeft -= k;
+            }
+        }
         const float on = p->on ? 1.0f : 0.0f;
         const int64 t0 = transport.blockPos - latencyBefore.load (std::memory_order_relaxed);
         const bool moving = transport.blockPlaying;

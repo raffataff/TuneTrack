@@ -100,11 +100,20 @@ def song(tmp_path):
     api.write("Lead", "A4:q!mf C5 E5 D5 | C5:h A4:h | E5:q G5 A5 G5 | E5:w", at="1:1")
     api.write("Bass", "A2:h A2 | F2:h G2 | A2:h A2 | E2:w", at="1:1")
     api.drums("Drums", {"kick": "x...x...x...x...", "hat": "..x...x...x...x."}, at="1:1", bars=4)
-    api.add_notes("Drums", [[49, "3:1", 0.25, 110]])  # a crash written as a 16th: the synth kit chokes it
+    api.add_notes("Drums", [[49, "3:1", 0.25, 110]])  # a crash written as a 16th (choked in per-sample mode)
     return tmp_path
 
 
-def test_listen_end_to_end(song):
+def _per_sample(monkeypatch, on: bool) -> None:
+    from tunetrack import config
+    real = config.load_config
+    monkeypatch.setattr(config, "load_config", lambda: {**real(), "synth_per_sample": on})
+
+
+def test_listen_end_to_end(song, monkeypatch):
+    # per-sample synths free a releasing voice at its first near-silent sample, so the built-in kit chokes the
+    # crash at its note-off: a stand-in for a sampled kit that really does stop there
+    _per_sample(monkeypatch, True)
     rep = api.listen()
     assert [s["name"] for s in rep["sections"]] == ["A", "B"]
     assert len(rep["bar_lufs"]) == 4 and all(v is not None for v in rep["bar_lufs"])
@@ -118,6 +127,12 @@ def test_listen_end_to_end(song):
     assert (Path(api.load().path) / "renders" / "listen.json").exists()
     # second run comes from the caches
     assert api.listen()["verify"]["Lead"]["probe"]["rendered"] == "cached"
+
+
+def test_a_built_in_crash_rings_past_a_short_note(song, monkeypatch):
+    _per_sample(monkeypatch, False)  # the default since 2026-11-16: releases ring out
+    rep = api.listen()
+    assert not any("('crash') stops when its note ends" in w for w in rep["warnings"])
 
 
 def test_listen_compares_with_a_reference(song):

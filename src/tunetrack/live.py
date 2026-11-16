@@ -36,6 +36,48 @@ def engine_exe() -> Path | None:
     return None
 
 
+_RUNS: dict[str, bool] = {}
+
+BLOCKED = ("Windows did not let the engine start: Smart App Control blocks a program it has not seen before "
+           "unless it is signed (every new build of engine/ is such a program). Until this build is allowed, "
+           "renders use the DawDreamer worker and LIVE playback is unavailable.")
+
+
+def engine_runs() -> bool:
+    """Whether the built engine can be started on this machine. Checked once per build per process: started
+    without an audio device and with nothing on stdin, it exits at once."""
+    exe = engine_exe()
+    if exe is None:
+        return False
+    st = exe.stat()
+    k = f"{exe}:{st.st_mtime_ns}:{st.st_size}"
+    if k not in _RUNS:
+        try:
+            subprocess.run([str(exe), "--no-device"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            _RUNS[k] = True
+        except subprocess.TimeoutExpired:
+            _RUNS[k] = True  # it started; it just did not stop by itself
+        except OSError:
+            _RUNS[k] = False
+    return _RUNS[k]
+
+
+def synth_per_sample() -> bool:
+    """Built-in synths compute one sample per call, as DawDreamer's Faust host did: a releasing voice is freed at
+    the first near-silent sample, so long releases are cut short. Off (the owner's choice, 2026-11-16): releases ring
+    out as each synth sets them, live and offline alike. `synth_per_sample: true` in the library config brings back
+    the old sound."""
+    return bool(config.load_config().get("synth_per_sample", False))
+
+
+def engine_stamp() -> str:
+    """What identifies the engine's sound in a render cache key: the build and the synth mode."""
+    exe = engine_exe()
+    st = exe.stat() if exe else None
+    return f"engine:{st.st_mtime_ns if st else 0}:{st.st_size if st else 0}:{int(synth_per_sample())}"
+
+
 # ---- the spec ----------------------------------------------------------------------------------------------
 
 def _midi_clock(tm, sr: int):
@@ -109,11 +151,11 @@ def _fx_spec(d: Device, p: Project) -> dict | None:
 
 
 def _stem(r: Renderer, t: Track, spec: dict) -> str:
-    """The dry (no effects) audio of a track the engine cannot host: rendered offline once, then cached."""
+    """The dry (no effects) audio of a track the engine cannot host (SFZ): rendered once by the offline worker,
+    then cached."""
     dry = {**spec, "fx": []}
     r.render_track(t, dry)
-    from .engine import _fingerprint
-    return str(r.cache / f"{_fingerprint(dry)}.wav")
+    return str(r.cache / f"{r.key(dry)}.wav")
 
 
 def _audio_stem(r: Renderer, p: Project, t: Track, spec: dict) -> str:
@@ -125,6 +167,13 @@ def _audio_stem(r: Renderer, p: Project, t: Track, spec: dict) -> str:
         sf.write(str(part), audio_track_input(p, t, r.n).T, r.sr, subtype="FLOAT")
         part.replace(out)
     return str(out)
+
+
+def spec_head(r: Renderer) -> dict:
+    """The part of an engine spec that is the song's clock: sample rate, metre, tempo map, length."""
+    sr, tm, p = r.sr, r.tm, r.p
+    return {"sr": sr, "block": 512, "ts": list(p.time_sig), "end": r.n,
+            "tempo": [[int(round(tm.sec(b) * sr)), float(b), float(bpm)] for b, bpm in zip(tm.beats, tm.bpms)]}
 
 
 def build_spec(p: Project, progress=None) -> tuple[dict, list[str]]:
@@ -157,25 +206,6 @@ def build_spec(p: Project, progress=None) -> tuple[dict, list[str]]:
     key_ids = {kid for _o, _d, kid in sidechain_links(p)}
     tracks = []
 
-    def fx_chain(owner: Track | None, devices: list[Device], label: str) -> list[dict]:
-        out = []
-        for i, d in enumerate(devices):
-            try:
-                spec = _fx_spec(d, p)
-            except Exception as e:  # noqa: BLE001 - one broken insert shouldn't stop the session
-                warnings.append(f"{label} fx {i}: {e}")
-                continue
-            if spec is None:
-                continue
-            if d.sidechain:
-                keyed = spec["type"] == "vst3" or d.name in synths.SIDECHAIN_FX
-                if not keyed:
-                    warnings.append(f"{label}: {d.label()} has no sidechain input; key ignored")
-                else:
-                    spec["key"] = d.sidechain  # checked below, once every track is known
-            out.append(spec)
-        return out
-
     for t in sources:
         audible = (not t.mute) and t.id in playing
         entry = {"id": t.id, "name": t.name, "kind": t.kind, "source": None, "fx": [], "on": audible}
@@ -187,20 +217,7 @@ def build_spec(p: Project, progress=None) -> tuple[dict, list[str]]:
                 spec = None
             if spec is not None:
                 try:
-                    inst = spec.get("instrument")
-                    if t.kind == "audio":
-                        entry["source"] = {"type": "stem", "file": _audio_stem(r, p, t, spec)}
-                    elif inst["type"] == "sfz":
-                        entry["source"] = {"type": "stem", "file": _stem(r, t, spec)}
-                    elif inst["type"] == "synth":
-                        tpl, _desc, defaults = synths.SYNTHS[t.instrument.name]
-                        entry["source"] = {"type": "synth", "template": tpl, "voices": 32,
-                                           "params": {**defaults, **{k: float(v) for k, v in t.instrument.params.items()}},
-                                           "events": _events(p, t, tm, sr, 0)}
-                    else:
-                        entry["source"] = {**{k: inst.get(k) for k in ("type", "path", "shell", "state", "params", "name")},
-                                           "events": _events(p, t, tm, sr, int(inst.get("channel", 1)) - 1)}
-                    entry["fx"] = fx_chain(t, t.fx, f"track '{t.name}'")
+                    entry.update(strip_source(r, t, spec, warnings))
                     has_audio.add(t.id)
                 except Exception as e:  # noqa: BLE001
                     warnings.append(f"track '{t.name}': {e}")
@@ -210,7 +227,7 @@ def build_spec(p: Project, progress=None) -> tuple[dict, list[str]]:
     for b in buses.values():
         ok = b.id in live_buses
         entry = {"id": b.id, "name": b.name, "kind": "bus", "source": None, "on": ok and not b.mute,
-                 "fx": fx_chain(b, b.fx, f"bus '{b.name}'") if ok and not b.mute else []}
+                 "fx": fx_chain(p, b.fx, f"bus '{b.name}'", warnings) if ok and not b.mute else []}
         tracks.append((b, entry))
 
     out_tracks = []
@@ -229,14 +246,54 @@ def build_spec(p: Project, progress=None) -> tuple[dict, list[str]]:
         out_tracks.append(entry)
 
     spec = {
-        "sr": sr, "block": 512, "ts": list(p.time_sig), "end": r.n,
-        "tempo": [[smp(b), float(b), float(bpm)] for b, bpm in zip(tm.beats, tm.bpms)],
+        **spec_head(r),
         "loop": [smp(p.loop["start"]), smp(p.loop["end"])] if p.loop else None,
         "tracks": out_tracks,
         "master": {"db": float(p.master.get("volume_db", 0)),
-                   "fx": fx_chain(None, [d for d in p.master.get("fx", []) if isinstance(d, Device)], "master")},
+                   "fx": fx_chain(p, [d for d in p.master.get("fx", []) if isinstance(d, Device)], "master", warnings)},
     }
     return spec, warnings
+
+
+def fx_chain(p: Project, devices: list[Device], label: str, warnings: list[str]) -> list[dict]:
+    """An insert chain as the engine loads it. A sidechain key is left as the key track's id ("key"); the caller
+    checks that the engine will have that strip, else sets it to "silent"."""
+    out = []
+    for i, d in enumerate(devices):
+        try:
+            spec = _fx_spec(d, p)
+        except Exception as e:  # noqa: BLE001 - one broken insert shouldn't stop the session
+            warnings.append(f"{label} fx {i}: {e}")
+            continue
+        if spec is None:
+            continue
+        if d.sidechain:
+            if spec["type"] == "vst3" or d.name in synths.SIDECHAIN_FX:
+                spec["key"] = d.sidechain
+            else:
+                warnings.append(f"{label}: {d.label()} has no sidechain input; key ignored")
+        out.append(spec)
+    return out
+
+
+def strip_source(r: Renderer, t: Track, spec: dict, warnings: list[str]) -> dict:
+    """{"source", "fx"} of a source track's strip, from its render spec (Renderer.track_spec). SFZ instruments and
+    audio clips arrive as stems (rendered or assembled here and cached), everything else is hosted."""
+    p, tm, sr = r.p, r.tm, r.sr
+    inst = spec.get("instrument")
+    if t.kind == "audio":
+        source = {"type": "stem", "file": _audio_stem(r, p, t, spec)}
+    elif inst["type"] == "sfz":
+        source = {"type": "stem", "file": _stem(r, t, spec)}
+    elif inst["type"] == "synth":
+        tpl, _desc, defaults = synths.SYNTHS[t.instrument.name]
+        source = {"type": "synth", "template": tpl, "voices": 32,
+                  "params": {**defaults, **{k: float(v) for k, v in t.instrument.params.items()}},
+                  "events": _events(p, t, tm, sr, 0)}
+    else:
+        source = {**{k: inst.get(k) for k in ("type", "path", "shell", "state", "params", "name")},
+                  "events": _events(p, t, tm, sr, int(inst.get("channel", 1)) - 1)}
+    return {"source": source, "fx": fx_chain(p, t.fx, f"track '{t.name}'", warnings)}
 
 
 # ---- the process ---------------------------------------------------------------------------------------------
@@ -263,13 +320,20 @@ class Engine:
         self.on_event = on_event
         self.tick: dict = {}
         self.ready: dict = {}
+        self.crash: dict = {}
+        self.late_warnings: list[str] = []  # what plugins said once they had settled (sent as events)
         self._replies: dict[str, queue.Queue] = {}
         self._n = 0
         self._lock = threading.Lock()
         self._ready = threading.Event()
-        self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                     text=True, encoding="utf-8", errors="replace", bufsize=1,
-                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
+                                         bufsize=1, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError as e:
+            if getattr(e, "winerror", None) == 4551:  # "An Application Control policy has blocked this file"
+                raise EngineError(BLOCKED) from None
+            raise EngineError(f"the live engine could not start: {e}") from None
         threading.Thread(target=self._read, daemon=True).start()
         if not self._ready.wait(60):
             self.close()
@@ -292,8 +356,16 @@ class Engine:
                 self._ready.set()
             elif msg.get("ev") == "tick":
                 self.tick = msg
+            elif msg.get("ev") == "crash":
+                self.crash = msg
+            elif msg.get("ev") == "warnings":
+                self.late_warnings.extend(str(w) for w in msg.get("warnings", []))
             if "ev" in msg and self.on_event:
                 self.on_event(msg)
+        # the process is gone: whoever waits for an answer gets one now instead of at their timeout
+        where = f" (crashed in {self.crash.get('at')})" if self.crash else ""
+        for q in list(self._replies.values()):
+            q.put({"error": f"the engine stopped{where}"})
 
     def alive(self) -> bool:
         return self.proc.poll() is None
@@ -322,15 +394,19 @@ class Engine:
         """Send the project's current state. Devices that did not change keep playing; returns the engine's
         answer with the spec's own warnings added."""
         spec, warnings = build_spec(p, progress)
-        path = p.root / "cache" / "live-spec.json"
+        res = self.load_spec(spec, p.root / "cache" / "live-spec.json")
+        res["warnings"] = warnings + list(res.get("warnings", []))
+        return res
+
+    def load_spec(self, spec: dict, path: Path) -> dict:
+        """Load a spec already built (written to `path` on the way)."""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(spec), encoding="utf-8")
         res = self.call("load", timeout=600, path=str(path))
-        res["warnings"] = warnings + list(res.get("warnings", []))
         self.sr = spec["sr"]
-        # strips that have notes and are switched on: a render in which one of them is silent started too early
-        self.expect = {t["id"]: t["name"] for t in spec["tracks"]
-                       if t["on"] and (t["source"] or {}).get("events")}
+        # strips that have notes: a render in which one of them is silent started too early. Switched-off strips
+        # count only when their audio is tapped (Engine.render's `taps`).
+        self.expect = {t["id"]: (t["name"], t["on"]) for t in spec["tracks"] if (t["source"] or {}).get("events")}
         return res
 
     def play(self, from_sample: int | None = None, loop: bool | None = None) -> dict:
@@ -344,23 +420,34 @@ class Engine:
     def stop(self) -> dict:
         return self.call("stop")
 
-    def render(self, out: str | Path, length: int | None = None, retries: int = 2) -> dict:
-        """Render offline. An instrument still loading its samples plays nothing, and the engine cannot ask a
-        plugin whether it is ready, so a render that leaves a strip with notes silent is given more time and
-        done again. Strips still silent after that are named in the answer's `silent`."""
+    def render(self, out: str | Path | None, length: int | None = None, retries: int = 2,
+               taps: dict[str, str] | None = None) -> dict:
+        """Render offline: the master to `out` (None: no master file) and, for each strip in `taps`, its audio
+        before the fader to a file of its own (32-bit float WAV, lined up with the song, `length` samples).
+
+        The engine plays each new plugin instrument a test note until it sounds settled before it renders (the
+        answer's `unready` names those that never did). As a backstop, a render that leaves a strip with notes
+        silent is given more time and done again; strips still silent after that are named in `silent`."""
         import time
-        args = {"out": str(out)}
+        args: dict = {"out": str(out) if out else ""}
         if length is not None:
             args["length"] = int(length)
+        if taps:
+            args["taps"] = {k: str(v) for k, v in taps.items()}
+        expect = getattr(self, "expect", {})
         for attempt in range(retries + 1):
             res = self.call("render", timeout=3600, **args)
-            silent = [name for tid, name in getattr(self, "expect", {}).items()
-                      if max((res.get("peaks") or {}).get(tid, [1.0])[:2]) < 1e-7]
+            if taps:
+                silent = [tid for tid in expect if tid in taps and float((res.get("taps") or {}).get(tid, 1.0)) < 1e-7]
+            else:
+                silent = [tid for tid, (_name, on) in expect.items()
+                          if on and max((res.get("peaks") or {}).get(tid, [1.0])[:2]) < 1e-7]
             if not silent or attempt == retries:
                 break
             time.sleep(4.0)
         if silent:
-            res["silent"] = silent
+            res["silent"] = [expect[tid][0] for tid in silent]
+            res["silent_ids"] = silent
         return res
 
     def close(self) -> None:
@@ -377,12 +464,12 @@ class Player:
     """One engine kept in step with a project folder: `sync()` reloads when project.json has a new revision, so
     whatever edits it (an agent's tools, the editor, a take being accepted) is heard without stopping."""
 
-    def __init__(self, path: str | Path, device: str | None = None, on_event=None, per_sample: bool = True,
+    def __init__(self, path: str | Path, device: str | None = None, on_event=None, per_sample: bool | None = None,
                  no_device: bool = False):
         self.path = Path(path)
-        # per_sample: built-in synths behave exactly as in the offline render (what agents measure and what gets
-        # exported), at some CPU cost. Turn it off only once offline rendering goes through this engine too.
-        self.engine = Engine(device=device, no_device=no_device, on_event=on_event, per_sample=per_sample)
+        # per_sample: built-in synths behave as in the offline render (what agents measure and what gets exported)
+        self.engine = Engine(device=device, no_device=no_device, on_event=on_event,
+                             per_sample=synth_per_sample() if per_sample is None else per_sample)
         self.rev = -1
         self.project: Project | None = None
         self.loaded: dict = {}
@@ -487,11 +574,11 @@ def _likeness(a: np.ndarray, b: np.ndarray, sr: int) -> dict:
     return {"band_gap_db": round(float(max(gaps, default=0.0)), 2), "envelope_corr": round(corr, 4)}
 
 
-def null_tracks(p: Project, per_sample: bool = False, only: list[str] | None = None, progress=None) -> dict:
+def null_tracks(p: Project, per_sample: bool = True, only: list[str] | None = None, progress=None) -> dict:
     """The same check one track at a time, before the fader (instrument + inserts only), to find which device
     the two engines disagree on. Returns {track name: compare()}."""
     import tempfile
-    r = Renderer(p, progress)
+    r = Renderer(p, progress, backend="dawdreamer")
     r.run()
     spec, _w = build_spec(p, progress)
     by_id = {t["id"]: t for t in spec["tracks"]}
@@ -521,11 +608,11 @@ def null_tracks(p: Project, per_sample: bool = False, only: list[str] | None = N
     return out
 
 
-def null_test(p: Project, per_sample: bool = False, keep: str | Path | None = None, progress=None) -> dict:
+def null_test(p: Project, per_sample: bool = True, keep: str | Path | None = None, progress=None) -> dict:
     """Render the project's raw master (before loudness normalisation and the limiter) with both engines and
     report the difference."""
     import tempfile
-    r = Renderer(p, progress)
+    r = Renderer(p, progress, backend="dawdreamer")
     report = r.run()
     eng = Engine(no_device=True, per_sample=per_sample)
     try:

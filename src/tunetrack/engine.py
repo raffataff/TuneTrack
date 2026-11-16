@@ -70,6 +70,31 @@ def resolve_device(dev: Device, p: Project, instrument: bool) -> dict | None:
     raise ValueError(f"Unknown device type {dev.type!r}")
 
 
+def offline_backend() -> str:
+    """Who renders offline: "engine" (the live engine in engine/, so agents measure what the owner hears) or
+    "dawdreamer" (the original worker). The library config's `offline_engine` picks; "auto" (the default) is the
+    engine when it is built."""
+    want = str(config.load_config().get("offline_engine", "auto")).lower()
+    if want == "dawdreamer":
+        return "dawdreamer"
+    from .live import BLOCKED, engine_exe, engine_runs
+    if engine_exe() is None:
+        if want == "engine":
+            raise RuntimeError("offline_engine is 'engine' but the engine is not built (see engine/README.md)")
+        return "dawdreamer"
+    if not engine_runs():
+        if want == "engine":
+            raise RuntimeError(BLOCKED)
+        return "dawdreamer"
+    return "engine"
+
+
+def _worker_only(spec: dict) -> bool:
+    """A job the worker renders whoever renders the rest: an SFZ instrument with no inserts (TuneTrack's own SFZ
+    player; the engine plays the result as a stem)."""
+    return (spec.get("instrument") or {}).get("type") == "sfz" and not spec.get("fx")
+
+
 def _fingerprint(obj) -> str:
     def files(o):
         if isinstance(o, dict):
@@ -302,7 +327,7 @@ def _cache_entry(out: Path):
 
 
 class Renderer:
-    def __init__(self, p: Project, progress=None):
+    def __init__(self, p: Project, progress=None, backend: str | None = None):
         self.p = p
         self.sr = p.sample_rate
         self.tm = p.tempo_map()
@@ -314,8 +339,26 @@ class Renderer:
         self.n = int(round(self.duration * self.sr))
         self.cache = p.root / "cache"
         self.cache.mkdir(parents=True, exist_ok=True)
-        self.key_fp: dict[str, str] = {}  # track id -> render fingerprint, for tracks that key a sidechain
+        self.key_fp: dict[str, str] = {}  # track id -> render cache key, for tracks that key a sidechain
         self.failed: set[str] = set()
+        self.backend = backend or offline_backend()
+        self.by = None  # what rendered it, in every engine cache key (None: the worker, keys as they always were)
+        if self.backend == "engine":
+            from .live import engine_stamp
+            self.by = engine_stamp()
+        self._fx_eng = None  # the engine bus and master chains render in, kept for one run() or export()
+
+    def key(self, spec: dict) -> str:
+        """The cache key of a render spec. The engine's renders are kept apart from the worker's (a voice or a
+        sample may differ), and from those of another engine build."""
+        if self.by and not _worker_only(spec):
+            return _fingerprint({**spec, "rendered_by": self.by})
+        return _fingerprint(spec)
+
+    def close(self) -> None:
+        if self._fx_eng is not None:
+            self._fx_eng.close()
+            self._fx_eng = None
 
     def _base(self) -> dict:
         return {"sr": self.sr, "bpm": self.p.tempo, "tempo": [self.tm.beats, self.tm.bpms], "duration": round(self.duration, 4)}
@@ -362,39 +405,246 @@ class Renderer:
         return spec
 
     def render_track(self, t: Track, spec: dict) -> tuple[np.ndarray, dict]:
-        key = _fingerprint(spec)
+        """A track's audio before the fader (instrument and inserts), from the cache or rendered now."""
+        key = self.key(spec)
         out = self.cache / f"{key}.wav"
         info = {"cached": out.exists(), "key": key}
+        audio = None
         if not out.exists():
             with _cache_entry(out) as part:
                 if part is None:  # another process (a second agent's take, the editor) rendered it while we waited
                     info["cached"] = True
+                elif self.backend == "engine" and not _worker_only(spec):
+                    res = self._engine_tracks([(t, spec, part)])
+                    got = res["tracks"][t.id]
+                    if got.get("error"):
+                        raise RuntimeError(got["error"])
+                    audio = got.pop("audio", None)
+                    info.update(got, warnings=got.get("warnings", []) + res["warnings"])
                 else:
-                    job = {k: v for k, v in spec.items() if k not in ("clips",)}
-                    job["fx"] = self._job_fx(spec.get("fx", []))
-                    job["out"] = str(part)
-                    if t.kind == "midi":
-                        midi = self.cache / f"{key}.mid"
-                        write_midi(self.p, t, midi, (spec.get("instrument") or {}).get("channel", 1) - 1)
-                        job["midi"] = str(midi)
-                    else:
-                        inp = self.cache / f"{key}.in.wav"
-                        sf.write(str(inp), audio_track_input(self.p, t, self.n).T, self.sr, subtype="FLOAT")
-                        job["audio_in"] = str(inp)
-                        job.pop("instrument", None)
-                    jf = self.cache / f"{key}.job.json"
-                    jf.write_text(json.dumps(job), encoding="utf-8")
-                    t0 = time.time()
-                    try:
-                        res = plugins.run_worker("render", str(jf), timeout=1800)
-                    finally:
-                        jf.unlink(missing_ok=True)
-                        (self.cache / f"{key}.in.wav").unlink(missing_ok=True)
-                    info.update(seconds=round(time.time() - t0, 1), warnings=res.get("warnings", []))
-        audio = _read(out, self.sr)
+                    info.update(self._worker_track(t, spec, key, part))
+        return self._fit(_read(out, self.sr) if audio is None else audio), info
+
+    def _fit(self, audio: np.ndarray) -> np.ndarray:
         if audio.shape[1] < self.n:
             audio = np.pad(audio, ((0, 0), (0, self.n - audio.shape[1])))
-        return audio[:, : self.n], info
+        return audio[:, : self.n]
+
+    def _worker_track(self, t: Track, spec: dict, key: str, part: Path) -> dict:
+        """Render one track in a worker process (DawDreamer, or the SFZ player) into `part`."""
+        job = {k: v for k, v in spec.items() if k not in ("clips",)}
+        job["fx"] = self._job_fx(spec.get("fx", []))
+        job["out"] = str(part)
+        if t.kind == "midi":
+            midi = self.cache / f"{key}.mid"
+            write_midi(self.p, t, midi, (spec.get("instrument") or {}).get("channel", 1) - 1)
+            job["midi"] = str(midi)
+        else:
+            inp = self.cache / f"{key}.in.wav"
+            sf.write(str(inp), audio_track_input(self.p, t, self.n).T, self.sr, subtype="FLOAT")
+            job["audio_in"] = str(inp)
+            job.pop("instrument", None)
+        jf = self.cache / f"{key}.job.json"
+        jf.write_text(json.dumps(job), encoding="utf-8")
+        t0 = time.time()
+        try:
+            res = plugins.run_worker("render", str(jf), timeout=1800)
+        finally:
+            jf.unlink(missing_ok=True)
+            (self.cache / f"{key}.in.wav").unlink(missing_ok=True)
+        return {"seconds": round(time.time() - t0, 1), "warnings": res.get("warnings", [])}
+
+    # ---- rendering in the engine ------------------------------------------------------------------------------
+
+    def _engine_spec(self, strips: list[dict]) -> dict:
+        """An engine spec for offline jobs: every strip switched off and sent nowhere that matters, so the only
+        product is what the taps write (each strip's audio before its fader)."""
+        from . import live
+        head = live.spec_head(self)
+        quiet = {"db": 0.0, "pan": 0.0, "vol_auto": [], "pan_auto": [], "out": "master", "sends": [], "on": False}
+        return {**head, "loop": None, "tracks": [{**s, **quiet} for s in strips], "master": {"db": 0.0, "fx": []}}
+
+    def _key_stem(self, kid: str) -> str | None:
+        """The rendered pre-fader file of a sidechain key track, when there is one."""
+        k = self.key_fp.get(kid)
+        if not k or k == "silent" or kid in self.failed:
+            return None
+        f = self.cache / f"{k}.wav"
+        return str(f) if f.exists() else None
+
+    def _engine_tracks(self, batch: list[tuple[Track, dict, Path]]) -> dict:
+        """Render tracks before the fader in the engine: batch = (track, render spec, file to write). Tracks that
+        key each other's sidechains share an engine; the rest are spread over `render_workers` engines that run at
+        once. Returns {"tracks": {id: info}, "warnings": [...]}: an info carries `error` when the track failed, and
+        `audio` (the render, not kept in the cache) when it came out silent or its instrument never settled, so the
+        next render tries again instead of reading a bad file forever."""
+        from . import live
+        out: dict = {"tracks": {}, "warnings": []}
+        jobs = {t.id: (t, spec, part) for t, spec, part in batch}
+        strips: dict[str, dict] = {}
+
+        # what the worker renders goes first and in parallel, as it always did: SFZ tracks without inserts
+        # (finished here) and the dry SFZ stems the engine plays under the inserts of the others
+        def worker_side(tid: str) -> None:
+            t, spec, part = jobs[tid]
+            try:
+                if _worker_only(spec):
+                    out["tracks"][tid] = self._worker_track(t, spec, self.key(spec), part)
+                else:
+                    self.render_track(t, {**spec, "fx": []})
+            except Exception as e:  # noqa: BLE001
+                out["tracks"][tid] = {"error": str(e)}
+
+        sfz = [tid for tid, (_t, spec, _p) in jobs.items() if (spec.get("instrument") or {}).get("type") == "sfz"]
+        if sfz:
+            with ThreadPoolExecutor(max_workers=max(1, int(config.load_config().get("render_workers", 4)))) as ex:
+                list(ex.map(worker_side, sfz))
+        for tid, (t, spec, part) in jobs.items():
+            if tid in out["tracks"]:
+                continue  # finished by the worker, or failed there
+            w: list[str] = []
+            try:
+                strips[tid] = {"id": tid, "name": t.name, "kind": t.kind, **live.strip_source(self, t, spec, w)}
+                out["tracks"][tid] = {"warnings": [x.removeprefix(f"track '{t.name}': ").removeprefix(f"track '{t.name}' ")
+                                                   for x in w]}
+            except Exception as e:  # noqa: BLE001
+                out["tracks"][tid] = {"error": str(e)}
+        if not strips:
+            return out
+
+        # groups: a track and every track whose audio keys one of its inserts render in one engine
+        parent = {tid: tid for tid in strips}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        keys: dict[str, str] = {}  # key track id -> stem file, for keys rendered earlier
+        for tid, s in strips.items():
+            for d in s["fx"]:
+                kid = d.get("key")
+                if not kid or kid == "silent":
+                    continue
+                if kid in strips:
+                    parent[find(kid)] = find(tid)
+                elif (f := self._key_stem(kid)) is not None:
+                    keys[kid] = f
+                else:
+                    d["key"] = "silent"
+        groups: dict[str, list[str]] = {}
+        for tid in strips:
+            groups.setdefault(find(tid), []).append(tid)
+        workers = max(1, min(int(config.load_config().get("render_workers", 4)), len(groups)))
+        loads: list[list[str]] = [[] for _ in range(workers)]
+        weight = lambda ids: sum(3 if strips[i]["source"].get("type") == "vst3" else 1 for i in ids)  # noqa: E731
+        for ids in sorted(groups.values(), key=weight, reverse=True):
+            min(loads, key=weight).extend(ids)
+
+        def run(ids: list[str]) -> None:
+            names = {i: strips[i]["name"] for i in ids}
+            group = [strips[i] for i in ids]
+            for kid, f in keys.items():
+                if any(d.get("key") == kid for i in ids for d in strips[i]["fx"]):
+                    group.append({"id": kid, "name": kid, "kind": "audio", "source": {"type": "stem", "file": f},
+                                  "fx": []})
+            res = self._engine_render(self._engine_spec(group), {i: jobs[i][2] for i in ids}, names, None)
+            for i in ids:
+                info = out["tracks"][i]
+                if res.get("error"):
+                    info["error"] = res["error"]
+                    continue
+                info["seconds"] = res["seconds"]
+                info["warnings"] += res["by_strip"].get(i, [])
+                peak = float(res["taps"].get(i, 0.0))
+                if peak > 8:
+                    info["warnings"].append(f"output peaked at {peak:.1f} (+{20 * math.log10(peak):.0f} dBFS) - "
+                                            f"check gain staging/feedback")
+                if i in res["unready"] or i in res["silent"]:
+                    # heard this once, not kept: a plugin that had not finished loading must not stay silent
+                    part = jobs[i][2]
+                    info["audio"] = _read(part, self.sr) if part.exists() else np.zeros((2, self.n), np.float32)
+                    part.unlink(missing_ok=True)
+            out["warnings"].extend(res.get("other", []))
+
+        if len(loads) == 1:
+            run(loads[0])
+        else:
+            with ThreadPoolExecutor(max_workers=len(loads)) as ex:
+                list(ex.map(run, [ids for ids in loads if ids]))
+        return out
+
+    def _engine_render(self, spec: dict, taps: dict[str, Path], names: dict[str, str], eng) -> dict:
+        """Load `spec` into an engine (`eng`, or a new one closed afterwards) and render the taps. Returns
+        {"taps": {id: peak}, "seconds", "unready": {id}, "silent": {id}, "by_strip": {id: [warnings]},
+        "other": [warnings]} or {"error": text}; a failed render leaves no tap files behind."""
+        from . import live
+        import uuid
+        own = eng is None
+        path = self.cache / f"engine-{uuid.uuid4().hex[:10]}.json"
+        t0 = time.time()
+        seen = 0
+        try:
+            if own:
+                eng = live.Engine(no_device=True, per_sample=live.synth_per_sample())
+            seen = len(eng.late_warnings)
+            loaded = eng.load_spec(spec, path)
+            res = eng.render(None, self.n, taps={k: str(v) for k, v in taps.items()})
+            events = eng.late_warnings[seen:]
+        except Exception as e:  # noqa: BLE001 - a plugin that crashes the engine fails only these tracks
+            for f in taps.values():
+                Path(f).unlink(missing_ok=True)
+            return {"error": str(e)}
+        finally:
+            path.unlink(missing_ok=True)
+            if own and eng is not None:
+                eng.close()
+        by: dict[str, list[str]] = {}
+        other: list[str] = []
+        unready = set()
+        for w in list(loaded.get("warnings", [])) + events + list(res.get("unready", [])):
+            ref, _, text = str(w).partition(": ")
+            sid, _, where = ref.partition("/")
+            if sid in names and text:
+                place = {"inst": "instrument"}.get(where, where.replace("/", " "))
+                by.setdefault(sid, []).append(f"{place}: {text}")
+                if w in res.get("unready", []):
+                    unready.add(sid)
+            else:
+                other.append(str(w))
+        return {"taps": res.get("taps") or {}, "seconds": round(time.time() - t0, 1), "unready": unready,
+                "silent": set(res.get("silent_ids", [])), "by_strip": by, "other": other}
+
+    def _engine_fx(self, audio: np.ndarray, devices: list[Device], owner: str, warnings: list | None,
+                   part: Path) -> None:
+        """Run `audio` through an insert chain (a bus's, the master's) in the engine, into `part`."""
+        from . import live
+        inp = part.with_name(f"{part.stem}.in.wav")
+        sf.write(str(inp), audio.T, self.sr, subtype="FLOAT")
+        w: list[str] = []
+        fx = live.fx_chain(self.p, devices, owner, w)
+        strips = [{"id": "in", "name": owner, "kind": "audio", "source": {"type": "stem", "file": str(inp)}, "fx": fx}]
+        for d in fx:
+            kid = d.get("key")
+            if not kid or kid == "silent":
+                continue
+            f = self._key_stem(kid)
+            if f is None:
+                d["key"] = "silent"  # render_fx has said so (_key_for)
+            elif not any(s["id"] == kid for s in strips):
+                strips.append({"id": kid, "name": kid, "kind": "audio", "source": {"type": "stem", "file": f}, "fx": []})
+        if self._fx_eng is None or not self._fx_eng.alive():
+            self._fx_eng = live.Engine(no_device=True, per_sample=live.synth_per_sample())
+        try:
+            res = self._engine_render(self._engine_spec(strips), {"in": part}, {"in": owner}, self._fx_eng)
+        finally:
+            inp.unlink(missing_ok=True)
+        if res.get("error"):
+            self.close()  # it may be gone; the next chain starts a new one
+            raise RuntimeError(f"{owner}: {res['error']}")
+        if warnings is not None:
+            warnings += w + [f"{owner}: {x}" for x in res["by_strip"].get("in", []) + res["other"]]
 
     def render_fx(self, audio: np.ndarray, devices: list[Device], tag: str, owner: str = "",
                   warnings: list | None = None) -> np.ndarray:
@@ -404,11 +654,13 @@ class Renderer:
         for s in specs:
             if "sidechain" in s:
                 s["sidechain_key"] = self._key_for(s.pop("sidechain"), owner or tag, warnings)
-        key = _fingerprint({**self._base(), "fx": specs, "in": hashlib.sha1(audio.tobytes()).hexdigest()})
+        key = self.key({**self._base(), "fx": specs, "in": hashlib.sha1(audio.tobytes()).hexdigest()})
         out = self.cache / f"{tag}-{key}.wav"
         if not out.exists():
             with _cache_entry(out) as part:
-                if part is not None:
+                if part is not None and self.backend == "engine":
+                    self._engine_fx(audio, devices, owner or tag, warnings, part)
+                elif part is not None:
                     inp = self.cache / f"{tag}-{key}.in.wav"
                     sf.write(str(inp), audio.T, self.sr, subtype="FLOAT")
                     jf = self.cache / f"{tag}-{key}.job.json"
@@ -421,10 +673,7 @@ class Renderer:
                         inp.unlink(missing_ok=True)
                     if warnings is not None:
                         warnings += [f"{owner or tag}: {w}" for w in res.get("warnings", [])]
-        res = _read(out, self.sr)
-        if res.shape[1] < self.n:
-            res = np.pad(res, ((0, 0), (0, self.n - res.shape[1])))
-        return res[:, : self.n]
+        return self._fit(_read(out, self.sr))
 
     def run(self) -> dict:
         p = self.p
@@ -454,10 +703,43 @@ class Renderer:
                 specs[t.id] = s
         deps = self._link_sidechains(specs, report["warnings"])
         pre: dict[str, np.ndarray] = {}
+        todo = [t for t in audible + key_only if t.id in specs]
+        heard = {t.id for t in audible}
+        self.progress(f"rendering {len(todo)} tracks")
+        results = self._run_engine(todo, specs, report) if self.backend == "engine" else self._run_worker(todo, specs, deps)
+        try:
+            for t, audio, info, err in results:
+                if err:
+                    self.failed.add(t.id)
+                    report["warnings"].append(f"track '{t.name}' failed to render: {err}")
+                    continue
+                for w in info.get("warnings", []):
+                    report["warnings"].append(f"track '{t.name}': {w}")
+                if t.id not in heard:
+                    continue  # rendered only as a sidechain key
+                pre[t.id] = audio
+                report["tracks"][t.name] = {"render": "cached" if info["cached"] else f"{info.get('seconds')}s",
+                                            **analysis.stem_stats(audio)}
+                if float(np.abs(audio).max(initial=0)) < 1e-4:
+                    report["warnings"].append(
+                        f"track '{t.name}' rendered SILENT though it has notes - instrument loaded no sound "
+                        f"(empty plugin slot? capture a patch with a program loaded) or notes out of its range")
+            self.pre = pre
+            self.master, self.post = self.mix(pre, report)
+        finally:
+            self.close()
+        report["render_seconds"] = round(time.time() - t0, 1)
+        self.report = report
+        return report
+
+    def _run_worker(self, todo: list[Track], specs: dict[str, dict], deps: dict[str, set[str]]):
+        """(track, audio, info, error) per track, rendered by worker processes. A track renders once every track
+        keying its sidechains has (the key's render is its input), so they go in rounds; the caller marks failures
+        in self.failed between rounds."""
         workers = int(config.load_config().get("render_workers", 4))
 
         def job(t):
-            bad = [x.name for x in p.tracks if x.id in deps.get(t.id, set()) & self.failed]
+            bad = [x.name for x in self.p.tracks if x.id in deps.get(t.id, set()) & self.failed]
             if bad:
                 return t, None, None, f"its sidechain key '{bad[0]}' failed to render"
             try:
@@ -465,38 +747,52 @@ class Renderer:
             except Exception as e:  # noqa: BLE001
                 return t, None, None, str(e)
 
-        todo = [t for t in audible + key_only if t.id in specs]
-        heard = {t.id for t in audible}
-        self.progress(f"rendering {len(todo)} tracks")
         finished: set[str] = set()
         while todo:
-            # a track renders once every track keying its sidechains has (the key's render is its input)
             ready = [t for t in todo if deps.get(t.id, set()) <= finished] or todo
             todo = [t for t in todo if t not in ready]
             with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-                for t, audio, info, err in ex.map(job, ready):
-                    finished.add(t.id)
-                    if err:
-                        self.failed.add(t.id)
-                        report["warnings"].append(f"track '{t.name}' failed to render: {err}")
-                        continue
-                    for w in info.get("warnings", []):
-                        report["warnings"].append(f"track '{t.name}': {w}")
-                    if t.id not in heard:
-                        continue  # rendered only as a sidechain key
-                    pre[t.id] = audio
-                    report["tracks"][t.name] = {"render": "cached" if info["cached"] else f"{info.get('seconds')}s",
-                                                **analysis.stem_stats(audio)}
-                    if float(np.abs(audio).max(initial=0)) < 1e-4:
-                        report["warnings"].append(
-                            f"track '{t.name}' rendered SILENT though it has notes - instrument loaded no sound "
-                            f"(empty plugin slot? capture a patch with a program loaded) or notes out of its range")
+                for res in ex.map(job, ready):
+                    finished.add(res[0].id)
+                    yield res
 
-        self.pre = pre
-        self.master, self.post = self.mix(pre, report)
-        report["render_seconds"] = round(time.time() - t0, 1)
-        self.report = report
-        return report
+    def _run_engine(self, todo: list[Track], specs: dict[str, dict], report: dict) -> list:
+        """(track, audio, info, error) per track: cached renders read, every other track rendered in one engine
+        batch (keys and the tracks they key in the same graph, so no rounds). Each cache file is locked while it
+        is rendered, in name order so that two processes cannot wait on each other."""
+        from contextlib import ExitStack
+        keys = {t.id: self.key(specs[t.id]) for t in todo}
+        cached = {t.id for t in todo if (self.cache / f"{keys[t.id]}.wav").exists()}
+        infos: dict[str, dict] = {}
+        with ExitStack() as stack:
+            batch = []
+            for t in sorted((t for t in todo if t.id not in cached), key=lambda t: keys[t.id]):
+                part = stack.enter_context(_cache_entry(self.cache / f"{keys[t.id]}.wav"))
+                if part is None:  # another process rendered it while we waited
+                    cached.add(t.id)
+                else:
+                    batch.append((t, specs[t.id], part))
+            if batch:
+                res = self._engine_tracks(batch)
+                infos = res["tracks"]
+                report["warnings"] += res["warnings"]
+                for t, _spec, part in batch:
+                    if infos.get(t.id, {}).get("error"):
+                        part.unlink(missing_ok=True)  # whatever a failed render left must not become the cache
+        out = []
+        for t in todo:
+            info = {"cached": t.id in cached, "key": keys[t.id], **infos.get(t.id, {})}
+            if info.get("error"):
+                out.append((t, None, None, info["error"]))
+                continue
+            audio = info.pop("audio", None)
+            try:
+                audio = self._fit(audio if audio is not None else _read(self.cache / f"{keys[t.id]}.wav", self.sr))
+            except Exception as e:  # noqa: BLE001 - a render that wrote nothing
+                out.append((t, None, None, f"no audio came back ({e})"))
+                continue
+            out.append((t, audio, info, None))
+        return out
 
     def _link_sidechains(self, specs: dict[str, dict], warnings: list) -> dict[str, set[str]]:
         """Replace each insert's sidechain track id with that track's render fingerprint (keys first, so a key
@@ -521,7 +817,7 @@ class Renderer:
                     link(kid, stack | {tid})
                     deps[tid].add(kid)
                 fx["sidechain_key"] = self._key_for(kid, f"track '{names[tid]}'", warnings)
-            self.key_fp[tid] = _fingerprint(specs[tid])
+            self.key_fp[tid] = self.key(specs[tid])
 
         for tid in specs:
             link(tid, frozenset())
@@ -590,6 +886,13 @@ class Renderer:
     def export(self, out_dir: Path, base: str, fmt: str = "wav", bits: int = 24, loop: str = "auto",
                normalize: bool = True, stems: bool = False, layers: bool = False, midi: bool = False) -> dict:
         """loop: "auto" (use the project loop region if set), "off", "loop" (loop body only), "intro+loop"."""
+        try:
+            return self._export(out_dir, base, fmt, bits, loop, normalize, stems, layers, midi)
+        finally:
+            self.close()  # stems and layers run the bus and master chains again
+
+    def _export(self, out_dir: Path, base: str, fmt: str, bits: int, loop: str, normalize: bool, stems: bool,
+                layers: bool, midi: bool) -> dict:
         p = self.p
         sr = self.sr
         rep = self.report

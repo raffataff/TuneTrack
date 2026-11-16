@@ -1,4 +1,6 @@
 """The live engine (engine/, tunetrack/live.py): the spec it loads, and its sound against the offline renderer."""
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -80,7 +82,7 @@ def test_muted_and_soloed_tracks_stay_loaded_but_silent(proj):
     assert by["Audio"]["on"] is True and by["Harp"]["on"] is False and by["Harp"]["source"] is None
 
 
-@pytest.mark.skipif(live.engine_exe() is None, reason="the live engine is not built (engine/README.md)")
+@pytest.mark.skipif(not live.engine_runs(), reason="the live engine is not built, or Windows will not start it (engine/README.md)")
 def test_engine_renders_the_same_mix_as_the_offline_renderer(proj, tmp_path):
     res = live.null_test(proj, per_sample=True, keep=tmp_path / "engine.wav")
     assert not res["warnings"]
@@ -88,7 +90,7 @@ def test_engine_renders_the_same_mix_as_the_offline_renderer(proj, tmp_path):
     assert res["residual_db"] < -60, res
 
 
-@pytest.mark.skipif(live.engine_exe() is None, reason="the live engine is not built (engine/README.md)")
+@pytest.mark.skipif(not live.engine_runs(), reason="the live engine is not built, or Windows will not start it (engine/README.md)")
 def test_edits_reach_a_running_engine_without_rebuilding_it(proj, tmp_path):
     import soundfile as sf
 
@@ -119,7 +121,7 @@ def test_edits_reach_a_running_engine_without_rebuilding_it(proj, tmp_path):
         player.close()
 
 
-@pytest.mark.skipif(live.engine_exe() is None, reason="the live engine is not built (engine/README.md)")
+@pytest.mark.skipif(not live.engine_runs(), reason="the live engine is not built, or Windows will not start it (engine/README.md)")
 def test_the_editor_server_hosts_one_engine_that_follows_the_desk(proj, monkeypatch):
     import time
     from tunetrack import livehost, model, server, takes
@@ -144,3 +146,144 @@ def test_the_editor_server_hosts_one_engine_that_follows_the_desk(proj, monkeypa
         assert server.live_stop()["playing"] is False
     finally:
         assert server.live_off()["on"] is False
+
+
+ENGINE_RUNS = pytest.mark.skipif(not live.engine_runs(),
+                                 reason="the live engine is not built, or Windows will not start it (engine/README.md)")
+
+
+def _per_sample(monkeypatch, on: bool) -> None:
+    from tunetrack import config
+    real = config.load_config
+    monkeypatch.setattr(config, "load_config", lambda: {**real(), "synth_per_sample": on})
+
+
+def test_offline_backend_falls_back_when_the_engine_cannot_run(proj, monkeypatch):
+    from tunetrack import config
+    monkeypatch.setattr(live, "engine_runs", lambda: False)
+    assert engine.offline_backend() == "dawdreamer"
+    monkeypatch.setattr(config, "load_config", lambda: {**config.DEFAULT_CONFIG, "offline_engine": "engine"})
+    with pytest.raises(RuntimeError, match="Smart App Control"):
+        engine.offline_backend()
+    monkeypatch.setattr(config, "load_config", lambda: {**config.DEFAULT_CONFIG, "offline_engine": "dawdreamer"})
+    assert engine.Renderer(proj).backend == "dawdreamer"
+
+
+@pytest.mark.skipif(live.engine_exe() is None, reason="the live engine is not built (engine/README.md)")
+def test_engine_renders_are_cached_apart_from_the_workers(proj):
+    t = next(x for x in proj.tracks if x.name == "Harp")
+    a, b = engine.Renderer(proj, backend="engine"), engine.Renderer(proj, backend="dawdreamer")
+    spec = a.track_spec(t)
+    assert a.key(spec) != b.key(spec) and b.key(spec) == engine._fingerprint(spec)
+    sfz = {**spec, "instrument": {"type": "sfz", "path": "x.sfz"}, "fx": []}
+    assert a.key(sfz) == b.key(sfz)  # the worker renders SFZ either way: one cache file for both
+
+
+@ENGINE_RUNS
+def test_the_engine_renders_offline_what_the_worker_did(proj, monkeypatch):
+    """Every track before its fader, the buses (delay keyed by the kick, reverb) and the master, rendered by the
+    engine, against the same session rendered by DawDreamer (whose synths free voices as per-sample mode does)."""
+    _per_sample(monkeypatch, True)
+    ref = engine.Renderer(proj, backend="dawdreamer")
+    ref.run()
+    got = engine.Renderer(proj, backend="engine")
+    rep = got.run()
+    assert not [w for w in rep["warnings"] if "failed" in w], rep["warnings"]
+    assert set(got.pre) == set(ref.pre)
+    for tid in ref.pre:
+        assert live.compare(ref.pre[tid], got.pre[tid], ref.sr)["residual_db"] < -60, tid
+    for tid in ref.post:
+        assert live.compare(ref.post[tid], got.post[tid], ref.sr)["residual_db"] < -60, tid
+    assert live.compare(ref.master, got.master, ref.sr)["residual_db"] < -60
+    again = engine.Renderer(proj, backend="engine")
+    rep2 = again.run()  # nothing changed: every track read from the cache
+    assert all(v["render"] == "cached" for v in rep2["tracks"].values())
+    assert live.compare(got.master, again.master, ref.sr)["residual_db"] < -100
+
+
+@ENGINE_RUNS
+def test_an_engine_export_writes_stems_through_the_buses(proj, tmp_path):
+    rep = engine.render_project(proj, str(tmp_path / "out"), stems=True)
+    assert rep["renderer"].backend == "engine"
+    names = sorted(Path(f).name for f in rep["files"])
+    assert any("_stem_Harp" in n for n in names) and any("_stem_Kick" in n for n in names)
+
+
+@ENGINE_RUNS
+def test_a_track_that_fails_in_the_engine_leaves_nothing_in_the_cache(proj, monkeypatch):
+    real = engine.Renderer._engine_render
+
+    def broken(self, spec, taps, names, eng):
+        if any(s["name"] == "Harp" for s in spec["tracks"]):
+            for f in taps.values():
+                Path(f).write_bytes(b"half a file")
+            return {"error": "the engine stopped (crashed in some.dll+1234)"}
+        return real(self, spec, taps, names, eng)
+
+    monkeypatch.setattr(engine.Renderer, "_engine_render", broken)
+    monkeypatch.setattr(engine.config, "load_config", lambda: {**engine.config.DEFAULT_CONFIG, "render_workers": 1})
+    r = engine.Renderer(proj, backend="engine")
+    rep = r.run()
+    assert any("Harp" in w and "crashed in some.dll" in w for w in rep["warnings"])
+    t = next(x for x in proj.tracks if x.name == "Harp")
+    assert not (r.cache / f"{r.key(r.track_spec(t))}.wav").exists()
+
+
+HALION = Path(r"C:\Program Files\Common Files\VST3\Steinberg\HALion Sonic.vst3")
+HALION_STATE = Path(__file__).resolve().parents[1] / "library" / "patches" / "halion-sonic-bass-1.state"
+
+
+@ENGINE_RUNS
+@pytest.mark.skipif(not (HALION.exists() and HALION_STATE.exists()), reason="HALion Sonic and its Bass 1 patch")
+def test_a_sampler_is_heard_settling_before_the_render(tmp_path):
+    """HALion loads its samples from message-thread callbacks: the probe plays it one of its own notes until two
+    rounds agree, and only then renders. With no wait at all beforehand it must still come out right."""
+    import os
+    import soundfile as sf
+    sr, n = 48000, 48000 * 3
+    notes = []
+    for i, pitch in enumerate((40, 43, 45, 47)):
+        notes += [int(i * 0.5 * sr), 0x90, pitch, 100, int((i * 0.5 + 0.4) * sr), 0x80, pitch, 0]
+    spec = {"sr": sr, "block": 512, "ts": [4, 4], "end": n, "tempo": [[0, 0.0, 120.0]], "loop": None,
+            "tracks": [{"id": "t1", "name": "Bass", "kind": "midi", "on": False, "out": "master", "sends": [],
+                        "db": 0.0, "pan": 0.0, "vol_auto": [], "pan_auto": [], "fx": [],
+                        "source": {"type": "vst3", "path": str(HALION), "shell": None, "state": str(HALION_STATE),
+                                   "params": {}, "name": "HALion Sonic", "events": notes}}],
+            "master": {"db": 0.0, "fx": []}}
+    os.environ["TT_SETTLE_MS"], os.environ["TT_SETTLE_EACH_MS"] = "0", "0"  # read by the engine at start
+    try:
+        eng = live.Engine(no_device=True)
+    finally:
+        del os.environ["TT_SETTLE_MS"], os.environ["TT_SETTLE_EACH_MS"]
+    try:
+        eng.load_spec(spec, tmp_path / "spec.json")
+        res = eng.render(None, n, retries=0, taps={"t1": str(tmp_path / "bass.wav")})
+    finally:
+        eng.close()
+    assert not res.get("unready") and not res.get("silent"), res
+    assert res["probe_ms"] > 0
+    audio, _ = sf.read(str(tmp_path / "bass.wav"), dtype="float32", always_2d=True)
+    assert audio.shape == (n, 2)
+    for i in range(4):  # every note sounds, the first one too
+        assert np.abs(audio[int(i * 0.5 * sr):int((i * 0.5 + 0.3) * sr)]).max() > 1e-3, i
+
+
+@ENGINE_RUNS
+def test_synth_releases_ring_out_unless_per_sample_is_asked_for(tmp_path, monkeypatch):
+    """The owner's choice (2026-11-16): a plucked string's release (0.35 s) is heard after its note-off. Per-sample
+    mode, DawDreamer's way, frees a releasing voice at its first near-silent sample, which for a single string is
+    the first zero crossing: the note stops dead. (The pad and FM synths checked sound the same either way.)"""
+    api.project_new("Tails", folder=str(tmp_path / "tails"), tempo=120)
+    api.track_add("Pluck", "synth:pluck")
+    api.write("Pluck", "C4:q r:q r:h | r:w")  # note-off at 0.5 s
+    p = api.load()
+    sr = p.sample_rate
+    tails = {}
+    for on in (False, True):
+        _per_sample(monkeypatch, on)
+        r = engine.Renderer(api.load(), backend="engine")
+        r.run()
+        audio = r.pre[p.tracks[0].id]
+        tails[on] = float(np.abs(audio[:, int(0.6 * sr):int(0.75 * sr)]).max())
+    assert tails[False] > 1e-3, tails
+    assert tails[True] < 1e-6, tails

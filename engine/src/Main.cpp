@@ -265,26 +265,68 @@ public:
     void audioDeviceStopped() override {}
 
     // ---- offline render ----
+    // The graph runs on this (message) thread while offline: the device stops calling it, and the session is
+    // prepared for 512-sample blocks without real-time constraints. endOffline puts things back.
+    struct Offline { bool live, reprepared; double sr; int block; bool offline; };
+    static constexpr int offlineBlock = 512;
+
+    Offline beginOffline()
+    {
+        Offline o { deviceManager.getCurrentAudioDevice() != nullptr, false, session.sampleRate, session.blockSize, session.offline };
+        if (o.live)
+            deviceManager.removeAudioCallback (this);
+        if (o.sr != transport.sampleRate || o.block != offlineBlock || ! o.offline)
+        {
+            session.prepare (transport.sampleRate, offlineBlock, true);
+            o.reprepared = true;
+        }
+        if (work.getNumSamples() < offlineBlock)
+            work.setSize (2, offlineBlock);
+        return o;
+    }
+
+    void endOffline (const Offline& o)
+    {
+        if (o.reprepared)
+            session.prepare (o.sr, o.block, o.offline);
+        if (o.live)
+            deviceManager.addAudioCallback (this);
+    }
+
+    // One round of the ready probe (Session::probeBegin). Returns how many instruments are not ready yet.
+    int probeOnce()
+    {
+        const auto o = beginOffline();
+        const juce::ScopedNoDenormals noDenormals;
+        const int64 length = (int64) (0.3 * transport.sampleRate);
+        transport.playing = false;
+        renderBlock (offlineBlock);    // sources release whatever was sounding
+        session.graph.reset();         // voices and tails cleared, so the probe hears only its own note
+        if (session.probeBegin (length) > 0)
+            for (int64 done = 0; done <= length; done += offlineBlock)
+                renderBlock (offlineBlock);
+        const int left = session.probeEnd();
+        endOffline (o);
+        return left;
+    }
+
+    static int envMs (const char* name, const char* fallback)
+    {
+        return juce::SystemStats::getEnvironmentVariable (name, fallback).getIntValue();
+    }
+
     juce::DynamicObject::Ptr renderOffline (const juce::var& cmd)
     {
         const juce::File outFile (cmd["out"].toString());
+        const bool master = cmd["out"].toString().isNotEmpty();  // without `out`, only the taps are written
         const double sr = transport.sampleRate;
         const int64 length = cmd["length"].isVoid() ? transport.endSample.load() : (int64) (double) cmd["length"];
         if (length <= 0)
             return object ({ { "error", "nothing to render (length 0)" } });
 
         const auto t0 = juce::Time::getMillisecondCounterHiRes();
-        const bool live = deviceManager.getCurrentAudioDevice() != nullptr;
-        if (live)
-            deviceManager.removeAudioCallback (this);
-        const double prevSr = session.sampleRate;
-        const int prevBlock = session.blockSize;
-        const bool prevOffline = session.offline;
-        const int block = 512;
-        if (prevSr != sr || prevBlock != block || ! prevOffline)
-            session.prepare (sr, block, true);
-        if (work.getNumSamples() < block)
-            work.setSize (2, block);
+        const auto offline = beginOffline();
+        const int block = offlineBlock;
 
         const juce::ScopedNoDenormals noDenormals;
         const bool wasLooping = transport.looping.exchange (false);
@@ -300,31 +342,34 @@ public:
         transport.seekRequest = 0;
         transport.playing = true;
         session.peaks();  // start every strip's meter from zero
+        const auto tapProblems = session.armTaps (cmd["taps"], length);
 
         const int latency = session.latency();
         const int64 total = length + latency;
         trace ("render: " + juce::String (total) + " samples, latency " + juce::String (latency));
-        juce::AudioBuffer<float> result (2, (int) length);
+        juce::AudioBuffer<float> result (2, master ? (int) length : 1);
         result.clear();
         for (int64 done = 0; done < total; done += block)
         {
             renderBlock (block);
             const int64 from = juce::jmax<int64> (done, latency), to = juce::jmin<int64> (done + block, total);
-            if (to > from)
+            if (master && to > from)
                 for (int c = 0; c < 2; ++c)
                     result.copyFrom (c, (int) (from - latency), work, c, (int) (from - done), (int) (to - from));
         }
         const auto stripPeaks = session.peaks();  // post-fader peak of every strip over the whole render
+        const auto tapPeaks = session.closeTaps();
         transport.playing = false;
         transport.seekRequest = 0;
         renderBlock (block);  // lets every source release its notes
         transport.looping = wasLooping;
         stopAtEnd = true;
 
-        juce::String error;
-        outFile.getParentDirectory().createDirectory();
-        outFile.deleteFile();
+        juce::String error = tapProblems;
+        if (master)
         {
+            outFile.getParentDirectory().createDirectory();
+            outFile.deleteFile();
             std::unique_ptr<juce::OutputStream> stream (outFile.createOutputStream().release());
             juce::WavAudioFormat wav;
             const auto options = juce::AudioFormatWriterOptions()
@@ -340,15 +385,12 @@ public:
                 error = "cannot create a WAV writer";
         }
 
-        if (prevSr != sr || prevBlock != block || ! prevOffline)
-            session.prepare (prevSr, prevBlock, prevOffline);
-        if (live)
-            deviceManager.addAudioCallback (this);
+        endOffline (offline);
         if (error.isNotEmpty())
             return object ({ { "error", error } });
-        return object ({ { "out", outFile.getFullPathName() }, { "samples", length }, { "latency", latency },
-                         { "peaks", stripPeaks },
-                         { "peak", result.getMagnitude (0, result.getNumSamples()) },
+        return object ({ { "out", master ? outFile.getFullPathName() : juce::String() }, { "samples", length },
+                         { "latency", latency }, { "peaks", stripPeaks }, { "taps", tapPeaks },
+                         { "peak", master ? result.getMagnitude (0, result.getNumSamples()) : 0.0f },
                          { "seconds", (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0 } });
     }
 
@@ -445,7 +487,29 @@ public:
                 return;
             }
             settle();
-            return reply (cmd, renderOffline (cmd));
+            // New plugin instruments are played a test note until they sound settled, with the message thread
+            // free between rounds so they can finish loading (TT_PROBE_MS caps the wait, TT_PROBE_GAP_MS spaces
+            // the rounds). "probe": false skips it.
+            const auto now = juce::Time::getMillisecondCounterHiRes();
+            if (probeSince <= 0.0)
+                probeSince = now;
+            if ((cmd["probe"].isVoid() || (bool) cmd["probe"]) && session.hasUnproven()
+                && now - probeSince < envMs ("TT_PROBE_MS", "15000") && probeOnce() > 0)
+            {
+                juce::Timer::callAfterDelay (envMs ("TT_PROBE_GAP_MS", "250"), [this, cmd] { handle (cmd); });
+                return;
+            }
+            const auto unready = session.giveUpProbes();
+            const double probed = now - probeSince;
+            probeSince = 0.0;
+            auto res = renderOffline (cmd);
+            res->setProperty ("probe_ms", (int) probed);
+            if (! unready.isEmpty())
+                res->setProperty ("unready", juce::var (unready));
+            reply (cmd, res);
+            if (onRendered)
+                onRendered();
+            return;
         }
         if (op == "editor")
         {
@@ -539,6 +603,8 @@ public:
     juce::MidiBuffer midi;
     std::vector<TempoPt> beats;
     int64 pos = 0;
+    double probeSince = 0.0;  // when the ready probe of the render being handled started
+    std::function<void()> onRendered;  // --render: quit once the render has been written
     bool stopAtEnd = true, loaded = false, perSample = false;
 };
 }  // namespace tt
@@ -590,30 +656,12 @@ int main (int argc, char* argv[])
         render->setProperty ("op", "render");
         render->setProperty ("out", args[r + 2]);
         render->setProperty ("id", "render");
-        auto* stop = new juce::DynamicObject();
-        stop->setProperty ("op", "quit");
-        const juce::var loadCmd (load), renderCmd (render), quitCmd (stop);
-        juce::MessageManager::callAsync ([app, loadCmd, renderCmd, quitCmd]
+        const juce::var loadCmd (load), renderCmd (render);
+        app->onRendered = [app] { app->quit(); };  // the render waits for plugins to settle and sound ready
+        juce::MessageManager::callAsync ([app, loadCmd, renderCmd]
         {
             app->handle (loadCmd);
-            // the render waits for plugins to settle, so the quit has to wait for the render
-            struct Waiter : juce::Timer
-            {
-                std::function<void()> fn;
-                void timerCallback() override { fn(); }
-            };
-            auto* w = new Waiter();
-            auto sent = std::make_shared<bool> (false);
-            w->fn = [app, renderCmd, quitCmd, sent, w]
-            {
-                if (app->session.settleRemainingMs() > 0 || *sent)
-                    return;
-                *sent = true;
-                w->stopTimer();
-                app->handle (renderCmd);
-                app->handle (quitCmd);
-            };
-            w->startTimer (50);
+            app->handle (renderCmd);
         });
         juce::MessageManager::getInstance()->runDispatchLoop();
         return 0;

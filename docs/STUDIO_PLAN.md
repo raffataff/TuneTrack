@@ -4,15 +4,13 @@ Read this first if you are picking up the studio work in a new session. It is se
 wants, what was decided and why, what exists, what is verified, what to build next, and what only the owner can
 unblock. Keep it current: when a stage lands or a decision changes, edit this file in the same change.
 
-Last updated: 2026-11-16. Everything up to the live engine is merged to `main`: `studio-core` (PR #4), then
-`desk-takes` (PR #5, 47e445a: takes on the Desk, benches, Needs You per situation, reports and scorecard, the usage
-cuts, the Mix console, per-seat craft text, the take fixes below, and stage 3's first cut), then a dependency bump
-(PR #6, d4ff438).
-**Uncommitted on branch `crew-usage`** (off `origin/main` at d4ff438; the owner has not asked for a commit): tools
-that point at a take treat the take's own session, named by name or path, as the take (a live Mix agent edited
-the session unheard that way), `listen()` for a bar range, a launched agent's MCP instructions cut to 300
-characters, takes handed in together heard in one Producer run, and the open tasks shown to the seats that add
-tasks.
+Last updated: 2026-11-16. Merged to `main`: `studio-core` (PR #4), `desk-takes` (PR #5, 47e445a: takes on the
+Desk, benches, Needs You per situation, reports and scorecard, the usage cuts, the Mix console, per-seat craft
+text, the take fixes below, and stage 3's first cut), a dependency bump (PR #6), and `crew-usage` (PR #7, 826a36e:
+the take-path fix, `listen()` for a bar range, lean MCP instructions, batched auditions, open tasks for the seats
+that add tasks).
+**Uncommitted on branch `offline-engine`** (off `main` at 826a36e; the owner has not asked for a commit): stage
+3.2, offline rendering through the engine (section 6, stage 3).
 
 ---
 
@@ -98,7 +96,7 @@ Mastering/delivery, scheduling and Needs You belong to the studio, not to a seat
 
 ## 4. What exists now
 
-On `main`, except what sections 5 and 6 mark `desk-takes`, which is uncommitted on that branch.
+On `main`, except what section 6 marks `offline-engine`, which is uncommitted on that branch.
 
 ### Code map
 
@@ -238,7 +236,7 @@ Loose ends closed (2026-11-14, on `main`):
 - Audition tickets on Needs You carry DISCARD as well as ACCEPT and RETURN (`attention_resolve` option `c`).
 - `takes.take_cleanup` / `tunetrack takes clean`: open and handed-in takes are never touched; ids are not reused.
 
-On `crew-usage` (2026-11-16, uncommitted):
+On `crew-usage` (2026-11-16, merged in PR #7):
 
 - `api._path`: when this process's tools point at a take, `project=` naming that take's own session (its folder
   name, path or `project.json`) resolves to the take. `"session"` / `"."` still mean the session itself, and any
@@ -356,7 +354,8 @@ outside the take's seat's department is flagged in `take_diff`, not blocked.
 
 Verified:
 
-- `uv run python -m pytest -q` → 275 pass (135 existed before this work). `tests/test_crew_host.py` covers the manager
+- `uv run python -m pytest -q` → 300 pass (135 existed before this work; since 2026-11-16 the whole suite renders
+  through the engine when it is built, about 60 s). `tests/test_crew_host.py` covers the manager
   lock, hold, stop, recovery, the host, `board()`, `take_audition()`, the server's calls, and a take open on the
   Desk (edits, undo and playback land in the take; ids only; a stale page is refused; the stream follows it).
 - `uv run python tests/fuzz_merge.py 600` → `bad 0`. It builds random edits with the real API and checks four
@@ -664,8 +663,8 @@ Found on the way, worth knowing:
   `live._midi_clock` reproduces it; one sample out changes which synth voice plays a note.
 - The offline Faust host computes built-in synths one sample per call, which frees a releasing voice at the
   first near-silent sample: long releases are cut short (about 0.1 s instead of the set time). The engine matches
-  this with `--per-sample` (the default for `live`); without it releases ring out. Owner's call which is wanted
-  once offline rendering moves to the engine.
+  this with `--per-sample`; without it releases ring out. Decided 2026-11-16: ring out (`synth_per_sample` off,
+  stage 3 item 2).
 
 Left, in order:
 
@@ -679,12 +678,39 @@ Left, in order:
    Not checked by a person yet; opening a take while live was checked on the server side only. Live plays the raw
    mix (no loudness normalisation or limiter, the tag's tooltip says so). Left: live peaks on the console bench
    (`studio.js`), Window buttons for master inserts, an output device picker.
-2. **Offline mode replaces DawDreamer.** Needs per-track stems out of the engine (the export, stems and `listen()`
-   read pre-fader tracks) and a real "plugin is ready" check: the engine waits 2 s + 0.4 s per new plugin and
-   `Engine.render` re-renders when a strip with notes is silent, which catches an unloaded instrument but not a
-   half-loaded one.
+2. Done 2026-11-16 (`offline-engine`, uncommitted): **offline rendering goes through the engine.** What agents
+   measure (`render`, `listen`, `audition`, exports, stems, layers) is now rendered by the engine the owner hears.
+   The Python mixer stays (faders, sends, buses, loudness, stems in numpy, as before); only the jobs moved:
+   - Per-track audio before the fader comes out of the engine as **taps** (`render` op `taps`, written by the
+     fader node, lined up for latency). Every uncached track renders in one batch: tracks keyed by each other's
+     sidechains share an engine, the rest spread over `render_workers` engines side by side. Bus and master chains
+     run in one engine kept for the render. SFZ stays with the worker; with inserts, its dry render is a stem.
+   - **The ready probe**: before a render, each new plugin instrument is played one of its own notes, measured
+     after the instrument, until it sounds and stops getting louder (rounds 250 ms apart, 15 s cap; `unready` names
+     the rest). HALion with no settle wait at all: silent without the probe, every note right with it (751 ms).
+   - Cache keys carry the engine build and synth mode. A track that comes out silent or never settled is used once
+     and not cached; a crashed engine fails only its group and leaves nothing in the cache.
+   - `engine.offline_backend()` / library config `offline_engine` (`auto`, `engine`, `dawdreamer`);
+     `live.engine_runs()` falls back to DawDreamer when Windows will not start the build. The null tests still
+     render their reference with DawDreamer.
+   - `synth_per_sample` (library config) picks the built-in synth mode for live and offline alike. **Off by
+     default: the owner chose ringing releases (2026-11-16).** Per-sample mode (DawDreamer's way) frees a
+     releasing voice at its first near-silent sample, so a single string or oscillator stops dead at note-off:
+     `synth:pluck` loses its 0.35 s release; `pad`, `bell` and `epiano` sound the same either way. Existing projects
+     with plucked built-in parts now ring a little longer, and the built-in kit's crash rings past a short note
+     instead of being choked (so `listen()` no longer warns about it). `true` brings the old sound back.
+   Measured on a copy of `fuzeball-galactic-anthem-v2` (30 tracks, 19 HALion / Groove Agent): fresh 48.9 s
+   (DawDreamer 59.7 s), one note edited 9.7 s (21.4 s), cached 1.8 s; no warnings, no instrument unready. Master
+   level equal, octave bands within 0.11 dB, loudness curve 0.992 alike. Per track: deterministic parts cancel to
+   -45..-145 dB; Groove Agent kits, HALion Taiko and the built-in `drums` and `saw_pluck` synths do not (equal level
+   and bands; round robin, noise, voice allocation). The built-in `drums` synth on "Hybrid" has a loudness curve
+   only 0.82 alike: the same through the old master path, so it predates this stage, but agents now measure the
+   engine's version of it.
+   Left: the probe could replace most of the fixed settle wait (2 s + 0.4 s per plugin with a state) for
+   instruments, but parameter overrides still wait for it; one engine computes on one core (item 3).
 3. SFZ in the engine (sfizz) instead of stems; multi-core graph; sample-rate conversion when the device cannot
-   run at the project's rate; a mono sidechain bus gets the left channel only.
+   run at the project's rate; a mono sidechain bus gets the left channel only. DawDreamer is still used for SFZ
+   renders, plugin scanning, `patch_capture`, preset import and `plugin_params`.
 4. The README limits this stage closes: plugin parameter automation, tempo-synced effects, time-stretch.
 
 ### Stage 4: tracking
@@ -709,11 +735,11 @@ browser that auditions live, genre style sheets as per-seat skills.
 | Needed for | What |
 |---|---|
 | Claude as a crew agent | Done: the CLI is logged in (`crew detect` says `auth: ok`, and one run worked, 2026-11-13). |
-| Stage 3 | Done 2026-11-14: Build Tools, CMake and JUCE 9 are installed. Left: choose the repo's licence (below). |
+| Stage 3 | Done 2026-11-14: Build Tools, CMake and JUCE 9 are installed. Done 2026-11-16: Smart App Control switched off (it blocked a fresh engine build, and with it LIVE). Left: choose the repo's licence (below). |
 | Orchestral palette | Install Spitfire LABS / BBC SO Discover (needs their Spitfire sign-in), then `tunetrack scan` and capture patches. |
 | Stage 5 | Install `ffmpeg` on PATH. |
 | New tools in their own apps | Restart Claude so the MCP server reloads (it runs from this checkout). |
-| Keeping the work | Say when to commit what is uncommitted on `crew-usage`, and whether to open a PR for it. |
+| Keeping the work | Say when to commit what is uncommitted on `offline-engine`, and whether to open a PR for it. |
 
 ---
 
@@ -770,9 +796,11 @@ owner ran a whole orchestral session on paid Codex models (The Lonely Walk) and 
 wasted runs: the usage cuts and the rest of the console are built (section 5), and so are per-seat craft text, the
 take cleanup command, loose takes handed in by the floor and undecided auditions (all on `main` since PR #5). On
 2026-11-16 two live sessions showed agents editing the session from a take by naming it, and duplicate tasks;
-both fixed on `crew-usage` and the second seen gone live. Next: the owner's ears on the loop-seam figure (section
-5, "Not verified"), the schema trim (needs one live run per runner), a whole session with Claude in a seat, then
-stage 3's "Left" list in section 6.
+both fixed on `crew-usage` (PR #7) and the second seen gone live. Later that day stage 3.2 was built on
+`offline-engine`: offline renders go through the engine (section 6, stage 3, item 2). The owner chose ringing synth
+releases (`synth_per_sample` off). Next: their ears on the loop-seam figure (section 5, "Not verified"), a short
+live crew session on the engine backend (none has run on it yet), the schema trim (needs one live run per
+runner), a whole session with Claude in a seat, then stage 3 item 3.
 
 To measure a session's usage: each run's log is `<session>/studio/logs/<task>-<attempt>-<seat>.jsonl` (the agent
 CLI's own event stream). For Codex, `turn.completed` carries `usage`, and each `item.completed` of type

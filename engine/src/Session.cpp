@@ -102,7 +102,17 @@ bool Session::describe (const juce::String& path, const juce::File& out)
     juce::XmlElement root ("PLUGINS");
     for (auto* d : types)
         root.addChildElement (d->createXml().release());
-    return root.writeTo (out);
+    // several engines may list the same new plugin at once (offline renders run side by side): each writes its
+    // own file and renames it, so nobody reads a half-written one
+    const auto part = out.getSiblingFile (out.getFileName() + "." + juce::String (juce::Random::getSystemRandom().nextInt64()) + ".part");
+    if (! root.writeTo (part))
+        return false;
+    if (! part.moveFileTo (out))
+    {
+        part.deleteFile();
+        return out.existsAsFile();
+    }
+    return true;
 }
 
 Session::~Session()
@@ -150,6 +160,7 @@ Session::Slot* Session::take (const juce::String& owner, const juce::String& ide
     trace ("add " + ref);
     s.node = graph.addNode (std::move (proc), std::nullopt, Graph::UpdateKind::none);
     s.ref = ref;
+    s.key = key;
     s.fresh = true;
     topologyChanged = true;
     return &(next[key] = std::move (s));
@@ -410,6 +421,7 @@ juce::var Session::apply (const juce::var& spec)
     next.clear();
     seen.clear();
     strips.clear();
+    probeWants.clear();
     wires.clear();
     topologyChanged = false;
     freshStates = 0;
@@ -445,6 +457,7 @@ juce::var Session::apply (const juce::var& spec)
     std::vector<Route> routes;
 
     auto gainNode = [] (juce::String&) -> std::unique_ptr<juce::AudioProcessor> { return std::make_unique<GainNode>(); };
+    auto meterNode = [] (juce::String&) -> std::unique_ptr<juce::AudioProcessor> { return std::make_unique<MeterNode>(); };
     auto faderNode = [this] (juce::String&) -> std::unique_ptr<juce::AudioProcessor> { return std::make_unique<FaderNode> (transport); };
 
     auto buildChain = [&] (const juce::String& id, const juce::var& fxList, Graph::Node::Ptr prev) -> Graph::Node::Ptr
@@ -484,6 +497,14 @@ juce::var Session::apply (const juce::var& spec)
                 if (auto* s = device (id, id + "/inst", src, true, false))
                 {
                     prev = s->node;
+                    const auto instKey = s->key;
+                    Graph::Node::Ptr meter;
+                    if (type == "vst3")
+                        if (auto* mt = take (id, "meter", id + "/meter", meterNode))
+                        {
+                            link (prev.get(), mt->node.get());
+                            prev = meter = mt->node;
+                        }
                     if (type != "stem")
                         if (auto* m = take (id, "midi", id + "/midi", [this] (juce::String&) -> std::unique_ptr<juce::AudioProcessor>
                                             { return std::make_unique<MidiSourceNode> (transport); }))
@@ -508,6 +529,19 @@ juce::var Session::apply (const juce::var& spec)
                                 m->applied = sig;
                             }
                             wires.push_back ({ { m->node->nodeID, Graph::midiChannelIndex }, { s->node->nodeID, Graph::midiChannelIndex } });
+                            if (meter != nullptr)
+                            {
+                                std::vector<const MidiEv*> ons;
+                                for (auto& e : *seq)
+                                    if ((e.status & 0xf0) == 0x90 && e.d2 > 0)
+                                        ons.push_back (&e);
+                                if (! ons.empty())
+                                {
+                                    std::sort (ons.begin(), ons.end(), [] (auto* a, auto* b) { return a->d1 < b->d1; });
+                                    const auto* e = ons[ons.size() / 2];
+                                    probeWants.push_back ({ instKey, id + "/inst", m->node, meter, (e->status & 0x0f) + 1, e->d1, e->d2 });
+                                }
+                            }
                         }
                 }
             }
@@ -668,6 +702,126 @@ void Session::resetBuiltIns()
     for (auto& [key, s] : slots)
         if (auto* f = dynamic_cast<FaustNode*> (s.node->getProcessor()))
             f->reset();
+}
+
+// ---- the ready probe -----------------------------------------------------------------------------------------
+
+bool Session::hasUnproven() const
+{
+    for (auto& w : probeWants)
+        if (auto it = slots.find (w.slot); it != slots.end() && ! it->second.ready)
+            return true;
+    return false;
+}
+
+int Session::probeBegin (juce::int64 length)
+{
+    int n = 0;
+    for (auto& w : probeWants)
+        if (auto it = slots.find (w.slot); it != slots.end() && ! it->second.ready)
+        {
+            static_cast<MidiSourceNode*> (w.midi->getProcessor())->startProbe (w.channel, w.note, w.velocity, length);
+            static_cast<MeterNode*> (w.meter->getProcessor())->start();
+            ++n;
+        }
+    return n;
+}
+
+int Session::probeEnd()
+{
+    int left = 0;
+    for (auto& w : probeWants)
+    {
+        auto it = slots.find (w.slot);
+        auto* m = static_cast<MeterNode*> (w.meter->getProcessor());
+        if (it == slots.end() || it->second.ready || ! m->on)
+            continue;
+        m->on = false;
+        auto& s = it->second;
+        const bool silent = m->peak < 1.0e-4f;
+        const float db = (m->count > 0 && m->sum > 0.0) ? (float) (10.0 * std::log10 (m->sum / (2.0 * (double) m->count))) : -1000.0f;
+        if (! silent && s.probes > 0 && ! s.probeSilent && db <= s.probeDb + 1.5f)
+            s.ready = true;
+        trace ("probe " + w.ref + ": " + juce::String (db, 1) + " dB" + (silent ? " (silent)" : "") + (s.ready ? " ready" : ""));
+        s.probeDb = db;
+        s.probeSilent = silent;
+        ++s.probes;
+        if (! s.ready)
+            ++left;
+    }
+    return left;
+}
+
+juce::StringArray Session::giveUpProbes()
+{
+    juce::StringArray out;
+    for (auto& w : probeWants)
+        if (auto it = slots.find (w.slot); it != slots.end() && ! it->second.ready)
+        {
+            auto& s = it->second;
+            s.ready = true;
+            if (s.probes == 0)
+                continue;  // the probe was skipped ("probe": false): nothing to report
+            out.add (w.ref + (s.probeSilent ? ": made no sound when one of its own notes was tried"
+                                            : ": was still getting louder when the render started (still loading?)"));
+        }
+    return out;
+}
+
+// ---- taps ----------------------------------------------------------------------------------------------------
+
+juce::String Session::armTaps (const juce::var& taps, juce::int64 length)
+{
+    juce::String problems;
+    if (auto* o = taps.getDynamicObject())
+        for (auto& kv : o->getProperties())
+        {
+            const auto id = kv.name.toString();
+            auto it = strips.find (id);
+            if (it == strips.end() || it->second.fader == nullptr)
+            {
+                problems << id << ": no such strip; ";
+                continue;
+            }
+            const juce::File file (kv.value.toString());
+            file.getParentDirectory().createDirectory();
+            file.deleteFile();
+            std::unique_ptr<juce::OutputStream> stream (file.createOutputStream().release());
+            juce::WavAudioFormat wav;
+            const auto options = juce::AudioFormatWriterOptions()
+                                     .withSampleRate (sampleRate)
+                                     .withNumChannels (2)
+                                     .withBitsPerSample (32)
+                                     .withSampleFormat (juce::AudioFormatWriterOptions::SampleFormat::floatingPoint);
+            auto writer = stream != nullptr ? wav.createWriterFor (stream, options) : nullptr;
+            if (writer == nullptr)
+            {
+                problems << id << ": cannot write " << file.getFullPathName() << "; ";
+                continue;
+            }
+            auto* f = static_cast<FaderNode*> (it->second.fader->getProcessor());
+            f->tap = std::move (writer);
+            f->tapSkip = f->latencyBefore.load();
+            f->tapLeft = length;
+            f->tapPeak = 0.0f;
+            tapped.add (id);
+        }
+    return problems;
+}
+
+juce::var Session::closeTaps()
+{
+    auto* o = new juce::DynamicObject();
+    for (auto& id : tapped)
+        if (auto it = strips.find (id); it != strips.end() && it->second.fader != nullptr)
+        {
+            auto* f = static_cast<FaderNode*> (it->second.fader->getProcessor());
+            f->tap.reset();  // flushes and closes the file
+            f->tapLeft = 0;
+            o->setProperty (juce::Identifier (id), f->tapPeak);
+        }
+    tapped.clear();
+    return juce::var (o);
 }
 
 juce::var Session::peaks()

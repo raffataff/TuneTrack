@@ -50,6 +50,36 @@ tunetrack-engine --devices
 - **Protocol.** One JSON object per line on stdin (`{"op": "load", "path": ...}`, `play`, `stop`, `seek`, `loop`,
   `render`, `editor`, `save_state`, `devices`, `device`, `status`, `ticks`, `quit`), each answered with a line
   starting `@@ ` that repeats the command's `id` as `re`. `ticks` turns on position and meter events.
+- **Offline renders.** `render` writes the master to `out` (leave it empty for none) and, for each strip named in
+  `taps` (`{strip id: wav path}`), the strip's audio before its fader: 32-bit float, from song position 0, lined
+  up for plugin latency, `length` samples. This is how TuneTrack's offline renderer uses the engine
+  (`engine.Renderer`, see below). The answer carries each tap's peak (`taps`), each strip's post-fader peak
+  (`peaks`), `probe_ms` and `unready`.
+- **The ready probe.** A plugin instrument cannot say when it has finished loading its samples (HALion loads them
+  from message-thread callbacks). Before a render, every new plugin instrument with notes is played one of its own
+  notes (the median pitch, at that note's velocity), measured after the instrument and before its inserts, with
+  the message thread free between rounds (`TT_PROBE_GAP_MS`, 250). It is ready once it sounds and is no louder than
+  on the round before; after `TT_PROBE_MS` (15000) the render goes ahead and `unready` names the rest ("made no
+  sound" or "still getting louder"). This runs after the fixed settle wait (2 s + 0.4 s per plugin given a state,
+  `TT_SETTLE_MS` / `TT_SETTLE_EACH_MS`), which parameter overrides still need. `"probe": false` skips it.
+
+## Offline rendering
+
+TuneTrack renders offline through the engine whenever it is built and Windows lets it start
+(`engine.offline_backend()`; `offline_engine` in the library config: `auto`, `engine` or `dawdreamer`). The Python
+mixer stays: faders, sends, buses, loudness and stems are numpy, as before, and only the jobs move.
+
+- **Tracks.** Every track missing from the cache renders in one batch: tracks that key each other's sidechains
+  share an engine, the rest are spread over `render_workers` engines running side by side. Each strip is switched
+  off and tapped; the taps become the cache files. Cache keys carry the engine build and synth mode, so engine and
+  DawDreamer renders never mix and a rebuild renders afresh.
+- **Bus and master chains** run in one engine kept for the render: the bus input as a stem, the chain, a tap.
+- **SFZ** stays with the worker (TuneTrack's own SFZ player); with inserts, its dry render is a stem in the engine.
+- A track that comes out silent though it has notes, or whose instrument never settled, is used for that render
+  and not kept, so the next render tries again. A track whose engine crashed fails alone with its group; nothing
+  half-written reaches the cache.
+- `live.engine_runs()` checks the build can start (Smart App Control blocked one fresh build, 2026-11-16); when it
+  cannot, renders use DawDreamer and LIVE explains why.
 
 ## Matching the offline renderer
 
@@ -58,10 +88,12 @@ to about -95 dB. Two things never cancel, by nature: instruments that vary each 
 samples, free-running modulation), and built-in synth parts where the two engines free a voice at a different
 sample. Those are compared by level, octave-band balance and loudness curve instead.
 
-`--per-sample` makes the built-in synths compute one sample per call, as the offline renderer's Faust host does.
-It costs CPU and frees a releasing voice at the first near-silent sample, which shortens long releases; without
-it (whole blocks) releases ring out. `tunetrack live` and the null test use `--per-sample`, so what is heard
-live is what the offline renderer exports.
+`--per-sample` makes the built-in synths compute one sample per call, as DawDreamer's Faust host does. It costs
+CPU and frees a releasing voice at its first near-silent sample, which for a single oscillator or string is the
+first zero crossing after note-off: the plucked synths stop dead at note-off (the pad and FM synths checked sound
+the same either way). Without it (whole blocks) releases ring out as each synth sets them. Live playback and
+offline renders follow `synth_per_sample` in the library config: off by default since 2026-11-16 (the owner's
+choice); true brings back the DawDreamer sound. The null tests always use it, since their reference is DawDreamer.
 
 ## Licences
 
