@@ -8,10 +8,9 @@ Last updated: 2026-11-16. Merged to `main`: `studio-core` (PR #4), `desk-takes` 
 Desk, benches, Needs You per situation, reports and scorecard, the usage cuts, the Mix console, per-seat craft
 text, the take fixes below, and stage 3's first cut), a dependency bump (PR #6), `crew-usage` (PR #7, 826a36e:
 the take-path fix, `listen()` for a bar range, lean MCP instructions, batched auditions, open tasks for the seats
-that add tasks), and `offline-engine` (PR #8, 880e673: stage 3.2, offline rendering through the engine).
-**Uncommitted on branch `engine-lanes`** (off `main` at 880e673; the owner has not asked for a commit): most of
-stage 3.3 (section 6, stage 3, item 3): strips on several cores, sample-rate conversion, the mono sidechain key; and
-stage 3.4 (item 4): automation of any device setting, tempo-synced effects, time-stretch of audio clips.
+that add tasks), `offline-engine` (PR #8, 880e673: stage 3.2, offline rendering through the engine), and
+`engine-lanes` (PR #9: stage 3.3, strips on several cores, sample-rate conversion, the mono sidechain key, SFZ
+through sfizz; and stage 3.4, automation of any device setting, tempo-synced effects, time-stretch of audio clips).
 
 ---
 
@@ -97,7 +96,7 @@ Mastering/delivery, scheduling and Needs You belong to the studio, not to a seat
 
 ## 4. What exists now
 
-On `main`, except what section 6 marks `engine-lanes`, which is uncommitted on that branch.
+On `main`.
 
 ### Code map
 
@@ -714,7 +713,7 @@ Left, in order:
    engine's version of it.
    Left: the probe could replace most of the fixed settle wait (2 s + 0.4 s per plugin with a state) for
    instruments, but parameter overrides still wait for it; one engine computes on one core (item 3).
-3. Done 2026-11-16 (`engine-lanes`, uncommitted), stage 3.3:
+3. Done 2026-11-16 (`engine-lanes`, PR #9), stage 3.3:
    - **Several cores** (`engine/src/Lanes.h`). Every source strip whose inserts listen to no other strip is a lane:
      a graph of its own, computed before each block by `LanePool` on worker threads (one per physical core but one,
      at most 8; `--threads`). The session's graph sees a lane as one device with the lane's latency, so alignment
@@ -746,7 +745,7 @@ Left, in order:
      (-71 dB: its envelope is CC-driven), now plays. Not checked: live playback through the audio interface
      (real-time streaming; the `pull` op runs offline). DawDreamer is still used for plugin scanning,
      `patch_capture`, preset import and `plugin_params`.
-4. Done 2026-11-16 (`engine-lanes`, uncommitted), stage 3.4: the README limits.
+4. Done 2026-11-16 (`engine-lanes`, PR #9), stage 3.4: the README limits.
    - **Device automation.** `Device.automation` (`{setting: [[beat, value]]}`) on any effect or instrument, set with
      `automation(track, param, points, device=<effect index> | "instrument")` (`track="master"` for master effects).
      Built-in settings are checked on the edit (an unknown one gets the list); a VST3 parameter goes by name, index
@@ -810,7 +809,6 @@ browser that auditions live, genre style sheets as per-seat skills.
 | SFZ in the engine | Done 2026-11-16: sfizz's source is in `engine/third_party/sfizz/`. Left: hear an SFZ track on LIVE (real-time streaming is not checked). |
 | Stage 5 | Install `ffmpeg` on PATH. |
 | New tools in their own apps | Restart Claude so the MCP server reloads (it runs from this checkout). |
-| Keeping the work | Say when to commit what is uncommitted on `engine-lanes`, and whether to open a PR for it. |
 
 ---
 
@@ -879,7 +877,7 @@ both fixed on `crew-usage` (PR #7) and the second seen gone live. Later that day
 releases (`synth_per_sample` off). PR #8 merged it. Later still, stage 3.3 on `engine-lanes`: strips on several
 cores, sample-rate conversion, the mono sidechain key, and SFZ through sfizz in the engine (section 6, stage 3,
 item 3); then stage 3.4 on the same branch: automation of any device setting, tempo-synced effects, time-stretch
-(item 4; 326 tests pass). The same day the session files were found deleted from disk by the merge
+(item 4; 326 tests pass). PR #9 merged both. The same day the session files were found deleted from disk by the merge
 (section 8) and restored. Next: the owner's ears on LIVE with lanes and an SFZ track, their ears on the loop-seam
 figure (section 5, "Not verified"), a short live crew session on the engine backend, the schema trim (needs one
 live run per runner), a whole session with Claude in a seat.
