@@ -136,11 +136,14 @@ def test_the_editor_server_hosts_one_engine_that_follows_the_desk(proj, monkeypa
                 break
             time.sleep(0.1)
         assert server.live_state()["rev"] == model.read_rev(proj.path)
+        api.fx_add("master", "builtin:gain")
         tk = takes.take_new("try", use=False, session=str(proj.path))["take"]
         st = server.live_play(beat=0.0, take=tk)           # the Desk opens a take: same engine, other project
         assert st["view"].replace("\\", "/").endswith("takes/" + tk)
         with pytest.raises(live.EngineError, match="no window"):
             server.live_window("Harp", 0)                  # built-in devices have none
+        with pytest.raises(live.EngineError, match="master/fx/0 has no window"):
+            server.live_window("master", 0, take=tk)       # a master insert is found by the engine, not "nothing loaded"
         with pytest.raises(KeyError):
             server.live_window("Nobody")
         assert server.live_stop()["playing"] is False
@@ -148,7 +151,30 @@ def test_the_editor_server_hosts_one_engine_that_follows_the_desk(proj, monkeypa
         assert server.live_off()["on"] is False
 
 
-ENGINE_RUNS = pytest.mark.skipif(not live.engine_runs(),
+def test_a_master_insert_window_names_the_engines_master_slot(proj, monkeypatch):
+    """The engine loads the master chain as "master/fx/<n>" and leaves bypassed effects out, like a track's."""
+    from tunetrack import livehost
+    api.fx_add("master", "builtin:gain")
+    api.fx_add("master", "builtin:width")
+    api.fx_add("master", "builtin:eq")
+    api.fx_update("master", 0, bypass=True)
+    calls = []
+
+    class Fake:
+        project = api.load()
+        engine = type("E", (), {"call": lambda self, op, **kw: calls.append((op, kw))})()
+
+    monkeypatch.setattr(livehost, "_ensure", lambda path: Fake)
+    assert livehost.window(proj.path, "master", 2) == {"opened": "master/fx/1"}
+    assert livehost.window(proj.path, "Master", "1") == {"opened": "master/fx/0"}
+    assert calls == [("editor", {"ref": "master/fx/1"}), ("editor", {"ref": "master/fx/0"})]
+    with pytest.raises(RuntimeError, match="bypassed"):
+        livehost.window(proj.path, "master", 0)
+    with pytest.raises(KeyError):
+        livehost.window(proj.path, "master", 3)
+
+
+ENGINE_RUNS =pytest.mark.skipif(not live.engine_runs(),
                                  reason="the live engine is not built, or Windows will not start it (engine/README.md)")
 
 

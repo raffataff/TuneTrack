@@ -11,7 +11,9 @@
 window.Tracking = (() => {
   const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { /* no storage */ } return null; };
   const st = () => (S.eng.st && S.eng.st.on ? S.eng.st : null);
-  const armed = (id) => (st() && st().armed && st().armed[id]) || { arm: false, monitor: false };
+  // what is armed on the Desk's project (a gear audition arms its own instrument: not the Desk's)
+  const armedMap = () => (st() && !st().audition && st().armed) || {};
+  const armed = (id) => armedMap()[id] || { arm: false, monitor: false };
   const recording = () => !!(st() && st().recording);
   const take = () => S.take || null;
   let punch = null, armedSig = "", starting = false, lastDone = null, keysOn = false, peaksGen = 0;
@@ -91,7 +93,7 @@ window.Tracking = (() => {
   const recBtn = $("#recBtn"), clickBtn = $("#clickBtn"), countIn = $("#countIn"), punchBtn = $("#punchBtn"), recQ = $("#recQ"), keysBtn = $("#keysBtn");
   countIn.value = store("tt.countin") || "1";
   countIn.onchange = () => store("tt.countin", countIn.value);
-  // PUNCH: ● records only the loop region, once, and stops by itself
+  // PUNCH: ● records only the loop region: once and stops by itself, or with LOOP on a pass each time round until stopped
   let punchOn = store("tt.punch") === "1";
   punchBtn.onclick = () => { punchOn = !punchOn; store("tt.punch", punchOn ? "1" : "0"); sync(); if (punchOn && S.doc && !S.doc.loop) toast(NO_PUNCH, true); };
   // quantise on record: the grid the recorded notes' starts are moved to, in beats (0 = as played)
@@ -106,11 +108,11 @@ window.Tracking = (() => {
   recBtn.onclick = () => (recording() ? stop(false) : record());
   async function record() {
     if (!S.doc || starting || !needLive()) return;
-    const any = st() && Object.values(st().armed || {}).some((a) => a.arm);
+    const any = Object.values(armedMap()).some((a) => a.arm);
     if (!any) { toast("No track is armed. Press R on the track to record on (an audio track needs its input chosen first)."); return; }
     const lp = S.doc.loop;
     if (punchOn && !lp) { toast(NO_PUNCH); return; }
-    const where = punchOn ? { beat: lp.start, until: lp.end, loop: false } : { beat: S.playhead, loop: S.loopOn && !!lp };
+    const where = punchOn ? { beat: lp.start, until: lp.end, loop: !!S.loopOn } : { beat: S.playhead, loop: S.loopOn && !!lp };
     starting = true; punch = where.beat; window.Studio?.hush();
     try {
       liveState(await api("live_record", { ...where, count_in: +countIn.value, quantise: quant(), take: take() }));

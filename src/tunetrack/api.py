@@ -533,6 +533,14 @@ def project_set(project: str | None = None, name: str | None = None, tempo: floa
         if time_sig:
             p.time_sig = [int(x) for x in str(time_sig).split("/")]
         if brief:
+            if "style" in brief:  # a genre style sheet (skill/styles): a known name, or none
+                from . import styles
+                brief = dict(brief)
+                st = styles.check(brief.pop("style"))
+                if st:
+                    p.brief["style"] = st
+                else:
+                    p.brief.pop("style", None)
             p.brief.update(brief)
         if loop is not None:
             if loop in ("off", "", False):
@@ -672,9 +680,18 @@ def track_update(track: str, project: str | None = None, name: str | None = None
                  role: str | None = None, layer: str | None = None, color: str | None = None,
                  instrument_params: dict | None = None, input: list | int | None = None) -> dict:
     """sends: [{"to": "Reverb", "db": -12}] replaces the send list. instrument_params merges into the instrument.
-    input (audio tracks): the interface input it records, from 1 (2, or [1, 2] for a stereo pair; 0 = none)."""
+    input (audio tracks): the interface input it records, from 1 (2, or [1, 2] for a stereo pair; 0 = none).
+    volume_db / pan on a track whose fader is automated moves its whole curve by the change (answer: `moved`)."""
+    moved = {}
     with _Edit(project) as p:
         t = p.track(track)
+        # An automated fader plays its curve, not its level: a new level moves the curve by the difference, so
+        # the fader still does what it says (the Desk's faders and an agent alike).
+        for k, v, lo, hi in (("volume_db", volume_db, -120.0, 24.0), ("pan", pan, -1.0, 1.0)):
+            by = 0.0 if v is None else float(v) - float(getattr(t, k))
+            if t.automation.get(k) and abs(by) > 1e-9:
+                t.automation[k] = [[b, round(min(hi, max(lo, float(x) + by)), 3)] for b, x in t.automation[k]]
+                moved[k] = round(by, 3)
         if name:
             t.name = name
         if input is not None:
@@ -703,7 +720,7 @@ def track_update(track: str, project: str | None = None, name: str | None = None
             t.output = to.id if to else "master"
         if sends is not None:
             t.sends = [{"to": p.track(s["to"]).id, "db": float(s.get("db", -12))} for s in sends]
-    return {"track": t.id, "name": t.name}
+    return {"track": t.id, "name": t.name, **({"moved": moved} if moved else {})}
 
 
 def track_remove(track: str, project: str | None = None) -> dict:
@@ -1284,8 +1301,8 @@ def comp(track: str, start, end, use: int, project: str | None = None, group: bo
     while recording, and each new recording over old material, is a pass (`pass` in project_info's clips; 0 = what
     was there before any recording). use: the pass to hear from start to end; every other clip in that stretch is
     muted, cut at the edges where it runs past them. Nothing is deleted: comp again to change your mind.
-    group: the audio tracks recorded together with that pass (the mics of a drum kit) follow, each to its own
-    pass of the same time round."""
+    group: the tracks recorded together with that pass (the mics of a drum kit, a keyboard played with them)
+    follow, each to its own pass of the same time round."""
     with _Edit(project) as p:
         t = p.track(track)
         a, b = p.pos(start), p.pos(end)

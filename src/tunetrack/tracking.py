@@ -18,6 +18,7 @@ correction for a driver that reports its latency wrong).
 from __future__ import annotations
 
 import math
+import time
 from pathlib import Path
 
 from . import config
@@ -92,25 +93,48 @@ def at_project_rate(rec: dict) -> dict:
     return {**rec, "marks": marks, "midi": ev, "comp": c, "samples": int(round(int(rec["samples"]) * k)), "file_sr": sr}
 
 
+def _file_stamp(file: str | None) -> str | None:
+    """The recording a recorded file belongs to: audio/rec/<stamp>-<track>.wav."""
+    name = Path(file or "").name
+    return name.rsplit("-", 1)[0] if (file or "").startswith("audio/rec/") and "-" in name else None
+
+
+def _mark(c: Clip) -> tuple[str | None, int | None]:
+    """(which recording, which time round the loop) a pass came from; the round is None for audio recorded
+    before clips carried `rec` (only the file name says which recording)."""
+    if c.rec:
+        stamp, _, k = c.rec.partition("/")
+        return stamp, int(k) if k.isdigit() else None
+    return _file_stamp(c.file), None
+
+
 def _stamp(c: Clip) -> str | None:
-    """Which recording an audio clip came from (tracks recorded together share it): audio/rec/<stamp>-<track>.wav."""
-    name = Path(c.file or "").name
-    return name.rsplit("-", 1)[0] if (c.file or "").startswith("audio/rec/") and "-" in name else None
+    """Which recording a clip came from (tracks recorded together share it)."""
+    return _mark(c)[0]
 
 
 def mates(p: Project, t: Track, start: float, end: float, use: int) -> list[tuple[Track, int]]:
-    """The other tracks recorded together with pass `use` of this one over a stretch (the mics of a drum kit),
-    each with its own number for that pass: the same time round the loop, counted from the first pass of that
+    """The other tracks recorded together with pass `use` of this one over a stretch (the mics of a drum kit, or
+    a keyboard played with them), each with its own number for that pass: the same time round the loop. Passes
+    that carry their round are matched by it; older audio passes by counting from the first pass of that
     recording on each track."""
     inside = lambda c: c.start < end - EPS and c.end > start + EPS  # noqa: E731
-    stamps = {_stamp(c) for c in t.clips if c.lane == use and inside(c)} - {None}
+    mine = [_mark(c) for c in t.clips if c.lane == use and inside(c)]
+    stamps = {s for s, _ in mine} - {None}
     if not stamps:
         return []
+    rounds = {m for m in mine if m[0] and m[1] is not None}
     first = min(c.lane for c in t.clips if _stamp(c) in stamps)
     out = []
     for o in p.tracks:
         theirs = [c for c in o.clips if _stamp(c) in stamps] if o is not t else []
         if not theirs:
+            continue
+        if rounds and all(_mark(c)[1] is not None for c in theirs):
+            # both say their round: the same one, or nothing (a MIDI track that sat that round out)
+            same = [c for c in theirs if _mark(c) in rounds and inside(c)]
+            if same:
+                out.append((o, same[0].lane))
             continue
         want = min(c.lane for c in theirs) + (use - first)
         if any(c.lane == want and inside(c) for c in theirs):
@@ -129,7 +153,7 @@ def split_clip(p: Project, t: Track, c: Clip, at: float) -> Clip:
     src_cut = cut * 60 / c.bpm if c.bpm else tm.sec(c.start + cut) - tm.sec(c.start)  # source seconds
     right = Clip(id=p.new_id("c"), kind=c.kind, name=c.name, start=c.start + cut, length=c.length - cut,
                  file=c.file, offset=c.offset + src_cut, gain_db=c.gain_db, fade_out=c.fade_out,
-                 bpm=c.bpm, pitch=c.pitch, muted=c.muted, color=c.color, lane=c.lane)
+                 bpm=c.bpm, pitch=c.pitch, muted=c.muted, color=c.color, lane=c.lane, rec=c.rec)
     right.notes = [Note(n.pitch, n.start - cut, n.dur, n.vel) for n in c.notes if n.start >= cut]
     right.cc = {k: [[b - cut, v] for b, v in pts if b >= cut] for k, pts in c.cc.items()}
     c.notes = [n for n in c.notes if n.start < cut]
@@ -228,13 +252,14 @@ def place_audio(p: Project, t: Track, file: str, rec: dict, punch: float = 0.0, 
     c = rec.get("comp") or {}
     late = int(c.get("graph", 0)) + int(c.get("out", 0)) + int(c.get("in", 0)) + offset_samples(sr)
     floor = max(0, int(round(tm.sec(max(0.0, punch)) * sr)))
-    lane, made = _next_lane(t), []
+    lane, made, stamp = _next_lane(t), [], _file_stamp(file)
     for ps in passes(rec["marks"], int(rec["samples"]), late, floor, _ceil(tm, sr, until)):
         if ps["n"] < MIN_PASS * sr:
             continue
         start = tm.beat(ps["pos"] / sr)
         clip = Clip(id=p.new_id("c"), kind="audio", name=f"{t.name} {lane}", start=start,
-                    length=tm.beat((ps["pos"] + ps["n"]) / sr) - start, file=file, offset=ps["at"] / sr, lane=lane)
+                    length=tm.beat((ps["pos"] + ps["n"]) / sr) - start, file=file, offset=ps["at"] / sr, lane=lane,
+                    rec=f"{stamp}/{ps['k']}" if stamp else None)
         t.clips.append(clip)
         made.append(clip)
         lane += 1
@@ -244,12 +269,14 @@ def place_audio(p: Project, t: Track, file: str, rec: dict, punch: float = 0.0, 
 
 
 def place_midi(p: Project, t: Track, rec: dict, punch: float = 0.0, until: float | None = None,
-               quantise: float = 0.0, src: int = 0) -> list[Clip]:
+               quantise: float = 0.0, src: int = 0, stamp: str | None = None) -> list[Clip]:
     """Put the keyboard's recorded events on a MIDI track: one clip per pass, on whole bars, as played. Sustain
     and other controllers go to the clip's cc lanes, pitch bend to "bend". until: the punch out (a note played
     after it is dropped, one held across it ends there). quantise: move each note's start to the nearest multiple
     of this many beats (0 = as played; lengths are kept). src: the keyboard this track listens to (its number in
-    the recording's `midi_src`; 0 = every keyboard). The on-screen keys (source 0) play every armed track."""
+    the recording's `midi_src`; 0 = every keyboard). The on-screen keys (source 0) play every armed track.
+    stamp: the recording's stamp (the one in its audio files' names), kept on each pass with its round so a
+    group comp finds the MIDI passes recorded with the audio ones."""
     rec = at_project_rate(rec)
     sr = int(rec["sr"])
     tm = p.tempo_map()
@@ -301,7 +328,8 @@ def place_midi(p: Project, t: Track, rec: dict, punch: float = 0.0, until: float
         start = math.floor((min(first, tm.beat(spans[k]["pos"] / sr)) if k in spans else first) / bpb + EPS) * bpb
         stop = max(end, max(n[1] + n[2] for n in notes))
         clip = Clip(id=p.new_id("c"), kind="midi", name=f"{t.name} {lane}", start=start,
-                    length=max(bpb, math.ceil((stop - start) / bpb - EPS) * bpb), lane=lane)
+                    length=max(bpb, math.ceil((stop - start) / bpb - EPS) * bpb), lane=lane,
+                    rec=f"{stamp}/{k}" if stamp else None)
         clip.notes = [Note(pitch, on - start, dur, vel) for pitch, on, dur, vel in notes]
         clip.cc = {name: [[b - start, v] for b, v in pts] for name, pts in cc.items()}
         clip.sort()
@@ -314,13 +342,15 @@ def place_midi(p: Project, t: Track, rec: dict, punch: float = 0.0, until: float
 
 
 def commit(project: str | Path, rec: dict, files: dict[str, str], keys: list[str] | dict[str, int],
-           punch: float = 0.0, until: float | None = None, quantise: float = 0.0) -> dict:
+           punch: float = 0.0, until: float | None = None, quantise: float = 0.0, stamp: str | None = None) -> dict:
     """Write a finished recording into a project as one edit (one undo step). files: {audio track id: recorded
     file, relative to the project's root}; keys: the MIDI tracks the keyboard was playing, or {track id: which
-    keyboard (0 = any)}. until, quantise: see place_midi."""
+    keyboard (0 = any)}. until, quantise: see place_midi. stamp: which recording this is (default: the one in the
+    files' names, else now), marked on the MIDI passes."""
     from . import api
     if not isinstance(keys, dict):
         keys = {tid: 0 for tid in keys}
+    stamp = stamp or next(filter(None, map(_file_stamp, files.values())), None) or time.strftime("%Y%m%d-%H%M%S")
     out: dict = {"clips": [], "heard": {}}
     with api._Edit(str(project)) as p:
         for tid, file in files.items():
@@ -333,7 +363,7 @@ def commit(project: str | Path, rec: dict, files: dict[str, str], keys: list[str
                 out["heard"][tid] = sorted({c.lane for c in made if not c.muted})
         for tid, src in keys.items():
             t = p.track(tid)
-            made = place_midi(p, t, rec, punch, until, quantise, int(src or 0))
+            made = place_midi(p, t, rec, punch, until, quantise, int(src or 0), stamp)
             out["clips"] += [c.id for c in made]
             if made:
                 out["heard"][tid] = sorted({c.lane for c in made if not c.muted})

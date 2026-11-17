@@ -86,6 +86,7 @@ function ingest(events) {
       const text = fullText(e);
       feed(e.at, "say" + (e.sender === "you" ? " you" : ""), `<i>${esc(title(e.sender))} → ${esc(title(e.to))}</i>  ${esc(text)}`);
       for (const s of [e.sender, e.to]) if (SHORT[s]) line(s, e.at, "say", `<i>${esc(title(e.sender))} → ${esc(title(e.to))}:</i> ${esc(text)}`);
+      if (window.Voice) window.Voice.heard(e, text, title(e.sender));  // voice.js reads new ones aloud (old history too comes through here)
     } else if (e.kind === "attention") {
       feed(e.at, e.state === "open" ? "note" : "", e.state === "open" ? `Needs you: ${esc(e.title)}` : `Answered: ${esc(e.title)}${e.answer ? " → " + esc(e.answer) : ""}`);
     } else if (e.kind === "report") {
@@ -168,14 +169,21 @@ function openBrief() {
     <p class="hint">Say what you want made: what it is for, mood, length, anything it must fit. The Producer plans it, hands out tasks to the seats that are filled, and auditions what comes back. Each agent run costs whatever that seat's model costs.</p>
     ${agent ? "" : `<p class="hint warn">${prod && prod.occupant ? "The Producer seat is not an agent, so this brief waits there as a task for whoever sits in it." : "Nobody is in the Producer seat. The brief will wait there until you seat an agent (SEAT on the Producer unit)."}</p>`}
     <textarea id="brText" rows="6" placeholder="A calm main-menu loop for a small space game: 8 bars, D minor, about 90 BPM, loops seamlessly…"></textarea>
-    <div class="formgrid" style="margin-top:10px"><span>At once</span><input id="brPar" type="number" min="1" max="6" value="3" title="Agents working at the same time">
+    <div class="formgrid" style="margin-top:10px"><span>Style</span><select id="brStyle" title="A genre style sheet: each seat gets that genre's craft in its brief. Left on auto, the project's genre picks one, or the Producer does."><option value="">auto</option></select><span>At once</span><input id="brPar" type="number" min="1" max="6" value="3" title="Agents working at the same time">
       <span>Run limit</span><input id="brMax" type="number" min="1" max="200" value="${(ST.crew && ST.crew.max_runs) || 40}" title="Agent runs before the crew stops and asks you"></div>
-    <div class="row"><button class="ghost" id="brCancel">Cancel</button><button class="key go" id="brGo">START THE SESSION</button></div>`);
+    <div class="row"><button class="ghost" id="brPick" title="Propose a model per seat from how each did in earlier sessions; nothing changes until you apply it">Pick a crew from history…</button><span class="spacer"></span><button class="ghost" id="brCancel">Cancel</button><button class="key go" id="brGo">START THE SESSION</button></div>`);
   $("#brText").focus();
+  const cur = (S.doc && S.doc.brief && S.doc.brief.style) || "";
+  api("style_list", {}, null).then((list) => {
+    $("#brStyle").innerHTML = `<option value="">auto</option>` + list.map((s) => `<option value="${esc(s.name)}" title="${esc(s.about)}"${s.name === cur ? " selected" : ""}>${esc(s.title)}</option>`).join("");
+  }).catch(() => { /* auto only */ });
   $("#brCancel").onclick = closeModal;
+  $("#brPick").onclick = openCrewPick;
   $("#brGo").onclick = async () => {
     const brief = $("#brText").value.trim(); if (!brief) { toast("Say what you want made"); return; }
+    const style = $("#brStyle").value;
     closeModal();
+    if (style !== cur && S.doc) await api("project_set", { brief: { style: style || "none" } }, null).catch((e) => toast(e.message));
     await call("crew_start", { brief, parallel: +$("#brPar").value || 3, max_runs: +$("#brMax").value || 40 }, "starting the crew…");
   };
 }
@@ -207,11 +215,11 @@ function seatState(s) {
 }
 function buildUnits() {
   const box = $("#units"); box.innerHTML = ""; ST.units = {};
-  for (const s of ST.board.seats) {
+  for (const s of ordered(ST.board.seats)) {
     const u = h(`<article class="unit" data-seat="${s.seat}">
       <div class="face">
         <div class="ear"><i class="screw" style="--r:${(s.seat.length * 37) % 180}deg"></i><i class="screw" style="--r:${(s.seat.length * 71) % 180}deg"></i></div>
-        <div class="ident"><div class="name">${esc(s.title)}</div><div class="room">${esc(s.room)}${s.optional ? " · optional" : ""}</div></div>
+        <div class="ident" title="Double-click to fold or unfold"><div class="name">${esc(s.title)}</div><div class="room">${esc(s.room)}${s.optional ? " · optional" : ""}</div><button class="mini mmFold" data-k="fold"></button></div>
         <div class="lampcol"><i class="lamp"></i><span class="state"></span></div>
         <div class="vfd screen" title="Open this seat"><div class="l1"><span class="occ"></span><span class="clk dimv"></span></div><div class="l2"></div><div class="l3"></div></div>
         <div class="meter" title="Activity: tool calls in the last half minute">${"<i></i>".repeat(12)}</div>
@@ -228,6 +236,8 @@ function buildUnits() {
     u.querySelectorAll(".tabsB button").forEach((b) => b.onclick = () => { ST.tab[s.seat] = b.dataset.tab; delete ST.benchSig[s.seat]; renderUnits(); });
     q(".benchBody").addEventListener("focusout", () => setTimeout(() => { if (!focusedIn(u)) renderBench(s.seat); }, 0));
     q(".purpose").textContent = s.purpose; q(".purpose").title = s.purpose;
+    q('[data-k="fold"]').onclick = () => foldSeat(s.seat); q(".ident").ondblclick = (e) => { if (!e.target.closest("button")) foldSeat(s.seat); };
+    u.querySelectorAll(".ear").forEach((el) => { el.title = "Drag to move this unit in the rack"; el.onpointerdown = (e) => dragUnit(e, u); });
     box.appendChild(u); ST.units[s.seat] = u;
   }
 }
@@ -244,6 +254,9 @@ function renderUnits() {
     q('[data-k="hold"]').classList.toggle("on", s.paused); q('[data-k="hold"]').disabled = !s.occupant || s.occupant.kind !== "agent";
     q('[data-k="open"]').classList.toggle("on", ST.open === s.seat);
     q(".bench").classList.toggle("hidden", ST.open !== s.seat);
+    const fold = L.fold.includes(s.seat), f = q('[data-k="fold"]');
+    u.classList.toggle("folded", fold); f.textContent = fold ? "+" : "–"; f.title = fold ? "Unfold this unit" : "Fold this unit to a 1U strip";
+    u.classList.toggle("hidden", L.hideEmpty && s.optional && !s.occupant && !s.open_tasks && !t && ST.open !== s.seat);
     if (ST.open === s.seat) renderBench(s.seat);
   }
   tickUnits();
@@ -261,6 +274,121 @@ function tickUnits() {
   }
 }
 setInterval(tickUnits, 1000);
+
+// ---- movable modules
+// The owner's rack layout (unit order, folds, the side column), kept in the library's ui_prefs as "studio_layout",
+// so every browser and the desktop app share it.
+const LAYOUT0 = { order: [], fold: [], hideEmpty: false, side: "right", sideW: null, bays: ["needs", "monitor"], bayH: null };
+let L = { ...LAYOUT0 }, layoutTimer = null;
+const clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+function setLayout(v) {
+  const o = v && typeof v === "object" ? v : {}, arr = (x) => Array.isArray(x) ? x.filter((s) => typeof s === "string") : [];
+  L = { ...LAYOUT0, order: arr(o.order), fold: arr(o.fold), hideEmpty: !!o.hideEmpty, side: o.side === "left" ? "left" : "right",
+    sideW: +o.sideW ? clampN(+o.sideW, 280, 640) : null, bays: o.bays && o.bays[0] === "monitor" ? ["monitor", "needs"] : ["needs", "monitor"], bayH: +o.bayH > 0 ? +o.bayH : null };
+}
+function saveLayout() {
+  clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(() => api("ui_prefs", { set: { studio_layout: L } }, null).catch(() => { /* kept for this page only */ }), 400);
+}
+function relayout() { applySide(); if (ST.board && Object.keys(ST.units).length) { const box = $("#units"); ordered(ST.board.seats).forEach((s) => ST.units[s.seat] && box.appendChild(ST.units[s.seat])); renderUnits(); } }
+function ordered(seats) {
+  const at = (s, i) => { const k = L.order.indexOf(s.seat); return k < 0 ? 1e4 + i : k; };
+  return seats.map((s, i) => [at(s, i), s]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+}
+function foldSeat(id) { L.fold = L.fold.includes(id) ? L.fold.filter((x) => x !== id) : [...L.fold, id]; saveLayout(); renderUnits(); }
+// A pointer drag that only starts past a few pixels (so clicks stay clicks); Escape cancels it.
+function grab(ev, el, on) {
+  if (ev.button !== 0) return;
+  ev.preventDefault();
+  const x0 = ev.clientX, y0 = ev.clientY; let live = false;
+  const end = (ok, e) => {
+    el.removeEventListener("pointermove", mv); el.removeEventListener("pointerup", up); el.removeEventListener("pointercancel", cx); removeEventListener("keydown", key, true);
+    try { el.releasePointerCapture(ev.pointerId); } catch { /* already released */ }
+    document.body.classList.remove("mmGrab");
+    if (live) (ok ? on.done : on.cancel)(e);
+  };
+  const mv = (e) => {
+    if (!live && Math.hypot(e.clientX - x0, e.clientY - y0) < 4) return;
+    if (!live) { live = true; document.body.classList.add("mmGrab"); if (on.start) on.start(e); }
+    on.move(e, e.clientX - x0, e.clientY - y0);
+  };
+  const up = (e) => end(true, e), cx = (e) => end(false, e);
+  const key = (e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); end(false, e); } };
+  try { el.setPointerCapture(ev.pointerId); } catch { /* old browser: moves still arrive while over it */ }
+  el.addEventListener("pointermove", mv); el.addEventListener("pointerup", up); el.addEventListener("pointercancel", cx); addEventListener("keydown", key, true);
+}
+function dragUnit(ev, u) {
+  const box = $("#units"), rack = $("#rack"); let line = null, before = undefined;
+  grab(ev, ev.currentTarget, {
+    start() { u.classList.add("mmLift"); line = h(`<div class="mmLine"></div>`); box.appendChild(line); },
+    move(e) {
+      const r = rack.getBoundingClientRect();
+      if (e.clientY < r.top + 30) rack.scrollTop -= 12; else if (e.clientY > r.bottom - 30) rack.scrollTop += 12;
+      const vis = [...box.querySelectorAll(":scope > .unit")].filter((x) => x !== u && !x.classList.contains("hidden"));
+      before = vis.find((x) => { const b = x.getBoundingClientRect(); return e.clientY < b.top + b.height / 2; }) || null;
+      const last = vis[vis.length - 1];
+      line.style.top = (before ? before.offsetTop - 2 : last ? last.offsetTop + last.offsetHeight : 0) + "px";
+    },
+    done() {
+      u.classList.remove("mmLift"); line.remove();
+      if (before !== undefined && before !== u.nextElementSibling) {
+        box.insertBefore(u, before);
+        L.order = [...box.querySelectorAll(":scope > .unit")].map((x) => x.dataset.seat); saveLayout();
+      }
+    },
+    cancel() { u.classList.remove("mmLift"); line.remove(); },
+  });
+}
+// The side column: its width, which bay is on top, and the split between them.
+const COLGRIP = h(`<div id="mmCol" class="mmGrip" title="Drag to size the side column, double-click to reset"></div>`);
+const SPLIT = h(`<div id="mmSplit" class="mmGrip" title="Drag to size the bays, double-click to reset"></div>`);
+function applySide() {
+  const st = $("#studio"), side = $("#side"), [a, b] = L.bays.map((id) => $("#" + id));
+  if (!COLGRIP.isConnected) side.before(COLGRIP);
+  st.classList.add("mm"); side.classList.add("mm"); st.classList.toggle("sideL", L.side === "left");
+  if (L.sideW) st.style.setProperty("--mm-side", L.sideW + "px"); else st.style.removeProperty("--mm-side");
+  b.before(a); a.after(SPLIT);
+  side.classList.toggle("mmFree", !!L.bayH || L.bays[0] !== "needs");
+  side.style.setProperty("--mm-rows", L.bayH ? `minmax(120px, ${L.bayH}px) 12px minmax(120px, 1fr)` : L.bays[0] === "needs" ? "minmax(120px, auto) 12px minmax(220px, 1fr)" : "minmax(120px, 1fr) 12px minmax(120px, 1fr)");
+}
+COLGRIP.onpointerdown = (ev) => {
+  const was = L.sideW, w0 = $("#side").getBoundingClientRect().width;
+  grab(ev, COLGRIP, { move(e, dx) { L.sideW = Math.round(clampN(w0 + (L.side === "left" ? dx : -dx), 280, 640)); applySide(); },
+    done: saveLayout, cancel() { L.sideW = was; applySide(); } });
+};
+COLGRIP.ondblclick = () => { L.sideW = null; applySide(); saveLayout(); };
+SPLIT.onpointerdown = (ev) => {
+  const was = L.bayH, h0 = $("#" + L.bays[0]).getBoundingClientRect().height, room = $("#side").getBoundingClientRect().height - 12 - 120;
+  grab(ev, SPLIT, { move(e, dx, dy) { L.bayH = Math.round(clampN(h0 + dy, 120, Math.max(120, room))); applySide(); },
+    done: saveLayout, cancel() { L.bayH = was; applySide(); } });
+};
+SPLIT.ondblclick = () => { L.bayH = null; applySide(); saveLayout(); };
+document.querySelectorAll("#side > .bay > h2").forEach((hd) => {
+  hd.title = "Drag to swap the bays";
+  hd.onpointerdown = (ev) => {
+    if (ev.target.closest("button, input, a, select")) return;
+    const bay = hd.parentElement, other = L.bays.map((id) => $("#" + id)).find((x) => x !== bay); let over = false;
+    const off = () => { bay.classList.remove("mmLift"); other.classList.remove("mmOver"); };
+    grab(ev, hd, {
+      start() { bay.classList.add("mmLift"); },
+      move(e) { const r = other.getBoundingClientRect(); over = e.clientY >= r.top && e.clientY <= r.bottom; other.classList.toggle("mmOver", over); },
+      done() { off(); if (over) { L.bays = [L.bays[1], L.bays[0]]; L.bayH = null; applySide(); saveLayout(); } },
+      cancel: off,
+    });
+  };
+});
+const LAYOUT_KEY = h(`<button id="mmLayout" class="mini" title="Rack layout">LAYOUT</button>`);
+$("#rack .rail:last-child").appendChild(LAYOUT_KEY);
+LAYOUT_KEY.onclick = (e) => {
+  const set = (fn) => () => { fn(); saveLayout(); relayout(); }, ids = ST.board ? ST.board.seats.map((s) => s.seat) : [];
+  menu(e, [["Rack layout", null],
+    [`${L.hideEmpty ? "✓ " : ""}Hide empty optional seats`, set(() => { L.hideEmpty = !L.hideEmpty; })],
+    ["Fold all", set(() => { L.fold = ids; })], ["Unfold all", set(() => { L.fold = []; })],
+    [L.side === "left" ? "Side column on the right" : "Side column on the left", set(() => { L.side = L.side === "left" ? "right" : "left"; })],
+    ["Reset layout", set(() => setLayout(null))]]);
+};
+applySide();
+api("ui_prefs", {}, null).then((p) => { setLayout(p && p.studio_layout); relayout(); }).catch(() => { /* defaults */ });
 
 // ---------------------------------------------------------------- a seat's workstation
 const TAG = { queued: "", working: "stale", submitted: "cy", needs_you: "bad", done: "ok", failed: "bad", cancelled: "" };
@@ -422,14 +550,42 @@ function workRoll(box, d, B, s) {
 }
 // Mix: the console. Every moved fader stands next to a dashed outline of where it was, and the controls work:
 // drag a fader or the pan strip (Shift: fine), double-click to reset, click the readout to type a level, M and S,
-// click an effect to bypass it, click a send to type its level, × removes an effect or a send, +FX / +SND / OUT
+// click an effect for its settings (Shift-click bypasses it), click a send to type its level, × removes an effect or a send, +FX / +SND / OUT
 // add an effect, add a send and route the output. An edit goes to what the bench shows (the take, or the session), one undo step each.
+// While LIVE is on, each strip's meter shows the engine's peak as it plays (consoleMeters, fed by app.js's /api/live stream).
+const PLUGIN_PARAMS = new Map();  // device -> promise of plugin_params: a plugin loads once per page, then its list is filtered here
+const pluginParams = (dev) => {
+  if (!PLUGIN_PARAMS.has(dev)) PLUGIN_PARAMS.set(dev, api("plugin_params", { device: dev, limit: 5000 }).catch((e) => { PLUGIN_PARAMS.delete(dev); throw e; }));
+  return PLUGIN_PARAMS.get(dev);
+};
+const knobPos = (k, v) => k.log ? Math.log(v / k.lo) / Math.log(k.hi / k.lo) : (v - k.lo) / (k.hi - k.lo);  // 0..1 along the slider
+const knobAt = (k, x) => { const v = k.log ? k.lo * Math.pow(k.hi / k.lo, x) : k.lo + x * (k.hi - k.lo); return +(Math.round(v / k.step) * k.step).toFixed(6); };
+const knobName = (k, v) => {
+  if (k.unit === "LP/HP") return v >= 0.5 ? "HP" : "LP";
+  if (k.unit === "Hz" && v >= 1000) return `${+(v / 1000).toFixed(2)} kHz`;
+  const dp = k.step >= 1 ? 0 : k.step >= 0.1 ? 1 : k.step >= 0.01 ? 2 : 4;
+  return `${(+v).toFixed(dp)}${k.unit ? (k.unit === ":1" ? ":1" : " " + k.unit) : ""}`;
+};
+const peakOf = (pk) => Array.isArray(pk) ? (pk.length ? Math.max(...pk) : 0) : +pk || 0;
+function consoleMeters() {
+  const st = S.eng.st || {}, live = liveMode(), on = live && !!st.on && !st.audition;  // a gear audition is not this mix
+  document.querySelectorAll(".benchBody .console").forEach((c) => {
+    c.classList.toggle("live", on);
+    c.querySelectorAll("[data-ch]").forEach((ch) => {
+      const b = ch.querySelector(".lvl b.live");
+      if (b) b.style.height = (on ? peakPct(peakOf(st.peaks && st.peaks[ch.dataset.ch])) : 0) + "%";
+    });
+    c.parentElement.querySelectorAll("[data-fxp-win]").forEach((w) => { w.hidden = !live; });
+  });
+}
+liveES.addEventListener("message", () => { if (document.body.dataset.room === "studio") consoleMeters(); });
 function workConsole(box, d, B, s) {
   const r = d.render, was = (t, k) => t.was && k in t.was, on = d.source.take || null;
   const buses = d.tracks.filter((t) => t.kind === "bus");
   const sendsTo = (t, b) => t.sends.some((x) => x.id ? x.id === b.id : x.to === b.name);  // a bench read before sends carried ids has names only
   const rmKey = (attr, k, what) => `<button class="rm" ${attr}="${k}" title="Remove ${what}" aria-label="Remove ${what}">×</button>`;
-  const fxSlots = (list, fresh) => list.map((f, k) => `<span class="slotRow"><button class="slot ${f.bypass ? "byp" : ""} ${fresh && fresh(f) ? "new" : ""}" data-fx="${k}" aria-pressed="${!f.bypass}" title="${esc(f.label)}${f.bypass ? " (bypassed)" : ""}${f.auto ? `. Automated: ${esc(f.auto.join(", "))}` : ""}. Click to ${f.bypass ? "switch it in" : "bypass it"}.">${esc(f.label)}${f.auto ? " ~" : ""}</button>${rmKey("data-fxrm", k, esc(f.label))}</span>`).join("");
+  const isOpen = (chId, k) => !!B.fxOpen && B.fxOpen.ch === chId && B.fxOpen.k === k;
+  const fxSlots = (list, fresh, chId) => list.map((f, k) => `<span class="slotRow"><button class="slot ${f.bypass ? "byp" : ""} ${fresh && fresh(f) ? "new" : ""} ${isOpen(chId, k) ? "open" : ""}" data-fx="${k}" aria-expanded="${isOpen(chId, k)}" title="${esc(f.label)}${f.bypass ? " (bypassed)" : ""}${f.auto ? `. Automated: ${esc(f.auto.join(", "))}` : ""}. Click for its settings, Shift-click to ${f.bypass ? "switch it in" : "bypass it"}.">${esc(f.label)}${f.auto ? " ~" : ""}</button>${rmKey("data-fxrm", k, esc(f.label))}</span>`).join("");
   // the keys that change a strip's shape: add an effect, add a send (tracks only), route the output
   const addKeys = (t) => {
     const free = t ? buses.filter((b) => b.id !== t.id && !sendsTo(t, b)) : [];
@@ -450,9 +606,9 @@ function workConsole(box, d, B, s) {
     const oldFx = new Set(((w.fx || t.fx).map((f) => f.label)));
     return `<div class="ch ${moved.length ? "moved" : ""}" style="--c:${trackColor(t, i)}" data-ch="${esc(t.id)}">
       <div class="nm" title="${esc(t.name)} · ${esc(t.instrument || t.kind)}">${esc(t.name)}</div>
-      <div class="slots">${fxSlots(t.fx, (f) => was(t, "fx") && !oldFx.has(f.label))}${t.sends.map((x, k) => `<span class="slotRow"><button class="slot send" data-send="${k}" title="Send to ${esc(x.to)} at ${dbName(x.db)} dB. Click to type a level.">→ ${esc(x.to)} ${dbName(x.db)}</button>${rmKey("data-sendrm", k, `the send to ${esc(x.to)}`)}</span>`).join("")}${t.output !== "master" ? `<button class="slot send" data-add="out" title="Output: ${esc(t.output)}. Click to route it.">out ${esc(t.output)}</button>` : ""}${t.automation.length ? `<span class="slot send">auto ${esc(t.automation.join(", "))}</span>` : ""}</div>
+      <div class="slots">${fxSlots(t.fx, (f) => was(t, "fx") && !oldFx.has(f.label), t.id)}${t.sends.map((x, k) => `<span class="slotRow"><button class="slot send" data-send="${k}" title="Send to ${esc(x.to)} at ${dbName(x.db)} dB. Click to type a level.">→ ${esc(x.to)} ${dbName(x.db)}</button>${rmKey("data-sendrm", k, `the send to ${esc(x.to)}`)}</span>`).join("")}${t.output !== "master" ? `<button class="slot send" data-add="out" title="Output: ${esc(t.output)}. Click to route it.">out ${esc(t.output)}</button>` : ""}${t.automation.length ? `<span class="slot send">auto ${esc(t.automation.join(", "))}</span>` : ""}</div>
       ${addKeys(t)}
-      <div class="well"><div class="lvl" title="${lv ? `last render: peak ${lv.peak_dbfs} dBFS, rms ${lv.rms_dbfs} dBFS` : "not rendered yet"}"><i style="height:${rms}%"></i>${pk != null ? `<u style="bottom:${pk}%"></u>` : ""}</div>
+      <div class="well"><div class="lvl" title="${lv ? `last render: peak ${lv.peak_dbfs} dBFS, rms ${lv.rms_dbfs} dBFS` : "not rendered yet"}. While LIVE plays: the live peak."><i style="height:${rms}%"></i>${pk != null ? `<u style="bottom:${pk}%"></u>` : ""}<b class="live"></b></div>
         ${fader(t.name, t.volume_db, was(t, "volume_db") ? w.volume_db : null, -60)}</div>
       <button class="db" title="Click to type a level in dB">${dbName(t.volume_db)}</button>
       <div class="pan" role="slider" tabindex="0" aria-label="${esc(t.name)} pan" aria-valuemin="-1" aria-valuemax="1" aria-valuenow="${t.pan}" title="Pan ${panName(t.pan)}. Drag to move it (Shift: fine), double-click to centre.">${was(t, "pan") ? `<i class="ghost" style="left:${(w.pan + 1) * 50}%"></i>` : ""}<i class="now" style="left:${(t.pan + 1) * 50}%"></i></div>
@@ -460,16 +616,45 @@ function workConsole(box, d, B, s) {
       <div class="was" title="${esc(moved.join(" · "))}">${esc(moved[0] || "")}${moved.length > 1 ? ` +${moved.length - 1}` : ""}</div></div>`;
   };
   const m = d.master, mw = m.was || {}, bands = r ? Object.entries(r.bands_pct) : [], top = Math.max(1, ...bands.map((b) => b[1]));
+  // The open effect's settings, under the console. It stays open through redraws while that effect is still in its place.
+  const chainOf = (chId) => chId === "master" ? m.fx : (d.tracks.find((x) => x.id === chId) || {}).fx;
+  const opened = (() => {
+    const o = B.fxOpen, f = o && (chainOf(o.ch) || [])[o.k];
+    if (!f || f.label !== o.label) { B.fxOpen = null; return null; }
+    return f;
+  })();
+  const fxPanel = () => {
+    if (!opened) return "";
+    const f = opened, o = B.fxOpen, ti = d.tracks.findIndex((x) => x.id === o.ch), who = ti < 0 ? "Master" : d.tracks[ti].name;
+    const auto = new Set(f.auto || []);
+    const body = f.type === "builtin" ? (f.settings || []).map((k) => {
+      const v = typeof k.value === "number" ? k.value : k.default;
+      return `<div class="fxk ${auto.has(k.name) ? "auto" : ""}" title="${esc(k.name)}${auto.has(k.name) ? ": automated, so the lane decides what plays and this value is used only where the lane has no points" : ""}. Drag (arrow keys nudge), double-click for the default (${esc(knobName(k, k.default))}).">
+        <span class="kn">${esc(k.name.replace(/_/g, " "))}${auto.has(k.name) ? " ~" : ""}</span>
+        <input type="range" min="0" max="1" step="0.001" value="${Math.max(0, Math.min(1, knobPos(k, v)))}" data-k="${esc(k.name)}" aria-label="${esc(k.name)}" aria-valuetext="${esc(knobName(k, v))}">
+        <button class="v" title="Click to type a value">${esc(knobName(k, v))}</button></div>`;
+    }).join("") || `<span class="meta">This effect has no settings.</span>`
+      : f.type === "vst3" ? `<input class="fxq" type="search" placeholder="Search the settings…" value="${esc(B.fxQuery || "")}" aria-label="Search the plugin's settings" hidden><div class="fxks"><span class="meta">Loading the plugin's settings…</span></div>`
+      : `<span class="meta">${esc(f.type)} effects have no settings here.</span>`;
+    return `<div class="fxPanel" data-fxp="${esc(f.device)}" style="--c:${ti < 0 ? "var(--amber)" : trackColor(d.tracks[ti], ti)}">
+      <div class="fxHead"><span class="nm">${esc(who)} · ${esc(f.label)}</span><span class="meta">${f.type === "vst3" ? "plugin" : "built-in"}${f.bypass ? " · bypassed" : ""}</span><span class="spacer"></span>
+        <button class="mini ${f.bypass ? "" : "on"}" data-fxp-byp aria-pressed="${!f.bypass}" title="${f.bypass ? "Bypassed: click to switch it in" : "In: click to bypass it"}">${f.bypass ? "BYPASSED" : "IN"}</button>
+        ${f.type === "vst3" ? `<button class="mini" data-fxp-win title="Open this plugin's window in the live engine" ${liveMode() ? "" : "hidden"}>WINDOW</button>` : ""}
+        <button class="mini" data-fxp-rm title="Remove this effect">REMOVE</button><button class="mini" data-fxp-x title="Close the settings">×</button></div>
+      <div class="fxBody">${body}</div></div>`;
+  };
   box.innerHTML = d.tracks.length ? `<div class="console">${d.tracks.map(strip).join("")}
     <div class="ch master ${m.was ? "moved" : ""}" data-ch="master"><div class="nm">Master</div>
-      <div class="slots">${fxSlots(m.fx) || `<span class="slot send">no master chain</span>`}</div>
+      <div class="slots">${fxSlots(m.fx, null, "master") || `<span class="slot send">no master chain</span>`}</div>
       ${addKeys(null)}
       <div class="well"><div class="bandsB" title="Band balance of the last render">${bands.map(([k, v]) => `<div title="${esc(k)}: ${v}%"><i style="height:${v / top * 100}%"></i><span>${esc(k.replace("_", " "))}</span></div>`).join("") || `<span class="meta">not rendered yet</span>`}</div>
+        <div class="lvl" title="The master's live peak while LIVE plays"><b class="live"></b></div>
         ${fader("Master", m.volume_db || 0, "volume_db" in mw ? mw.volume_db || 0 : null, -24)}</div>
       <div class="dbs"><span class="db" title="Loudness of the last render">${r && r.lufs != null ? `${r.lufs} LUFS` : "— LUFS"}</span><button class="db" title="Click to type the master level in dB">${dbName(m.volume_db || 0)}</button></div>
       <div class="ms"><span>target ${esc(m.target_lufs)} · ceil ${esc(m.ceiling_db)}</span></div>
       <div class="ms"><span>${r ? `peak ${esc(r.true_peak_dbtp)} dBTP` : ""}</span></div>
       <div class="was">${[r && r.stale ? "render is older than the mix" : "", r ? (r.warnings.length ? r.warnings.length + " warning" + (r.warnings.length === 1 ? "" : "s") : "no warnings") : "", "volume_db" in mw ? `level was ${dbName(mw.volume_db || 0)}` : "", Object.keys(mw).some((k) => k !== "volume_db") ? "master changed" : ""].filter(Boolean).join(" · ")}</div></div></div>
+    ${fxPanel()}
     ${r && r.warnings.length ? `<ul class="changes">${r.warnings.slice(0, 6).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}` : `<div class="empty">No tracks to mix yet.</div>`;
 
   // One edit, sent to what this bench shows. The bench is not redrawn under a control in use (B.hold counts the
@@ -504,11 +689,86 @@ function workConsole(box, d, B, s) {
     inp.onblur = () => end(true);
     el.replaceWith(inp); inp.select();
   };
+  // An effect leaving the chain: the open panel follows its effect, or closes with it.
+  const fxGone = (chId, k) => {
+    const o = B.fxOpen; if (!o || o.ch !== chId) return;
+    if (o.k === k) B.fxOpen = null; else if (o.k > k) o.k--;
+  };
+  // A setting edit: one fx_update per gesture. A slider's change lands when the hand lets go (or the arrow keys rest);
+  // edits to other settings of the same effect within that moment go in the same call.
+  const fxEdit = (params, flush = false) => {
+    const o = B.fxOpen; if (!o) return;
+    const key = `${o.ch}:${o.k}`;
+    if (B.fxPend && B.fxPend.key !== key) fxFire();  // another effect's edit still waiting: it goes first, on its own
+    if (!B.fxPend) { B.fxPend = { key, ch: o.ch, k: o.k, params: {} }; B.hold++; }
+    Object.assign(B.fxPend.params, params);
+    clearTimeout(B.fxTm); B.fxTm = setTimeout(fxFire, flush ? 0 : 350);
+  };
+  const fxFire = async () => {
+    const p = B.fxPend; if (!p) return;
+    clearTimeout(B.fxTm); B.fxPend = null; B.hold--;
+    const a = document.activeElement, k = a && a.closest && a.closest(".fxPanel") && a.dataset.k;
+    await send("fx_update", { track: p.ch, index: p.k, params: p.params }, d.source.rev);
+    if (k) B.focus = "fxp:" + k;
+    if (ST.open === s.seat) renderBench(s.seat, true);  // a slider still has the focus, which holds an ordinary redraw back
+  };
+  const P = box.querySelector(".fxPanel");
+  if (P && opened) {
+    const o = B.fxOpen, f = opened, pq = (sel) => P.querySelector(sel);
+    pq("[data-fxp-x]").onclick = () => { B.fxOpen = null; renderBench(s.seat, true); };
+    pq("[data-fxp-byp]").onclick = () => send("fx_update", { track: o.ch, index: o.k, bypass: !f.bypass }, d.source.rev);
+    pq("[data-fxp-rm]").onclick = () => { const k = o.k; fxGone(o.ch, k); send("fx_remove", { track: o.ch, index: k }, d.source.rev); };
+    const win = pq("[data-fxp-win]");
+    if (win) win.onclick = async () => {
+      status("opening the plugin window…", "busy");
+      try { const r = await api("live_window", { track: o.ch, slot: o.k, take: on }, on); status(""); if (r && r.opened === false) toast("The plugin window did not open."); }
+      catch (e) { status(""); toast(e.message); }
+    };
+    // a slider row: drag it, nudge it, double-click for the default, click the value to type one
+    const wireKnob = (row, name, toValue, fromValue, label, dflt, typed = (x) => x) => {
+      const rg = row.querySelector("input[type=range]"), vb = row.querySelector(".v");
+      rg.oninput = () => { const v = toValue(+rg.value); vb.textContent = label(v); rg.setAttribute("aria-valuetext", label(v)); };
+      rg.onchange = () => fxEdit({ [name]: toValue(+rg.value) });
+      if (dflt != null) rg.ondblclick = () => { rg.value = fromValue(dflt); rg.oninput(); fxEdit({ [name]: dflt }, true); };
+      vb.onclick = () => typeIn(vb, toValue(+rg.value), `${name} value`, (x) => { rg.value = fromValue(x); fxEdit({ [name]: typed(x) }, true); });
+    };
+    if (f.type === "builtin") {
+      for (const k of f.settings || []) {
+        const row = P.querySelector(`.fxk [data-k="${CSS.escape(k.name)}"]`); if (!row) continue;
+        wireKnob(row.closest(".fxk"), k.name, (x) => knobAt(k, x), (v) => Math.max(0, Math.min(1, knobPos(k, v))), (v) => knobName(k, v), k.default);
+      }
+    } else if (f.type === "vst3") {
+      const list = pq(".fxks"), q = pq(".fxq"), auto = new Set(f.auto || []), SHOW = 60;
+      const fill = (res) => {
+        const ql = (B.fxQuery || "").toLowerCase(), hit = res.params.filter((p) => !ql || p.name.toLowerCase().includes(ql));
+        q.hidden = res.params.length <= 12;  // a short list needs no search
+        list.innerHTML = hit.slice(0, SHOW).map((p) => {
+          const st = f.params[p.name], v = typeof st === "number" ? st : p.value;
+          const txt = typeof st === "string" ? st : typeof st === "number" ? st.toFixed(3) : p.text;
+          return `<div class="fxk ${auto.has(p.name) ? "auto" : ""}" title="${esc(p.name)}${auto.has(p.name) ? ": automated" : ""}${typeof st === "number" ? ". Set to " + st.toFixed(3) + " of its travel" : st != null ? "" : ". As the plugin has it"}">
+            <span class="kn">${esc(p.name)}${auto.has(p.name) ? " ~" : ""}</span><input type="range" min="0" max="1" step="0.001" value="${v}" data-k="${esc(p.name)}" aria-label="${esc(p.name)}">
+            <button class="v" title="Click to type a value from 0 to 1">${esc(txt)}</button></div>`;
+        }).join("") + `<div class="meta">${hit.length > SHOW ? `${SHOW} of ${hit.length} shown: search for the rest. ` : ""}${res.total} setting${res.total === 1 ? "" : "s"}${ql ? `, ${hit.length} match` : ""}.</div>`;
+        list.querySelectorAll(".fxk").forEach((row) => {
+          const name = row.querySelector("[data-k]").dataset.k, clip = (x) => Math.max(0, Math.min(1, +x));
+          wireKnob(row, name, (x) => +clip(x).toFixed(4), clip, (v) => v.toFixed(3), null, (x) => +clip(x).toFixed(4));
+        });
+        if (B.focus && B.focus.startsWith("fxp:")) focusKnob();
+      };
+      pluginParams(f.device).then((res) => { if (list.isConnected) fill(res); }, (e) => { if (list.isConnected) list.innerHTML = `<span class="meta">${esc(e.message)}</span>`; });
+      let qt = null;
+      q.oninput = () => { clearTimeout(qt); qt = setTimeout(() => { B.fxQuery = q.value; pluginParams(f.device).then((res) => { if (list.isConnected) fill(res); }, () => {}); }, 200); };
+    }
+  }
+  const focusKnob = () => {
+    const k = B.focus.slice(4), el = P && P.querySelector(`[data-k="${CSS.escape(k)}"]`);
+    if (el) { B.focus = null; el.focus({ preventScroll: true }); }
+  };
   box.querySelectorAll("[data-ch]").forEach((ch) => {
     const id = ch.dataset.ch, t = d.tracks.find((x) => x.id === id), q = (sel) => ch.querySelector(sel);
     const way = q(".slotway"), cap = q(".cap.now"), read = q("button.db"), lo = +way.dataset.lo, v0 = +cap.getAttribute("aria-valuenow");
     let v = v0;
-    const show = (x) => { v = +clamp(x, lo, 12).toFixed(1); cap.style.bottom = faderPos(v) + "%"; cap.setAttribute("aria-valuenow", v); read.textContent = dbName(v); };
+    const show = (x) => { v = +clamp(x, lo, 12).toFixed(1); cap.style.bottom = faderPos(v) + "%"; cap.setAttribute("aria-valuenow", v); read.textContent = dbName(v); liveMix(id, { db: v }, on || null); };
     const commit = () => { if (v !== v0) set(id, { volume_db: v }); }, nudge = nudger(`${id}:cap`, commit);
     way.onpointerdown = (ev) => {
       const y0 = ev.clientY, p0 = faderPos(v); cap.focus({ preventScroll: true });
@@ -521,13 +781,19 @@ function workConsole(box, d, B, s) {
       e.preventDefault(); show(e.key === "Home" ? 0 : v + (e.shiftKey && Math.abs(by) < 1 ? by / 5 : by)); nudge();
     };
     read.onclick = () => typeIn(read, v, "Level in dB", (x) => { show(x); commit(); });
-    ch.querySelectorAll("[data-fx]").forEach((b) => b.onclick = () => send("fx_update", { track: id, index: +b.dataset.fx, bypass: b.getAttribute("aria-pressed") === "true" }, d.source.rev));
+    ch.querySelectorAll("[data-fx]").forEach((b) => b.onclick = (e) => {
+      const k = +b.dataset.fx, f = chainOf(id)[k];
+      if (e.shiftKey) return send("fx_update", { track: id, index: k, bypass: !f.bypass }, d.source.rev);
+      B.fxOpen = isOpen(id, k) ? null : { ch: id, k, label: f.label }; B.fxQuery = "";
+      renderBench(s.seat, true);
+      const p = B.fxOpen && document.querySelector(".benchBody .fxPanel"); if (p) p.scrollIntoView({ block: "nearest" });
+    });
     // removing names the effect by its place in the chain, so like bypass it carries the revision the bench read
-    ch.querySelectorAll("[data-fxrm]").forEach((b) => b.onclick = () => send("fx_remove", { track: id, index: +b.dataset.fxrm }, d.source.rev));
+    ch.querySelectorAll("[data-fxrm]").forEach((b) => b.onclick = () => { fxGone(id, +b.dataset.fxrm); send("fx_remove", { track: id, index: +b.dataset.fxrm }, d.source.rev); });
     q('[data-add="fx"]').onclick = () => openDevicePicker(false, (dev) => send("fx_add", { track: id, device: dev }));
     if (!t) return;  // the master strip has a level and a chain; the rest is per track
     const pan = q(".pan"), mark = q(".pan .now"), lab = q(".ms span"), p0 = t.pan; let p = p0;
-    const showPan = (x) => { p = clamp(+x.toFixed(2), -1, 1); if (Math.abs(p) < 0.03) p = 0; mark.style.left = (p + 1) * 50 + "%"; pan.setAttribute("aria-valuenow", p); lab.textContent = panName(p); };
+    const showPan = (x) => { p = clamp(+x.toFixed(2), -1, 1); if (Math.abs(p) < 0.03) p = 0; mark.style.left = (p + 1) * 50 + "%"; pan.setAttribute("aria-valuenow", p); lab.textContent = panName(p); liveMix(id, { pan: p }, on || null); };
     const commitPan = () => { if (p !== p0) set(id, { pan: p }); }, nudgePan = nudger(`${id}:pan`, commitPan);
     pan.onpointerdown = (ev) => {
       const x0 = ev.clientX; pan.focus({ preventScroll: true });
@@ -556,7 +822,10 @@ function workConsole(box, d, B, s) {
     q(".ms .m").onclick = () => set(id, { mute: !t.mute });
     q(".ms .s").onclick = () => set(id, { solo: !t.solo });
   });
-  if (B.focus) {  // a control nudged from the keyboard keeps the focus through its own redraw
+  consoleMeters();  // the live peaks, without waiting for the next frame
+  if (B.focus && B.focus.startsWith("fxp:")) {  // a setting just sent keeps the focus (a plugin's list fills in later)
+    focusKnob(); if (!P || (opened && opened.type !== "vst3")) B.focus = null;
+  } else if (B.focus) {  // a control nudged from the keyboard keeps the focus through its own redraw
     const [id, what] = B.focus.split(":"), ch = [...box.querySelectorAll("[data-ch]")].find((x) => x.dataset.ch === id);
     B.focus = null; const el = ch && ch.querySelector(what === "pan" ? ".pan" : ".cap.now"); if (el) el.focus({ preventScroll: true });
   }
@@ -754,7 +1023,7 @@ function benchLog(body, a) {
 }
 function benchSetup(body, s) {
   body.innerHTML = `<div class="formgrid">
-      <span>In the seat</span><div class="row"><b>${s.occupant ? esc(s.label || s.occupant.kind) : "nobody"}</b><button class="key" data-do="pick">CHANGE…</button></div>
+      <span>In the seat</span><div class="row"><b>${s.occupant ? esc(s.label || s.occupant.kind) : "nobody"}</b>${s.occupant && s.occupant.audition_model ? `<span class="tag" title="Audition-only runs use this model; planning and the final listen use the one in the seat">auditions on ${esc(s.occupant.audition_model)}</span>` : ""}<button class="key" data-do="pick">CHANGE…</button></div>
       <span>Works</span><select data-f="mode"><option value="propose" ${s.mode === "propose" ? "selected" : ""}>in takes: nothing is heard until you or the Producer accept it</option><option value="direct" ${s.mode === "direct" ? "selected" : ""}>directly on the session: changes are live at once</option></select>
       <span>Standing notes</span><textarea data-f="notes" rows="3" placeholder="Instructions this seat always gets, e.g. “no brass”, “keep it under 8 voices”">${esc(s.notes || "")}</textarea>
       <span>Department</span><div class="muted">${s.owns.length ? esc(s.owns.join(", ")) : "changes nothing: listens and reports"} · suggested model tier: ${esc(s.tier)}</div>
@@ -793,6 +1062,7 @@ async function openSeatPicker(seat, opts = {}) {
           cur.kind === "agent" && cur.runner === r.id && cur.model === m.id ? "checked" : "")).join("")}`).join("")}
     </div>
     <div class="formgrid" style="margin-top:12px"><span>Effort</span><select id="spEffort"><option value="">default</option></select>
+      ${seat === "producer" && many.length === 1 ? `<span title="Runs whose only job is to audition handed-in takes. Planning, and the audition that may close the last open work (where the final listen happens), stay on the model chosen above.">Auditions on</span><select id="spAud"></select>` : ""}
       <span>Works</span><select id="spMode"><option value="propose">in takes (proposes; you or the Producer accept)</option><option value="direct">directly on the session</option></select></div>
     <div class="row"><button class="ghost" id="spScan" title="Look again for installed agent apps and their models">Rescan apps</button><span class="spacer"></span><button class="ghost" id="spCancel">Cancel</button><button class="key go" id="spOk">SEAT</button></div>`);
   $("#spMode").value = s.mode;
@@ -801,6 +1071,12 @@ async function openSeatPicker(seat, opts = {}) {
     const r = runners.find((x) => x.id === rid), m = r && r.models.find((x) => x.id === mid), list = (m && m.efforts) || (r && r.efforts) || [];
     $("#spEffort").innerHTML = `<option value="">default</option>` + list.map((e) => `<option ${cur.effort === e && cur.runner === rid ? "selected" : ""}>${esc(e)}</option>`).join("");
     $("#spEffort").disabled = !list.length;
+    const aud = $("#spAud");  // a cheaper model on the same app for audition-only runs (Producer seat)
+    if (aud) {
+      const others = r && mid ? r.models.filter((x) => x.id !== mid) : [], keep = cur.runner === rid ? cur.audition_model : null;
+      aud.innerHTML = `<option value="">the same model (off)</option>` + others.map((x) => `<option value="${esc(x.id)}" ${keep === x.id ? "selected" : ""}>${esc(x.label || x.id)}${x.cost ? ` · ${esc(x.cost)}` : ""}</option>`).join("");
+      aud.disabled = !others.length;
+    }
   };
   box.querySelectorAll('input[name="occ"]').forEach((i) => i.onchange = efforts); efforts();
   const sel = box.querySelector('input[name="occ"]:checked'); if (sel) sel.scrollIntoView({ block: "center" });
@@ -809,6 +1085,7 @@ async function openSeatPicker(seat, opts = {}) {
   $("#spOk").onclick = async () => {
     const v = (box.querySelector('input[name="occ"]:checked') || {}).value; if (!v) { toast("Choose who sits here"); return; }
     const [rid, mid] = v.split("|"), who = mid ? { kind: "agent", runner: rid, model: mid, effort: $("#spEffort").value || null } : { kind: v }, mode = $("#spMode").value;
+    if (mid && $("#spAud")) who.audition_model = $("#spAud").value;  // "" turns it off
     closeModal();
     // several seats: each keeps its own way of working (takes or direct); only who sits there changes
     for (const x of many) await call("seat_assign", { seat: x, ...who, ...(many.length === 1 ? { mode } : {}) });
@@ -1010,8 +1287,9 @@ async function openReports() {
     <p class="hint">What the crew has filed: reviews, reports and notes too long for talkback. The scorecard counts each agent's runs and takes from the activity log; ASK FOR A REVIEW files it and has the Producer write up how each seat did.</p>
     <div class="stack">${reps.map((r) => `<div class="item hot" data-report="${esc(r.id)}"><h4><span class="id">${esc(r.id)}</span>${esc(r.title)}<span class="tag ${r.kind === "review" ? "cy" : ""}">${esc(r.kind)}</span><span class="tag">${esc(title(r.by))}</span><span class="meta">${clock(r.updated)} · ${r.chars} characters</span></h4></div>`).join("") || `<div class="empty">Nothing filed yet.</div>`}</div>
     <h2 style="margin-top:16px">Crew scorecard · this session</h2><div id="scBox" class="meta">counting…</div>
-    <div class="row"><button class="key go" id="rvAsk" title="File the scorecard and give the Producer the task of writing the review">ASK FOR A REVIEW</button><button class="ghost" id="rpClose">Close</button></div>`);
+    <div class="row"><button class="key go" id="rvAsk" title="File the scorecard and give the Producer the task of writing the review">ASK FOR A REVIEW</button><button class="key" id="rvPick" title="Propose a model per seat from how each did in earlier sessions; nothing changes until you apply it">PICK A CREW…</button><button class="ghost" id="rpClose">Close</button></div>`);
   $("#rpClose").onclick = closeModal;
+  $("#rvPick").onclick = openCrewPick;
   box.querySelectorAll("[data-report]").forEach((el) => el.onclick = () => openReport(el.dataset.report));
   $("#rvAsk").onclick = async () => {
     try {
@@ -1022,9 +1300,33 @@ async function openReports() {
   try {
     const c = await api("crew_scorecard");
     if (!$("#scBox")) return;
-    $("#scBox").innerHTML = c.rows.length ? `<table class="sc"><tr><th>Seat</th><th>Agent</th><th title="Agent runs, and how many ended normally">Runs (ok)</th><th title="Runs that ended because the model had no usage left">Dry</th><th>Failed</th><th>Tools</th><th>Min</th><th title="Takes handed in / accepted / accepted without being sent back / sent back">Takes in · ok · 1st · back</th><th>Tasks</th><th title="Times this seat put something on Needs You">Asked</th></tr>
-      ${c.rows.map((r) => `<tr><td>${esc(title(r.seat))}</td><td class="mono">${esc(r.agent)}</td><td>${r.runs} (${r.ok})</td><td class="${r.out_of_usage ? "bad" : ""}">${r.out_of_usage}</td><td class="${r.failed ? "bad" : ""}">${r.failed}</td><td>${r.tool_calls}</td><td>${r.minutes}</td><td>${r.handed_in} · ${r.accepted} · ${r.first_time} · ${r.returned}</td><td>${r.tasks_done}</td><td>${r.asked_you}</td></tr>`).join("")}</table>` : "No agent has worked in this session yet.";
+    $("#scBox").innerHTML = c.rows.length ? `<table class="sc"><tr><th>Seat</th><th>Agent</th><th title="Agent runs, and how many ended normally">Runs (ok)</th><th title="Runs that ended because the model had no usage left">Dry</th><th>Failed</th><th>Tools</th><th>Min</th><th title="Takes handed in / accepted / accepted without being sent back / sent back">Takes in · ok · 1st · back</th><th>Tasks</th><th title="Times this seat put something on Needs You">Asked</th><th title="What one accepted take cost (one finished task, for a seat that hands in no takes), from the runs that reported usage: dollars where the app reports them, otherwise tokens. A dash: no run reported usage.">Per take</th></tr>
+      ${c.rows.map((r) => `<tr><td>${esc(title(r.seat))}</td><td class="mono">${esc(r.agent)}</td><td>${r.runs} (${r.ok})</td><td class="${r.out_of_usage ? "bad" : ""}">${r.out_of_usage}</td><td class="${r.failed ? "bad" : ""}">${r.failed}</td><td>${r.tool_calls}</td><td>${r.minutes}</td><td>${r.handed_in} · ${r.accepted} · ${r.first_time} · ${r.returned}</td><td>${r.tasks_done}</td><td>${r.asked_you}</td><td>${perTake(r)}</td></tr>`).join("")}</table>` : "No agent has worked in this session yet.";
   } catch (e) { if ($("#scBox")) $("#scBox").textContent = e.message; }
+}
+function perTake(r) {
+  return r.usd_per_take !== undefined ? `$${r.usd_per_take.toFixed(2)}` : r.tokens_per_take !== undefined ? `${Math.round(r.tokens_per_take / 1000)}k tok` : "–";
+}
+// A model per seat from the crew history (crew_pick). Nothing changes until APPLY, which seats each ticked pick.
+async function openCrewPick() {
+  let picks = [];
+  try { picks = (await api("crew_pick")).picks; } catch (e) { toast(e.message); return; }
+  const box = modal(`<h2>Pick a crew from history</h2>
+    <p class="hint">For each seat, the model that did best there in earlier sessions: most takes accepted and fewest sent back (finished tasks, for seats that hand in no takes). When two are level, the one that cost less per accepted take wins, where their runs reported usage; a model whose runs reported none is not marked down for it. Tick the seats you want and APPLY. Seats with no history are not listed.</p>
+    ${picks.length ? `<table class="sc crewpick"><tr><th></th><th>Seat</th><th>Proposed</th><th>Why</th></tr>
+      ${picks.map((p, i) => `<tr><td><input type="checkbox" data-i="${i}" ${p.same ? "disabled" : "checked"}></td><td>${esc(title(p.seat))}</td><td class="mono">${esc(p.agent)}${p.same ? ` <span class="tag ok">seated now</span>` : ""}</td><td>${esc(p.why)}</td></tr>`).join("")}</table>`
+      : `<div class="empty">No history yet. The crew history fills in when a session's crew stops or you ask for a review.</div>`}
+    <div class="row"><span class="spacer"></span><button class="ghost" id="cpCancel">Cancel</button><button class="key go" id="cpOk" ${picks.some((p) => !p.same) ? "" : "disabled"}>APPLY</button></div>`);
+  $("#cpCancel").onclick = closeModal;
+  $("#cpOk").onclick = async () => {
+    const chosen = [...box.querySelectorAll("input[data-i]:checked")].map((el) => picks[+el.dataset.i]);
+    if (!chosen.length) { toast("Tick the seats to change"); return; }
+    closeModal();
+    try {
+      for (const p of chosen) await call("seat_assign", { seat: p.seat, kind: "agent", runner: p.runner, model: p.model, effort: p.effort || null });
+      toast(`Seated ${chosen.map((p) => title(p.seat)).join(", ")} from history. Each change applies from that seat's next run.`, true);
+    } catch { /* call() showed the error */ }
+  };
 }
 $("#repBtn").onclick = openReports;
 document.addEventListener("click", (ev) => { const el = ev.target.closest && ev.target.closest("#tbLog [data-report], .benchBody [data-report]"); if (el) { ev.stopPropagation(); openReport(el.dataset.report); } }, true);

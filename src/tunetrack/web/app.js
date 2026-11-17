@@ -33,7 +33,8 @@ async function api(fn, args = {}, take = S.take, rev = null) {
 }
 // An edit that names a thing by its place in a list (the second effect, the third track) only means what the page
 // showed: it carries the revision the page read, and is refused and reloaded if the project has moved on.
-const BY_PLACE = new Set(["fx_update", "fx_remove", "track_move"]);
+// automation sends a whole lane (clear + points), so it too must not overwrite a lane the page has not seen.
+const BY_PLACE = new Set(["fx_update", "fx_remove", "track_move", "automation"]);
 async function act(fn, args, msg) {
   const rev = BY_PLACE.has(fn) && S.doc ? S.doc.rev ?? null : null;
   try { status(msg || "", "busy"); const r = await api(fn, args, S.take, rev); status(""); await loadState(); return r; }
@@ -315,11 +316,14 @@ function drawHeaders() {
     el.querySelector(".m").onclick = () => act("track_update", { track: t.id, mute: !t.mute });
     el.querySelector(".s").onclick = () => act("track_update", { track: t.id, solo: !t.solo });
     const vol = el.querySelector("input");
-    vol.oninput = () => { el.querySelector(".vol span").textContent = (+vol.value).toFixed(1); };
+    if (t.automation?.volume_db?.length) vol.title = AUTO_TIP;
+    vol.oninput = () => { el.querySelector(".vol span").textContent = (+vol.value).toFixed(1); liveMix(t.id, { db: +vol.value }); };
     vol.onchange = () => act("track_update", { track: t.id, volume_db: +vol.value });
-    vol.ondblclick = () => act("track_update", { track: t.id, volume_db: 0 });
+    vol.ondblclick = () => { liveMix(t.id, { db: 0 }); act("track_update", { track: t.id, volume_db: 0 }); };
     window.Tracking?.bindHeader(el, t);
+    window.Automation?.bindHeader(el, t);
     box.appendChild(el);
+    if (lay[i].a) box.appendChild(Automation.header(t, lay[i]));  // the names of its open automation lanes
   });
   window.Tracking?.meters();
 }
@@ -345,12 +349,14 @@ const lanesWrap = $("#lanesWrap"), lanes = $("#lanes"), ruler = $("#ruler");
 const laneH = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue("--lane"));
 // Where each track's lane sits ({y, h} per track; .total is the height of them all). A lane is laneH() tall and
 // grows for a track with more than 2 recording passes (about PASS_ROW px a row), so its pass rows stay readable.
+// a: the height of the track's open automation lanes, under its lane (automation.js); the next track starts below.
 const PASS_ROW = 18;
 function laneLayout() {
   const L = laneH(); let y = 0;
   const out = (S.doc ? S.doc.tracks : []).map((t) => {
-    const p = passRows(t), h = p && p.length > 2 ? Math.max(L, p.length * PASS_ROW + 6) : L, r = { y, h };
-    y += h; return r;
+    const p = passRows(t), h = p && p.length > 2 ? Math.max(L, p.length * PASS_ROW + 6) : L;
+    const r = { y, h, a: window.Automation?.height(t) || 0 };
+    y += h + r.a; return r;
   });
   out.total = y; return out;
 }
@@ -378,6 +384,7 @@ function drawArrangement() {
     const col = trackColor(t, i);
     for (const c of t.clips) drawClip(g, t, c, y, L, col);
   });
+  window.Automation?.draw(g, lay, W);
   if (S.drag && S.drag.kind === "clip" && S.drag.ghost) {
     const d = S.drag.ghost, r = lay[d.row] || { y: d.row * laneH(), h: laneH() }; g.strokeStyle = "#fff"; g.setLineDash([4, 3]);
     g.strokeRect(d.start * S.zoom + 0.5, r.y + 3.5, d.length * S.zoom - 1, r.h - 8); g.setLineDash([]);
@@ -609,7 +616,7 @@ lanesWrap.addEventListener("wheel", (e) => {
 function laneHit(e) {
   const r = lanes.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, lay = laneLayout();
   let row = y < 0 ? -1 : lay.length + Math.floor((y - lay.total) / laneH());  // under the last lane: past the tracks
-  for (let i = 0; i < lay.length; i++) if (y >= lay[i].y && y < lay[i].y + lay[i].h) { row = i; break; }
+  for (let i = 0; i < lay.length; i++) if (y >= lay[i].y && y < lay[i].y + lay[i].h + lay[i].a) { row = i; break; }
   const t = S.doc && S.doc.tracks[row], beat = x / S.zoom;
   let clip = null, edge = false;
   if (t) for (const c of t.clips) {
@@ -621,6 +628,7 @@ function laneHit(e) {
   return { row, t, beat, clip, edge, x, y };
 }
 lanes.addEventListener("mousedown", (e) => {
+  if (window.Automation?.mouse(e)) return;  // on an automation lane
   if (!S.doc || e.button !== 0) return;
   const h = laneHit(e);
   if (!h.t) return;
@@ -660,6 +668,7 @@ window.addEventListener("mouseup", async (e) => {
   else rollUp(e);
 });
 lanes.addEventListener("dblclick", async (e) => {
+  if (window.Automation?.mouse(e)) return;
   const h = laneHit(e);
   if (!h.t) return;
   if (h.clip) { focusRoll(); return; }
@@ -668,6 +677,7 @@ lanes.addEventListener("dblclick", async (e) => {
   S.sel.clip = r.clip; focusRoll(); renderAll();
 });
 lanes.addEventListener("contextmenu", (e) => {
+  if (window.Automation?.mouse(e)) return;
   e.preventDefault(); const h = laneHit(e);
   if (!h.clip) return;
   S.sel.clip = h.clip.id; renderAll();
@@ -723,7 +733,7 @@ ruler.addEventListener("contextmenu", (e) => {
 function setPlayhead(b) {
   S.playhead = Math.max(0, b); $("#pos").textContent = fmtPos(S.playhead);
   if (liveMode()) {
-    if (S.eng.st.playing) { S.eng.st.beat = S.playhead; S.eng.at = performance.now(); api("live_seek", { beat: S.playhead }).then(liveState, (e) => toast(e.message)); }
+    if (S.eng.st.playing && !S.eng.st.audition) { S.eng.st.beat = S.playhead; S.eng.at = performance.now(); api("live_seek", { beat: S.playhead }).then(liveState, (e) => toast(e.message)); }
   } else if (S.audio.playing) { stop(false); startPlayback(); }
   drawArrangement(); drawRoll();
 }
@@ -965,7 +975,8 @@ function showPlayhead(b) {
 // ---------------------------------------------------------------- transport (LIVE engine)
 // LIVE drives the server's real-time engine instead of playing a render; /api/live streams its state.
 const liveMode = () => S.eng.on && !!(S.eng.st && S.eng.st.available);
-const isPlaying = () => liveMode() ? !!S.eng.st.playing : S.audio.playing;
+// a gear audition (gear.js) plays on the same engine: it is not the Desk's playback
+const isPlaying = () => liveMode() ? !!S.eng.st.playing && !S.eng.st.audition : S.audio.playing;
 async function livePlay() {
   const L = S.eng; if (L.busy || !S.doc) return;
   window.Studio?.hush();
@@ -987,13 +998,13 @@ function liveState(st) {
   if (flip) renderAll();
   window.Tracking?.sync(); window.Picture?.guideSync();
   if (!liveMode()) return;
-  $("#playBtn").classList.toggle("on", !!st.playing || L.busy);
+  $("#playBtn").classList.toggle("on", (!!st.playing && !st.audition) || L.busy);
   audioTag(); liveMeters();
-  if (st.playing && !L.raf) L.raf = requestAnimationFrame(liveTick);
+  if (st.playing && !st.audition && !L.raf) L.raf = requestAnimationFrame(liveTick);
 }
 function liveTick() {
   const L = S.eng, st = L.st; L.raf = 0;
-  if (!liveMode() || !st.playing || !S.doc) return;
+  if (!liveMode() || !st.playing || st.audition || !S.doc) return;
   let b = secToBeat(beatToSec(st.beat || 0) + (performance.now() - L.at) / 1000);
   const lp = S.doc.loop;
   if (st.looping && lp && lp.end > lp.start && b >= lp.end) b = lp.start + ((b - lp.start) % (lp.end - lp.start));
@@ -1008,7 +1019,7 @@ function liveTag(el, what) {
     + (st.on ? "\nClick: choose the audio device to play through and record from." : "");
   const cut = (s) => s.length > 40 ? s.slice(0, 39) + "…" : s;
   const [text, cls] = st.loading || L.busy ? ["LIVE · LOADING", "tag stale"] : st.error ? ["LIVE · " + cut(st.error), "tag bad"]
-    : st.recording ? [what + "LIVE · REC", "tag bad"]
+    : st.recording ? [what + "LIVE · REC", "tag bad"] : st.audition ? ["LIVE · GEAR AUDITION", "tag cy"]
     : st.on ? [what + "LIVE · " + (d ? d.type : "?"), "tag cy"] : ["LIVE · READY", "tag"];
   el.textContent = text; el.className = cls + (st.on ? " pick" : "");  // pick: a click opens the device menu (tracking.js)
 }
@@ -1016,9 +1027,28 @@ const peakPct = (p) => p > 0 ? Math.max(0, Math.min(100, (20 * Math.log10(p) + 6
 function liveMeters() {
   const st = S.eng.st; if (!liveMode() || !st.on || S.tab !== "mixer") return;
   document.querySelectorAll("#mixer .strip[data-t] .meter > div").forEach((m) => {
-    const pk = st.peaks && st.peaks[m.closest(".strip").dataset.t];
+    const pk = !st.audition && st.peaks && st.peaks[m.closest(".strip").dataset.t];
     m.style.width = peakPct(pk && pk.length ? Math.max(...pk) : 0) + "%";
   });
+}
+// A fader, pan or send being dragged on LIVE is heard at once (live_mix: the engine moves it without a reload);
+// letting go saves it as before. One call in flight at a time, carrying the latest value of each control.
+const LM = { want: new Map(), busy: false };
+const AUTO_TIP = "This track's volume is automated: the fader moves the whole curve up or down.";
+function liveMix(id, what, take = S.take || null) {
+  const st = S.eng.st; if (!liveMode() || !st || !st.on) return;
+  LM.want.set(`${take}|${id}|${what.to || ("pan" in what ? "pan" : "db")}`, { take, ch: { id, ...what } });
+  if (!LM.busy) liveMixSend();
+}
+async function liveMixSend() {
+  LM.busy = true;
+  try {
+    while (LM.want.size) {
+      const take = LM.want.values().next().value.take, chs = [];
+      for (const [k, v] of LM.want) if (v.take === take) { chs.push(v.ch); LM.want.delete(k); }
+      await api("live_mix", { changes: chs, take }, null).catch(() => {});  // the drag still saves on release
+    }
+  } finally { LM.busy = false; }
 }
 const liveES = new EventSource("/api/live");
 liveES.onmessage = (m) => { try { liveState(JSON.parse(m.data)); } catch { /* bad frame */ } };
@@ -1030,10 +1060,17 @@ function renderPanel() {
   else if (S.tab === "report") renderReport();
   else if (S.tab === "brief") renderBrief();
 }
+// A VST3 insert (on a track or the master) has a Window key while the live engine can run: it opens the plugin's own window there.
 function stripFx(list, trackRef) {
+  const liveOk = !!(S.eng.st && S.eng.st.available);
   return `<div class="fxl">${(list || []).map((f, i) => `<div class="fx ${f.bypass ? "byp" : ""}" data-i="${i}">
-     <span title="${esc(fxLabel(f))} (click to bypass)">${esc(fxLabel(f))}</span><button class="small ghost danger" data-rm="${i}">×</button></div>`).join("")}
+     <span title="${esc(fxLabel(f))} (click to bypass)">${esc(fxLabel(f))}</span>${f.type === "vst3" && liveOk ? `<button class="small ghost" data-win="${i}" title="Open this plugin's window in the live engine">W</button>` : ""}<button class="small ghost danger" data-rm="${i}">×</button></div>`).join("")}
      <button class="small" data-addfx="${esc(trackRef)}">+ FX</button></div>`;
+}
+async function openLiveWindow(track, slot) {
+  status("opening the plugin window…", "busy");
+  try { const r = await api("live_window", { track, slot, take: S.take || null }); status(""); if (r && r.opened === false) toast("The plugin window did not open."); }
+  catch (e) { status(""); toast(e.message); }
 }
 const fxLabel = (f) => (f.patch ? `${f.name} · ${f.patch}` : f.name) +
   (f.sidechain ? ` ← ${(S.doc.tracks.find((x) => x.id === f.sidechain) || { name: "?" }).name}` : "");
@@ -1045,7 +1082,7 @@ function renderMixer() {
   box.innerHTML = S.doc.tracks.map((t, i) => {
     const m = lr[t.name], lvl = m ? Math.max(0, Math.min(100, (m.rms_dbfs + 40) * 2.5)) : 0;
     return `<div class="strip" data-t="${t.id}"><h4 style="color:${trackColor(t, i)}" title="${esc(t.name)}">${esc(t.name)}</h4>
-      <div class="muted" style="font-size:11px">${t.kind}${t.output !== "master" && t.output ? " → " + esc((S.doc.tracks.find((x) => x.id === t.output) || {}).name) : ""}</div>
+      <div class="muted" style="font-size:11px">${t.kind}${t.output !== "master" && t.output ? " → " + esc((S.doc.tracks.find((x) => x.id === t.output) || {}).name) : ""}${t.automation?.volume_db?.length ? ` · <span title="${AUTO_TIP}">auto</span>` : ""}</div>
       <div class="meter" title="last render RMS ${m ? m.rms_dbfs + " dBFS" : "-"}"><div style="width:${lvl}%"></div></div>
       ${stripFx(t.fx, t.id)}
       ${t.kind !== "bus" && buses.length ? `<div class="fxl">${(t.sends || []).map((s, k) => `<div class="fx"><span>→ ${esc((buses.find((b) => b.id === s.to) || {}).name)}</span>
@@ -1065,9 +1102,11 @@ function renderMixer() {
   box.querySelectorAll(".strip").forEach((el) => {
     const id = el.dataset.t, t = S.doc.tracks.find((x) => x.id === id);
     const fader = el.querySelector(".fader");
-    fader.oninput = () => el.querySelector(".db").textContent = (+fader.value).toFixed(1) + " dB";
+    if (t?.automation?.volume_db?.length) fader.title = AUTO_TIP;
+    fader.oninput = () => { el.querySelector(".db").textContent = (+fader.value).toFixed(1) + " dB"; liveMix(id, { db: +fader.value }); };
     fader.onchange = () => id === "master" ? act("project_set", { master_volume_db: +fader.value }) : act("track_update", { track: id, volume_db: +fader.value });
-    const pan = el.querySelector(".pan"); if (pan) pan.onchange = () => act("track_update", { track: id, pan: +pan.value });
+    const pan = el.querySelector(".pan");
+    if (pan) { pan.oninput = () => liveMix(id, { pan: +pan.value }); pan.onchange = () => act("track_update", { track: id, pan: +pan.value }); }
     const mu = el.querySelector("[data-mute]"); if (mu) mu.onclick = () => act("track_update", { track: id, mute: !t.mute });
     const so = el.querySelector("[data-solo]"); if (so) so.onclick = () => act("track_update", { track: id, solo: !t.solo });
     el.querySelectorAll(".fx[data-i] span").forEach((s) => s.onclick = () => {
@@ -1075,9 +1114,13 @@ function renderMixer() {
       act("fx_update", { track: id, index: i, bypass: !list[i].bypass });
     });
     el.querySelectorAll("[data-rm]").forEach((b) => b.onclick = () => act("fx_remove", { track: id, index: +b.dataset.rm }));
+    el.querySelectorAll(".fx [data-win]").forEach((b) => b.onclick = () => openLiveWindow(id, +b.dataset.win));
     el.querySelectorAll("[data-addfx]").forEach((b) => b.onclick = () => openDevicePicker(false, (dev) => act("fx_add", { track: id, device: dev })));
-    el.querySelectorAll("[data-send]").forEach((r) => r.onchange = () => {
-      const sends = t.sends.map((s, k) => ({ to: s.to, db: k === +r.dataset.send ? +r.value : s.db })); act("track_update", { track: id, sends });
+    el.querySelectorAll("[data-send]").forEach((r) => {
+      r.oninput = () => liveMix(id, { to: t.sends[+r.dataset.send].to, db: +r.value });
+      r.onchange = () => {
+        const sends = t.sends.map((s, k) => ({ to: s.to, db: k === +r.dataset.send ? +r.value : s.db })); act("track_update", { track: id, sends });
+      };
     });
     const as = el.querySelector("[data-addsend]");
     if (as) as.onclick = (e) => menu(e, buses.filter((b) => !(t.sends || []).some((s) => s.to === b.id)).map((b) =>
@@ -1145,12 +1188,7 @@ async function renderInspector() {
   box.querySelectorAll("[data-byp]").forEach((b) => b.onclick = () => act("fx_update", { track: t.id, index: +b.dataset.byp, bypass: !t.fx[+b.dataset.byp].bypass }));
   box.querySelectorAll("[data-del]").forEach((b) => b.onclick = () => act("fx_remove", { track: t.id, index: +b.dataset.del }));
   box.querySelectorAll("[data-vp]").forEach((b) => b.onclick = () => openVstParams(t, +b.dataset.vp));
-  box.querySelectorAll("[data-win]").forEach((b) => b.onclick = async () => {
-    const slot = b.dataset.win === "inst" ? "inst" : +b.dataset.win;
-    status("opening the plugin window…", "busy");
-    try { const r = await api("live_window", { track: t.id, slot, take: S.take || null }); status(""); if (r && r.opened === false) toast("The plugin window did not open."); }
-    catch (e) { status(""); toast(e.message); }
-  });
+  box.querySelectorAll("[data-win]").forEach((b) => b.onclick = () => openLiveWindow(t.id, b.dataset.win === "inst" ? "inst" : +b.dataset.win));
   box.querySelectorAll("[data-sc]").forEach((s) => s.onchange = () => act("fx_update", { track: t.id, index: +s.dataset.sc, sidechain: s.value }));
   const commit = (key, val) => {
     const [where, name] = key.split(":");
@@ -1189,12 +1227,16 @@ function renderReport() {
 
 function renderBrief() {
   const box = $("#brief"); if (!S.doc) { box.innerHTML = ""; return; }
-  const br = S.doc.brief || {}, keys = Array.from(new Set(["genre", "mood", "use", "game", "references", "notes", ...Object.keys(br)])).filter((k) => k !== "stills");
+  const br = S.doc.brief || {}, keys = Array.from(new Set(["genre", "style", "mood", "use", "game", "references", "notes", ...Object.keys(br)])).filter((k) => k !== "stills");
+  // style: a genre style sheet every seat's brief follows (auto: the genre's words pick one)
+  if (!S.styles) { S.styles = []; api("style_list", {}, null).then((l) => { S.styles = l; if (S.tab === "brief") renderBrief(); }).catch(() => {}); }
+  const styleSel = `<select data-b="style" title="A genre style sheet: each seat's brief gets that genre's craft. Auto: the genre's words pick one.">
+    <option value="none">auto${br.style ? "" : " (from the genre)"}</option>${S.styles.map((s) => `<option value="${esc(s.name)}" title="${esc(s.about)}"${s.name === br.style ? " selected" : ""}>${esc(s.title)}</option>`).join("")}</select>`;
   // screenshots kept as mood references (picture(file=<image>)): shown, not typed into
   const still = (s, i) => `/api/picture?kind=still&n=${i}${S.take ? "&take=" + encodeURIComponent(S.take) : ""}&v=${encodeURIComponent(s.file || "")}`;
   const stills = (br.stills || []).map((s, i) => `<figure><a href="${still(s, i)}" target="_blank" rel="noopener" title="Open the full image"><img loading="lazy" src="${still(s, i)}" alt="${esc(s.note || s.file || "")}"></a><figcaption>${esc(s.note || String(s.file || "").split("/").pop())}<button class="mini" data-still-rm="${i + 1}" title="Take this screenshot out of the brief">×</button></figcaption></figure>`).join("");
   box.innerHTML = `<div class="card"><h3>Brief (what the music is for)</h3><div class="grid2">
-    ${keys.map((k) => `<span>${esc(k)}</span>${k === "notes" ? `<textarea data-b="${k}" rows="3">${esc(br[k] || "")}</textarea>` : `<input data-b="${k}" value="${esc(typeof br[k] === "string" ? br[k] : JSON.stringify(br[k] ?? ""))}">`}`).join("")}
+    ${keys.map((k) => `<span>${esc(k)}</span>${k === "style" ? styleSel : k === "notes" ? `<textarea data-b="${k}" rows="3">${esc(br[k] || "")}</textarea>` : `<input data-b="${k}" value="${esc(typeof br[k] === "string" ? br[k] : JSON.stringify(br[k] ?? ""))}">`}`).join("")}
   </div></div>
   ${stills ? `<div class="card"><h3>Stills (screenshots for the mood)</h3><div class="stillsB">${stills}</div></div>` : ""}
   <div class="card"><h3>Delivery</h3><div class="grid2">

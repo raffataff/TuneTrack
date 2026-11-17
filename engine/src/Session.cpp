@@ -839,7 +839,7 @@ juce::var Session::apply (const juce::var& spec)
                 p->on = flag (t, "on", true);
                 p->volAuto = points (t["vol_auto"]);
                 p->panAuto = points (t["pan_auto"]);
-                static_cast<FaderNode*> (f->node->getProcessor())->params.set (p);
+                static_cast<FaderNode*> (f->node->getProcessor())->publish (p);
                 strip.fader = f->node;
                 link (strip.tap.get(), f->node.get());
             }
@@ -861,7 +861,7 @@ juce::var Session::apply (const juce::var& spec)
     {
         auto p = std::make_shared<FaderParams>();
         p->db = (float) num (m, "db", 0.0);
-        static_cast<FaderNode*> (f->node->getProcessor())->params.set (p);
+        static_cast<FaderNode*> (f->node->getProcessor())->publish (p);
         master.fader = f->node;
         link (master.tap.get(), f->node.get());
         link (f->node.get(), outNode.get());
@@ -1083,6 +1083,52 @@ juce::StringArray Session::giveUpProbes()
                                             : ": was still getting louder when the render started (still loading?)"));
         }
     return out;
+}
+
+// ---- mix: faders, pans and sends moved now, without a reload ---------------------------------------------------
+
+juce::String Session::mix (const juce::var& changes)
+{
+    juce::String problems;
+    if (auto* a = changes.getArray())
+        for (auto& c : *a)
+        {
+            const auto id = c["id"].toString();
+            if (c.hasProperty ("to"))
+            {
+                // a send's gain node (the routing pass: take (from, "send|" + to) in the session's graph)
+                auto it = slots.find (id + "|send|" + c["to"].toString() + "#0");
+                if (it == slots.end() || it->second.node == nullptr || ! c.hasProperty ("db"))
+                    problems << id << ": no send to " << c["to"].toString() << "; ";
+                else
+                    static_cast<GainNode*> (it->second.node->getProcessor())->gain = std::pow (10.0f, (float) (double) c["db"] / 20.0f);
+                continue;
+            }
+            auto it = strips.find (id);
+            if (it == strips.end() || it->second.fader == nullptr)
+            {
+                problems << id << ": no such strip; ";
+                continue;
+            }
+            auto* f = static_cast<FaderNode*> (it->second.fader->getProcessor());
+            const FaderParams* was = f->published.get();
+            auto p = std::make_shared<FaderParams> (was != nullptr ? *was : FaderParams {});
+            // an automated fader keeps its curve and plays it offset by the move, measured from the spec's level
+            if (c.hasProperty ("db"))
+            {
+                const float db = (float) (double) c["db"];
+                if (p->volAuto.empty()) p->db = db;
+                else p->trim = db - p->db;
+            }
+            if (c.hasProperty ("pan"))
+            {
+                const float pan = juce::jlimit (-1.0f, 1.0f, (float) (double) c["pan"]);
+                if (p->panAuto.empty()) p->pan = pan;
+                else p->panTrim = pan - p->pan;
+            }
+            f->publish (p);
+        }
+    return problems;
 }
 
 // ---- taps ----------------------------------------------------------------------------------------------------

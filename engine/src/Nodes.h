@@ -587,6 +587,9 @@ struct FaderParams
     float db = 0.0f, pan = 0.0f;
     bool on = true;
     AutoPts volAuto, panAuto;
+    // A fader being moved on an automated strip (the "mix" op): the curve plays this much higher (dB) or further
+    // over (pan). The spec never sets it: saving the move shifts the curve's points instead.
+    float trim = 0.0f, panTrim = 0.0f;
 };
 
 inline float autoValue (const AutoPts& pts, int64 t, size_t& hint)
@@ -610,6 +613,14 @@ public:
     explicit FaderNode (Transport& t) : TtProcessor ("fader", 2, 2), transport (t) {}
 
     Shared<FaderParams> params;
+    std::shared_ptr<const FaderParams> published;  // message thread: the last value given to params
+
+    void publish (std::shared_ptr<const FaderParams> p)
+    {
+        published = p;
+        params.set (std::move (p));
+    }
+
     std::atomic<int> latencyBefore { 0 };  // how late the audio arriving here is, so automation stays in time
     std::atomic<float> peak[2] { 0.0f, 0.0f };
     std::atomic<int> bad { 0 };  // samples that arrived as NaN / infinity and were silenced
@@ -675,13 +686,16 @@ public:
         }
         else
         {
-            if (! primed) { onGain = on; primed = true; }
+            if (! primed) { onGain = on; trimNow = p->trim; panTrimNow = p->panTrim; primed = true; }
             const float dOn = (on - onGain) / (float) n;
+            const float dTrim = (p->trim - trimNow) / (float) n, dPanTrim = (p->panTrim - panTrimNow) / (float) n;
             for (int i = 0; i < n; ++i)
             {
                 const int64 t = moving ? t0 + i : t0;
-                const float db = p->volAuto.empty() ? p->db : autoValue (p->volAuto, t, volHint);
-                const float pan = juce::jlimit (-1.0f, 1.0f, p->panAuto.empty() ? p->pan : autoValue (p->panAuto, t, panHint));
+                trimNow += dTrim;
+                panTrimNow += dPanTrim;
+                const float db = p->volAuto.empty() ? p->db : autoValue (p->volAuto, t, volHint) + trimNow;
+                const float pan = juce::jlimit (-1.0f, 1.0f, p->panAuto.empty() ? p->pan : autoValue (p->panAuto, t, panHint) + panTrimNow);
                 onGain += dOn;
                 const float g = std::pow (10.0f, db / 20.0f) * onGain;
                 gl = g * juce::jmin (1.0f, 1.0f - pan);
@@ -690,6 +704,8 @@ public:
                 r[i] *= gr;
             }
             onGain = on;
+            trimNow = p->trim;
+            panTrimNow = p->panTrim;
         }
 
         const auto ml = buf.getMagnitude (0, 0, n), mr = buf.getMagnitude (1, 0, n);
@@ -699,7 +715,7 @@ public:
 
 private:
     Transport& transport;
-    float gl = 1.0f, gr = 1.0f, onGain = 1.0f;
+    float gl = 1.0f, gr = 1.0f, onGain = 1.0f, trimNow = 0.0f, panTrimNow = 0.0f;
     bool primed = false;
     size_t volHint = 0, panHint = 0;
 };

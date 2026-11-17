@@ -345,7 +345,8 @@ def track_update(track: str, name: str | None = None, instrument: Any = None, in
     """Change a track. sends: [{"to": "Reverb", "db": -10}] (replaces sends). instrument_params merge into the
     instrument (built-in synth params like {"cutoff": 900, "release": 1.2}, or VST3 params by name). Effects are
     not set here: fx_add, then fx_update. input (audio tracks): the interface input it records, from 1
-    ([1, 2] = a stereo pair, 0 = none)."""
+    ([1, 2] = a stereo pair, 0 = none). On a track with volume_db or pan automation, a new value moves the whole
+    curve by the change."""
     return api.track_update(track, project, name, instrument, volume_db, pan, mute, solo, output, sends, role,
                             layer, None, instrument_params, input)
 
@@ -775,11 +776,12 @@ def seat_join(seat: str | None = None) -> dict:
 @tool
 def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, model: str | None = None,
                 effort: str | None = None, label: str | None = None, mode: str | None = None,
-                notes: str | None = None, session: str | None = None) -> dict:
+                notes: str | None = None, session: str | None = None, audition_model: str | None = None) -> dict:
     """Put someone in a seat or change how it works. kind: "agent" (with runner = claude | codex | kilo and a
     model), "human" (the user takes it), "external" (an outside app sits in), "none" (empty it).
-    mode: "propose" (work in takes) or "direct". notes: standing instructions for whoever sits there."""
-    return studio.seat_assign(seat, kind, runner, model, effort, label, mode, notes, session)
+    mode: "propose" (work in takes) or "direct". notes: standing instructions for whoever sits there.
+    audition_model: cheaper model for audition-only runs ("" = off)."""
+    return studio.seat_assign(seat, kind, runner, model, effort, label, mode, notes, session, audition_model)
 
 
 @tool

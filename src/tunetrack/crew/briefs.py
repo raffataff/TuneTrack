@@ -6,7 +6,7 @@ and the Mix engineer about loudness - not everyone about everything.
 """
 from __future__ import annotations
 
-from .. import roles
+from .. import roles, styles
 from .craft import craft
 
 PRODUCER = """You run the session. You do not write the notes or move the faders yourself: you decide what the
@@ -125,7 +125,9 @@ _DONE = ("When the task is finished, end your turn with its outcome in one or tw
          "result=why).)")
 
 
-def system(seat: str, in_take: bool, notes: str = "") -> str:
+def system(seat: str, in_take: bool, notes: str = "", style: str | None = None) -> str:
+    """What a launched agent is told for its whole run. style: the session's genre style sheet (styles.pick); its
+    section for this seat follows the craft text."""
     r = roles.get(seat)
     text = SEAT.format(title=r.title, room=r.room.lower(), purpose=r.purpose,
                        owns=", ".join(sorted(r.owns)) or "none: you listen and report, you change nothing",
@@ -145,6 +147,9 @@ def system(seat: str, in_take: bool, notes: str = "") -> str:
         text += f"\nStanding instructions for this seat from the user:\n{notes.strip()}\n"
     if craft(seat):
         text += "\n" + craft(seat) + "\n"
+    sheet = styles.section(style, seat)
+    if sheet:
+        text += "\n" + sheet + "\n"
     return text
 
 

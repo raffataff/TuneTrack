@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config, live, tracking
+from . import config, gear, live, tracking
 
 NO_DEVICE = False  # tests: run the engine without opening an audio output
 SETTLE_CAP_S = 15.0  # longest the first play waits for instruments to load their sounds
@@ -146,6 +146,7 @@ def state() -> dict:
                    recording=_rec is not None, click=_click, guide=_guide, armed={k: dict(v) for k, v in _armed.items()},
                    ins=tk.get("ins", []), inputs=_inputs, done=dict(_done),
                    punch=[_rec["punch"], _rec["until"]] if _rec else None,
+                   audition={"armed": bool(_armed)} if gear.is_audition(_view) else None,
                    device={k: dev.get(k) for k in ("type", "name", "sr", "block", "rate", "converted")}
                    if dev.get("name") else None)
         if dev.get("device_problem") and not out["error"]:
@@ -184,6 +185,27 @@ def loop(on: bool) -> dict:
         if _player is not None and _player.engine.alive():
             _player.engine.call("loop", on=bool(on))
     return state()
+
+
+def mix(path: Path, changes: list) -> dict:
+    """A fader, pan or send being dragged: the engine plays the new value at once, without a reload. Changes:
+    [{"id": track id or "master", "db"?, "pan"?}, {"id", "to": bus id, "db"}]. Only for the project the engine
+    plays, and never starts it; the control saves the edit when it is let go (track_update), and the reload that
+    follows sets the same values."""
+    p = _player
+    if p is None or not p.engine.alive() or _view is None or Path(path) != _view:
+        return {"live": False}
+    out = []
+    for c in changes or []:
+        ch = {"id": str(c["id"])}
+        if c.get("to"):
+            ch["to"] = str(c["to"])
+        for k, lo, hi in (("db", -120.0, 24.0), ("pan", -1.0, 1.0)):
+            if c.get(k) is not None:
+                ch[k] = min(hi, max(lo, float(c[k])))
+        out.append(ch)
+    res = p.engine.call("mix", timeout=5, set=out)
+    return {"live": True, **({"problems": res["problems"]} if res.get("problems") else {})}
 
 
 def window(path: Path, track: str, slot: str | int = "inst") -> dict:
@@ -356,7 +378,8 @@ def record(path: Path, beat: float = 0.0, count_in: float = 1.0, loop: bool | No
     anywhere but the song's start those bars play the music too, so they are the pre-roll. The transport plays;
     with the loop on, each time round is another pass. Stop with record_stop() (or stop()).
     until: a punch out, in beats: one pass from `beat` to there, then the transport stops by itself a moment later
-    and the state's `done` says what was recorded (the loop is off for it). While recording, what an armed audio
+    and the state's `done` says what was recorded. With the loop on and its region over the punch, each time round
+    is a pass instead, kept only between the punch points, until record_stop(). While recording, what an armed audio
     track already holds is silent between the punch points. quantise: move each recorded note's start to the
     nearest multiple of this many beats (0 = as played)."""
     global _rec
@@ -388,15 +411,20 @@ def record(path: Path, beat: float = 0.0, count_in: float = 1.0, loop: bool | No
             until = float(until)
             if until <= beat:
                 raise ValueError("The punch out must come after the punch in")
-            loop = False
             args["punch"].append(p.sample(until))
-            args["stop_at"] = p.sample(until) + int(POST_ROLL_S * sr)
+            # with the loop on over the punch, each time round is a pass kept between the punch points, until
+            # stopped; otherwise one pass and the transport stops by itself after the punch out
+            lp = proj.loop
+            looping = bool(loop) if loop is not None else bool(p.engine.tick.get("looping"))
+            if not (looping and lp and lp["start"] < until and lp["end"] > beat):
+                loop = False
+                args["stop_at"] = p.sample(until) + int(POST_ROLL_S * sr)
         if loop is not None:
             args["loop"] = bool(loop)
         p.engine.call("record", **args)
         keys = _tracking()
         _rec = {"path": Path(path), "punch": beat, "until": until, "quantise": max(0.0, float(quantise or 0)),
-                "files": files, "keys": {t.id: keys[t.id]["key"] for t in armed if t.kind == "midi"}}
+                "files": files, "stamp": stamp, "keys": {t.id: keys[t.id]["key"] for t in armed if t.kind == "midi"}}
         _done.pop("recorded", None)
         _done.pop("record_error", None)
         p.engine.tick = {**p.engine.tick, "playing": True}
@@ -416,7 +444,7 @@ def record_stop() -> dict:
         out = state()
         try:
             out["recorded"] = tracking.commit(rec["path"], res, rec["files"], rec["keys"], rec["punch"],
-                                              rec["until"], rec["quantise"])
+                                              rec["until"], rec["quantise"], rec.get("stamp"))
             if out["recorded"].get("dropped"):
                 _status["warnings"] = [*_status["warnings"], "the disk fell behind while recording: "
                                        f"{out['recorded']['dropped']} blocks are missing from the files"]

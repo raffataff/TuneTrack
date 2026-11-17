@@ -90,6 +90,14 @@ a Sidechain picker on each effect.
 uv run tunetrack ui
 ```
 
+### As an app
+
+`uv run tunetrack app` opens the editor in a window of its own (Edge or Chrome in app mode: no tabs or address
+bar, on its own profile in `library/app-profile`). The server it starts quits about 90 s after the last window
+closes, unless a crew is running or a recording is in progress; a server already started by `tunetrack ui` is
+reused and left running. `uv run tunetrack app --shortcut` only adds a "TuneTrack Studio" Start menu shortcut that
+launches it without a console window.
+
 The editor has two rooms, switched in the header.
 
 **Studio** is the crew: a rack with one unit per seat (who is in it, what it is working on, its activity), SEAT to
@@ -327,3 +335,11 @@ projects/<name>/project.json, audio/, renders/, cache/, history/  (gitignored: s
 - Audio clips follow the tempo when given the tempo they were played at (`bpm`) and transpose by `pitch`, through Rubber
   Band (pedalboard), offline and cached: formants are not kept, and the first stretch at a new ratio in a process spends
   a few seconds measuring Rubber Band's rate error so beats land within about 2 ms.
+
+## Licence
+
+TuneTrack is free software, licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+See [LICENSE](LICENSE). The engine uses the JUCE framework, which is also available under AGPLv3.
+
+Sample libraries and plugins under `library/` and `engine/third_party/` are not covered by this licence. Each keeps its own
+licence, and not every one allows redistribution. Check each licence before shipping a build.

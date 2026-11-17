@@ -24,6 +24,9 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("status", help="library + current project overview")
     u = sub.add_parser("ui", help="open the editor in the browser")
     u.add_argument("project", nargs="?")
+    d = sub.add_parser("app", help="open the editor in a window of its own; the server quits when it closes")
+    d.add_argument("project", nargs="?")
+    d.add_argument("--shortcut", action="store_true", help="only add a TuneTrack Studio shortcut to the Start menu")
     sub.add_parser("serve", help="run the editor server in the foreground")
     sub.add_parser("mcp", help="run the MCP server (stdio) for AI agents")
     r = sub.add_parser("render", help="render the current (or given) project")
@@ -98,6 +101,18 @@ def main(argv: list[str] | None = None) -> None:
         url = ensure_running()
         webbrowser.open(url)
         print(url)
+    elif a.cmd == "app":
+        from . import desktop
+        if a.shortcut:
+            print(f"shortcut: {desktop.make_shortcut()}")
+            return
+        from .server import ensure_running
+        if a.project:
+            api.project_open(a.project)
+        res = desktop.open_window(ensure_running(app_mode=True))
+        print(res["url"])
+        if res.get("note"):
+            print(res["note"])
     elif a.cmd == "serve":
         from .server import main as serve
         serve()

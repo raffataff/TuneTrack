@@ -12,10 +12,11 @@ that add tasks), `offline-engine` (PR #8, 880e673: stage 3.2, offline rendering 
 `engine-lanes` (PR #9: stage 3.3, strips on several cores, sample-rate conversion, the mono sidechain key, SFZ
 through sfizz; and stage 3.4, automation of any device setting, tempo-synced effects, time-stretch of audio clips),
 and `picture` (PR #10, 59bf871: stage 5's first cut, the picture, hit points, tempo fitting; and stage 4, tracking:
-recording, passes, comping, punch, keyboards, devices, nothing recorded through the interface yet). On branch
-`picture-2`, not committed: stage 5's second cut (the Spotting bench, stills, dragging in the picture lane, tempo
-changes on the ruler, the guide sound through the engine, drop-frame, a free start, hits merged one by one); all in
-section 6.
+recording, passes, comping, punch, keyboards, devices, nothing recorded through the interface yet), and
+`picture-2` (PR #11, be0a55d: stage 5's second cut). Uncommitted on `main` (2026-11-17): live faders, the Desk's
+automation lanes, console effect settings, crew audition model and pick-a-crew, MIDI group comp, and stage 6's
+first cut (gear browser, genre style sheets, desktop app, movable modules, voice talkback); all in section 6.
+Also uncommitted: an AGPL-3.0 `LICENSE` and a licence section in the README.
 
 ---
 
@@ -73,8 +74,9 @@ owner's say-so.
 Open decisions:
 
 - **Licence.** The engine links JUCE under its AGPLv3 option, so the engine's source has to be offered under
-  AGPLv3. The owner said (2026-11-14) the project will probably be open source; the repo has no LICENSE file
-  yet. Simplest: AGPL-3.0 for the whole repo. Their call; nothing was added.
+  AGPLv3. The owner said (2026-11-14) the project will probably be open source. An AGPL-3.0 `LICENSE` and a
+  licence section in the README are in the working tree as of 2026-11-17, uncommitted; confirm with the owner that
+  this is their choice before it is committed.
 - Decided 2026-11-14: bare JUCE, not Tracktion Engine (section 6, stage 3).
 
 ---
@@ -124,6 +126,9 @@ On `main`.
 | `src/tunetrack/cli.py` | `tunetrack crew detect / status / run [--brief] [--parallel] [--max-runs]`; `tunetrack takes clean [--project] [--days N] [--yes]`; `call` and `functions` now reach `studio` and `takes` too. |
 | `src/tunetrack/picture.py` | Stage 5: the video the music is written to (`set_video`, `probe`, `scan` for cuts and production sound, `sheet` for frames, `mux`), hit points (`edit_hits`, `hit_rows`), the tempo that catches them (`fit_constant`, `fit_map`, `best_start`), timecode (`timecode`, `parse_time`, `tc_args`: drop-frame too) and the guide (`guide_stem`). `web/picture.js` is its lane and video window on the Desk; `bench._picture` and `studio.js workPicture` the Spotting seat's CUES. |
 | `src/tunetrack/tracking.py` | Stage 4: what a recording becomes (`passes`, `place_audio`, `place_midi`, `commit`) and comping (`comp`, `split_clip`). `livehost.py` holds what is armed and runs `record` / `record_stop`; `web/tracking.js` is the Desk's side. |
+| `src/tunetrack/gear.py` | Stage 6: every instrument and effect (`catalog`), NEW marks (`<library>/gear.json`), the folder watcher (`start_watch`, `poll`, `gear_folders`, `gear_rescan`) and hearing gear (`audition`, live or rendered). `web/gear.js` is the GEAR drawer. |
+| `src/tunetrack/styles.py` | Stage 6: genre style sheets from `skill/styles/*.md`; `pick(brief)` and `section(style, seat)`, which `briefs.system` appends. |
+| `src/tunetrack/desktop.py` | Stage 6: `tunetrack app` (Edge or Chrome `--app` window, its own profile) and the Start menu shortcut; the server's idle quit is `server._should_quit`. |
 | `src/tunetrack/model.py`, `engine.py`, `api.py` | Small changes, below. |
 
 Changes to existing code that are easy to miss:
@@ -556,7 +561,9 @@ Not done, in order of what they would save:
 3. The second half of the schema trim (optional parameters as `anyOf [type, null]`): needs one live run per runner.
 4. Done 2026-11-16 (`crew-usage`): `listen()` for a bar range, and no `energy_arc` when sections are bars.
 5. Done 2026-11-16 (`crew-usage`): one Producer run for several takes handed in together (up to five).
-6. A cheaper model in the Producer seat for auditions only, the top one for planning and the final listen.
+6. Done 2026-11-17 (script runner only, not seen live): a cheaper model in the Producer seat for auditions only,
+   the top one for planning and the final listen. `seat_assign(audition_model=)` (same runner; the seat picker's
+   "Auditions on"); the floor starts audition tasks on it, except the audition that may close the last open work.
 7. A Mix agent that renders past its limit is told to stop and is not refused (seen live: five renders against
    three). Refusing the fourth render is the next step if it keeps happening on paid models.
 
@@ -635,11 +642,14 @@ Stages 1, 2, 2b (except the Claude runner) and 2c (first cut) are done. Each sta
   4. Done 2026-11-13 (`desk-takes`, first cut): per-seat benches (ROLL, CONSOLE, SOUNDS, PLAN, REPORT), read-only.
      Done 2026-11-13 late night: the Mix console's controls work (faders, pan, M/S, effect bypass, typed
      levels, send levels, master fader, undo). Done 2026-11-14: adding and removing effects and sends, and
-     routing. Left: effect settings on the console; editing on the other benches.
+     routing. Done 2026-11-17: effect settings on the console (click an insert: built-in knobs, a plugin's
+     settings with search, bypass, remove, Window on LIVE). Left: editing on the other benches.
      The Composer's chord-track editor is on the Desk (the chord lane, done 2026-11-13 night).
   5. Done 2026-11-13 (`desk-takes`): Needs You answers per situation, full-length talkback, reports, scorecard and
-     crew history. Left: the owner's view of how these read in use; a review that also weighs cost per accepted
-     take once paid runs report usage; picking a crew from history automatically.
+     crew history. Left: the owner's view of how these read in use. Done 2026-11-17 (script runner only): a
+     review that also weighs cost per accepted take once paid runs report usage (each run's usage is on its `end`
+     event; scorecard, history and the review table show it per seat and model); picking a crew from history
+     automatically (`scorecard.crew_pick`, PICK A CREW in REPORTS and the brief; applied only on the user's click).
   6. Later niceties: workflow/audio cable view, movable modules (stage 6), push-to-talk.
 
 ### Stage 3: live engine (first cut built 2026-11-14, on `main` since PR #5)
@@ -690,8 +700,15 @@ Left, in order:
    engine shuts down so the audio interface is free (Cubase and the engine cannot share the ASIO driver).
    Checked in the browser on a scratch synth session: start, seek, loop wrap, an edit while playing, meters, off.
    Not checked by a person yet; opening a take while live was checked on the server side only. Live plays the raw
-   mix (no loudness normalisation or limiter, the tag's tooltip says so). Left: live peaks on the console bench
-   (`studio.js`), Window buttons for master inserts, an output device picker.
+   mix (no loudness normalisation or limiter, the tag's tooltip says so). Done 2026-11-17: live peaks on the console
+   bench and Window buttons for master inserts (Desk mixer strips). The output device picker came with stage 4
+   (the LIVE tag's device menu, `livehost.device`).
+   Done 2026-11-17, after the owner's first LIVE try ("the faders didn't seem to do anything in real time"): a
+   fader, pan or send being dragged on the Desk or the console is heard at once (`live_mix` -> the engine's `mix`
+   op, no reload; the edit still saves on release and the reload sets the same values). An automated fader used
+   to ignore its level in both renderers (6 of 7 tracks in `test-track`); now `track_update` moves the whole
+   curve by the change (answer `moved`), and while dragging the engine plays the curve offset by the move
+   (`FaderParams.trim`). The Desk mixer marks such tracks "auto". `tests/test_live_mix.py`. Not yet heard by the owner.
 2. Done 2026-11-16 (`offline-engine`, PR #8): **offline rendering goes through the engine.** What agents
    measure (`render`, `listen`, `audition`, exports, stems, layers) is now rendered by the engine the owner hears.
    The Python mixer stays (faders, sends, buses, loudness, stems in numpy, as before); only the jobs moved:
@@ -788,7 +805,10 @@ Left, in order:
      changes. `tests/test_stretch.py`.
    - Found on the way: the engine's audio stem key (`live-in-*`) left out the tempo map, so a tempo change before a
      clip could replay a stale stem. Fixed (audio stems are assembled again once).
-   Not done: no UI to draw or edit automation (agents and the API only); VST3 automation is per block, not sample
+   Done 2026-11-17: the Desk draws and edits automation (`web/automation.js`): an "A" on a track header opens its
+   lanes under it (volume, pan, every device setting with a lane, "+ lane" for any instrument/effect setting);
+   click adds a point (snapped unless Alt), drag moves it (Shift fine, Escape cancels), right/double-click removes;
+   one `automation(clear=True, points)` call per gesture. Still: VST3 automation is per block, not sample
    accurate; nobody has heard any of it.
 
 ### Stage 4: tracking (built 2026-11-17 in two cuts, merged in PR #10)
@@ -883,9 +903,12 @@ Left:
 
 1. **The owner records something**: a guitar or voice pass round a loop, a punch, and a keyboard part. Expect the
    latency to need `record_offset_ms` (clap against the click, read the offset off the clip).
-2. Small things seen on the way: comping a group follows audio tracks only (MIDI clips carry no mark of their
-   recording); with a punch the loop is off (one pass); input monitoring through the engine needs the device at
-   the project's rate.
+2. Small things seen on the way: input monitoring through the engine needs the device at the project's rate.
+   Done 2026-11-17: every new pass carries `Clip.rec` ("<stamp>/<round>"), so a group comp follows MIDI tracks
+   too, matched by the time round (a round the keyboard sat out is skipped; old clips without it are left alone,
+   old audio still matched by file name). A punch with the loop on (and the loop region over it) is a pass each
+   time round, kept only between the punch points, until stopped (PUNCH with LOOP on in the Desk); without the
+   loop it is still one pass that stops by itself. No engine change.
 
 ### Stage 5: picture and game (first cut 2026-11-16, PR #10; second cut 2026-11-17, branch `picture-2`, not committed)
 
@@ -983,6 +1006,74 @@ Left:
 Desktop packaging, movable rack modules, voice talkback, watched plugin folders with auto-scan and a gear
 browser that auditions live, genre style sheets as per-seat skills.
 
+First cut built 2026-11-17, uncommitted on `main` on top of the other uncommitted work of that day (section 6,
+stages 2c and 3). 458 tests pass.
+
+- **Movable rack modules** (`studio.js` "movable modules" section; drag a unit by its ears, fold it to 1U, a LAYOUT
+  menu with hide-empty-optional, fold all, side left/right and reset; the bays swap and resize). It is saved
+  through `server.ui_prefs` (`<library>/ui.json`, key `studio_layout`), so every browser and the app share one
+  layout. Checked in the browser (pointer events): a unit dragged below another, a fold (101 to 28 px), both kept
+  across a reload, hide-empty, side left, the column grip (380 to 440 px, double-click back), the bay split, the
+  bays swapped by their headers, reset. Below 1180 px the grips hide and the column stacks, as designed.
+  **Voice talkback** (`web/voice.js`): hold TALK or the backquote key to talk; the
+  browser's own speech service (Microsoft's in Edge, Google's in Chrome) turns it into text. SEND ON RELEASE, and
+  READ ALOUD, which speaks new messages to you with a voice per seat. Its hook is one line in `studio.js` `ingest`.
+- **Gear** (`gear.py`, `web/gear.js`, `tests/test_gear.py`, 36 tests). `catalog()` lists every instrument and
+  effect, marking items new since `<library>/gear.json` (the first look counts everything installed as seen). The
+  watcher (`start_watch`, started by `server.main`, every 15 s) scans a new VST3 file once its files stop changing;
+  `gear_folders` adds or removes watched folders, `gear_rescan` scans on request (with `retry_failed`). `audition`
+  plays the gear on the live engine in a loop, in the open project's key and tempo, from
+  `<library>/audition-live/`, and arms an instrument for the keyboards; without LIVE it renders a short file. An
+  effect is heard on a bus that a built-in e-piano and drums play through. `livehost.state()` carries `audition`
+  while the engine plays it.
+  The **drawer** opens from the header's GEAR key (its lamp and count say how many are new; the lamp pulses while
+  scanning) over either room: a VFD search over name, maker and tags, ALL / INSTRUMENTS / EFFECTS and a source
+  filter; sections (Just arrived with MARK SEEN, saved sounds and SFZ grouped by maker or library, folded when
+  long, plug-ins, built-ins); the chosen item on a face plate with what it is, its notes and tags, a phrase menu,
+  AUDITION (· LIVE when LIVE is on; Enter, Space or a double-click; STOP), and USE: an instrument goes on any
+  instrument track or a new track, an effect on any track, the master or a new bus, in whatever the Desk shows.
+  FOLDERS lists the watched VST3 and sample folders (typed paths), RESCAN NOW, failed scans with RETRY ALL, what
+  was found lately. A VFD strip along the bottom says what the watcher is doing. Closing the drawer stops a live
+  audition and points the engine back at the Desk's project (`gear_audition_stop(take)`). The Desk ignores an
+  audition: its playhead, play key, meters, the console's meters and the R buttons stay out of it, Space plays
+  the Desk (taking the engine back), and the tag reads `LIVE · GEAR AUDITION`.
+  Fixed on the way: `gear_seen(ids)` before the first look marked everything else new; `gear_folders(remove=)`
+  did not expand `~`; the watcher rewrote `gear.json` every 15 s.
+- **Genre style sheets** (`styles.py`, `skill/styles/*.md`, `tests/test_styles.py`). Ten sheets: chiptune, lofi,
+  orchestral, epic (hybrid battle), synthwave, cozy, ambient, horror, electronic, playful. Each has a front matter
+  (title, the genre words that pick it, one line about it) and a few lines per seat. `briefs.system(style=)` adds
+  the seat's section after its craft text; the floor reads the session's style at each launch (`Floor._style`).
+  The style is `brief.style` when set (`project_set(brief={"style": ...})`, checked against the sheets; "none"
+  clears it), else the sheet whose genre words appear most in `brief.genre` ("epic orchestral battle" is epic).
+  The Producer's craft lists the names and says to set it while planning; the BRIEF dialog and the Desk's Brief
+  panel have a STYLE menu (`styles.style_list`). A test keeps every section to the tools its seat has. The Mix
+  craft's stale "EQ cannot be automated" now points at `automation(device=)`.
+- **Desktop app** (`desktop.py`, `tests/test_desktop.py`; built by an Opus subagent, reviewed). `tunetrack app
+  [project]` starts the server in app mode and opens Edge (else Chrome) with `--app` on its own profile in
+  `<library>/app-profile/`; without either it opens a normal tab and says so. In app mode the server counts pages
+  by their `/api/events` stream and quits 90 s after the last one closed (120 s if none ever came), never while a
+  hosted crew is running or the engine is recording. `tunetrack app --shortcut` writes a Start menu shortcut
+  (pythonw, so no console window). An already-running `tunetrack ui` server is reused and never quits by itself.
+
+Checked in the browser on a scratch library (`output/_preview/gear_check.py`, port 7395: the owner's plugin
+registry and patches copied in, their SFZ folder listed in place, an engine with no device, one SFZ arriving after
+the first look, one failed plugin): 1,023 items in their sections, the NEW count on the key and MARK SEEN, search
+and filters, an offline audition that plays and stops, a live audition looping on the engine with the Desk's
+transport, meters and R buttons left alone, the Desk's play taking the engine back, closing the drawer stopping
+the audition, USE making a new track and putting an effect on the selected track, folders added, refused and
+removed, RESCAN, and both STYLE menus. No console errors.
+
+Not checked: anything heard (the engine had no device), the drawer at phone width, a real plugin arriving while
+the watcher runs, the shortcut and the app window themselves (not run from Claude's tools: AppData writes are
+virtualised there), voice talkback (needs a microphone and the browser's speech service).
+
+Left:
+
+1. **The owner's turn**: run `tunetrack app --shortcut` from their own terminal, open the studio from the Start
+   menu, try the gear drawer with LIVE through the SSL 2, drag the rack around, hold TALK.
+2. Desktop packaging beyond the app window (an installer, a tray icon) only if the owner wants it.
+3. The game side of stage 5 (an agent reading or playing the game) is still open.
+
 ---
 
 ## 7. Only the owner can do these
@@ -991,10 +1082,11 @@ browser that auditions live, genre style sheets as per-seat skills.
 |---|---|
 | Claude as a crew agent | Done: the CLI is logged in (`crew detect` says `auth: ok`, and one run worked, 2026-11-13). |
 | Stage 3 | Done 2026-11-14: Build Tools, CMake and JUCE 9 are installed. Done 2026-11-16: Smart App Control switched off (it blocked a fresh engine build, and with it LIVE). Left: choose the repo's licence (below). |
-| Orchestral palette | `BBC Symphony Orchestra (64 Bit).vst3` is in the VST3 folder as of 2026-11-16 (not scanned or tried yet); Spitfire LABS is not. Then `tunetrack scan` and capture patches. |
+| Orchestral palette | `BBC Symphony Orchestra (64 Bit).vst3` is in the VST3 folder as of 2026-11-16 (not scanned or tried yet), but no BBC SO samples were found on C:, D: or F: (2026-11-17): download them in the Spitfire Audio app (installed). LABS is no longer offered by Spitfire (the owner, 2026-11-17). Free orchestra already here: VSCO 2 CE (SFZ, `library/instruments/INSTALLED.md`). Then `tunetrack scan` and capture patches. |
 | SFZ in the engine | Done 2026-11-16: sfizz's source is in `engine/third_party/sfizz/`. Left: hear an SFZ track on LIVE (real-time streaming is not checked). |
 | Stage 5 | Done: `ffmpeg` 9.0.2 is on PATH. Left: try the picture lane with a real video, and GUIDE on LIVE through the SSL 2 (in time with the picture? loud enough against the music?). |
 | Stage 4 | Record through the SSL 2: LIVE on, choose a track's input, R, ●. Say how far off the beat a clap against the click lands (that sets `record_offset_ms`), and whether monitoring through the engine is usable or the interface's direct monitoring is better. Close Cubase first (one ASIO client at a time). |
+| Stage 6 | Run `uv run python -m tunetrack.cli app --shortcut` in their own terminal (from Claude's tools the Start menu write is virtualised), then open TuneTrack Studio from the Start menu. Try GEAR with LIVE on through the SSL 2. |
 | New tools in their own apps | Restart Claude so the MCP server reloads (it runs from this checkout). |
 
 ---

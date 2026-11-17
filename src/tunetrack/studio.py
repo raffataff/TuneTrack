@@ -217,13 +217,16 @@ def occupant_label(occ: dict | None) -> str | None:
 
 def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, model: str | None = None,
                 effort: str | None = None, label: str | None = None, mode: str | None = None,
-                notes: str | None = None, session: str | None = None) -> dict:
+                notes: str | None = None, session: str | None = None, audition_model: str | None = None) -> dict:
     """Put someone in a seat, or change how the seat works.
 
     kind: "agent" (the studio launches runner/model for it), "human" (you take it), "external" (an outside app such
     as Claude Desktop sits in), "none" (leave it empty). Omit kind to keep the occupant and change only mode/notes.
     mode: "propose" (work in a take, submit for acceptance) or "direct" (edit the session itself).
-    notes: standing instructions for whoever sits here ("no brass", "keep it under 8 voices")."""
+    notes: standing instructions for whoever sits here ("no brass", "keep it under 8 voices").
+    audition_model: a cheaper model on the same runner for the runs whose only job is to audition handed-in takes
+    (the floor's audition tasks); planning runs and the final listen stay on model. "" turns it off. When the agent
+    is replaced on the same runner and audition_model is not given, the old one is kept."""
     sid = roles.get(seat).id
     if not _lead(me()):
         raise PermissionError("Only the Producer or the user assigns seats")
@@ -236,16 +239,24 @@ def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, m
             elif k == "agent":
                 if not runner:
                     raise ValueError("An agent needs a runner (claude, codex, kilo) and usually a model")
+                was = s["occupant"] or {}
                 s["occupant"] = {"kind": "agent", "runner": runner, "model": model, "effort": effort, "label": label}
+                keep = was.get("audition_model") if was.get("runner") == runner else None
+                if audition_model or (audition_model is None and keep):
+                    s["occupant"]["audition_model"] = audition_model or keep
             elif k in ("human", "external"):
                 s["occupant"] = {"kind": k, "label": label}
             else:
                 raise ValueError("kind must be agent, human, external or none")
-        elif any(v is not None for v in (runner, model, effort, label)):
+        elif any(v is not None for v in (runner, model, effort, label, audition_model)):
             if not s["occupant"]:
                 raise ValueError(f"{sid} is empty: pass kind=")
             s["occupant"].update({k: v for k, v in (("runner", runner), ("model", model), ("effort", effort),
                                                     ("label", label)) if v is not None})
+            if audition_model is not None:
+                if s["occupant"]["kind"] != "agent":
+                    raise ValueError("audition_model is for a seat with an agent in it")
+                s["occupant"]["audition_model"] = audition_model or None
         if mode is not None:
             if mode not in MODES:
                 raise ValueError(f"mode must be one of {MODES}")
@@ -254,6 +265,8 @@ def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, m
             s["notes"] = notes
         b.emit("seat", seat=sid, occupant=occupant_label(s["occupant"]) or "empty", mode=s["mode"])
         out = {"seat": sid, "occupant": occupant_label(s["occupant"]), "mode": s["mode"]}
+        if (s["occupant"] or {}).get("audition_model"):
+            out["auditions"] = s["occupant"]["audition_model"]
         waiting = [t["id"] for t in b.st["tasks"] if t["seat"] == sid and t["state"] in OPEN]
         if waiting and not s["occupant"]:
             out["warning"] = f"{sid} is empty but has open tasks: {', '.join(waiting)}"
@@ -722,6 +735,8 @@ def studio_status(session: str | None = None, lean: bool = False) -> dict:
         if not s["occupant"] and not mine and r.optional:
             continue
         d = {"seat": sid, "title": r.title, "occupant": occupant_label(s["occupant"]), "mode": s["mode"]}
+        if (s["occupant"] or {}).get("audition_model"):
+            d["auditions"] = s["occupant"]["audition_model"]
         if s["presence"]:
             d["presence"] = s["presence"]["state"]
         if s.get("paused"):
