@@ -9,7 +9,7 @@
   /* names the desk (app.js markup) uses */
   --bg: #101011; --bg2: #171718; --bg3: #1f1f21; --fg: var(--ink);
   --accent: var(--amber); --accent2: var(--green); --warn: var(--amber); --bad: var(--red);
-  --hdr: 210px; --lane: 64px; --rulerH: 30px; --chordH: 26px;
+  --hdr: 210px; --lane: 64px; --rulerH: 30px; --chordH: 26px; --picH: 0px;
   --legend: "Bahnschrift", "DIN Alternate", "Roboto Condensed", "Segoe UI", system-ui, sans-serif;
   --mono: "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace;
   font: 13px/1.4 "Segoe UI", system-ui, sans-serif; color-scheme: dark;
@@ -370,7 +370,7 @@ table.sc td.bad { color: var(--red); }
 }
 
 /* ---------------------------------------------------------------- desk room (arrangement, piano roll, mixer) */
-#desk { display: grid; grid-template-rows: auto 1fr minmax(180px, 38vh); min-height: 0; background: var(--bg); }
+#desk { display: grid; grid-template-rows: auto 1fr minmax(180px, 38vh) auto; min-height: 0; background: var(--bg); }
 /* what the desk is editing: the session (green lamp) or a take (cyan lamp, cyan edge round the whole desk) */
 #takeBar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 12px; border-bottom: 1px solid #000;
   background: repeating-linear-gradient(90deg, rgba(255,255,255,.013) 0 1px, transparent 1px 3px), linear-gradient(#1b1b1d, #131314);
@@ -383,8 +383,9 @@ body.intake #takeSel { color: var(--cyan); border-color: #1d4259; }
 body.intake #desk { box-shadow: inset 2px 0 0 var(--cyan), inset -2px 0 0 var(--cyan); }
 body.intake #projName { color: var(--cyan); }
 #arr { display: grid; grid-template-columns: var(--hdr) 1fr; min-height: 0; border-bottom: 1px solid #000; }
-#headers { display: grid; grid-template-rows: var(--rulerH) var(--chordH) 1fr; min-height: 0; border-right: 1px solid #000; background: var(--bg2); }
-#rulerCorner { display: flex; gap: 4px; align-items: center; padding: 0 6px; border-bottom: 1px solid var(--line); }
+#headers { display: grid; grid-template-rows: var(--rulerH) var(--chordH) var(--picH) 1fr; min-height: 0; border-right: 1px solid #000; background: var(--bg2); }
+#rulerCorner { display: flex; gap: 3px; align-items: center; padding: 0 6px; border-bottom: 1px solid var(--line); }
+#rulerCorner button { padding: 2px 5px; white-space: nowrap; }
 /* the chord track: one lane under the ruler, written like a readout because it is what the parts are read against */
 #chordCorner { display: flex; gap: 6px; align-items: center; justify-content: space-between; padding: 0 6px 0 10px; border-bottom: 1px solid var(--line); }
 #chordCorner .legend { color: var(--vfd); }
@@ -393,7 +394,27 @@ body.intake #projName { color: var(--cyan); }
 #chordEdit { position: absolute; top: 1px; height: calc(var(--chordH) - 3px); min-width: 84px; padding: 0 5px; font: 12px var(--mono);
   color: var(--vfd); background: var(--vfd-bg); border: 1px solid var(--vfd); border-radius: 2px; }
 #chordEdit.bad { border-color: var(--red); color: var(--red); }
-#trackHeaders { overflow: hidden; }
+/* the picture: a film strip under the chord track, and the video in a window of its own */
+body.haspic { --picH: 54px; }
+#picCorner { display: flex; gap: 6px; align-items: center; justify-content: space-between; padding: 0 6px 0 10px; border-bottom: 1px solid var(--line); overflow: hidden; }
+#picCorner .legend { color: var(--amber); }
+#picLane { height: var(--picH); overflow: hidden; }
+body.haspic #picLane { border-bottom: 1px solid var(--line); }
+#pic { display: block; cursor: crosshair; }
+#picWin { position: fixed; right: 18px; bottom: 300px; width: 420px; min-width: 220px; max-width: 90vw; z-index: 30; resize: horizontal; overflow: hidden;
+  background: #050505; border: 1px solid #000; border-radius: 3px; box-shadow: 0 0 0 1px var(--line2), 0 14px 40px rgba(0,0,0,.7); }
+body:not([data-room="desk"]) #picWin { display: none; }
+#picBar { display: flex; gap: 8px; align-items: center; padding: 4px 6px 4px 9px; background: linear-gradient(#1f1f21, #151516); border-bottom: 1px solid #000; cursor: move; user-select: none; }
+#picBar .legend { color: var(--amber); display: flex; align-items: center; gap: 5px; }
+#picBar input[type=range] { width: 64px; height: 10px; }
+#picVid { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; }
+table.tf { border-collapse: collapse; font: 12px var(--mono); }
+table.tf th { font: 500 10px var(--legend); letter-spacing: .08em; color: var(--muted); text-align: right; padding: 2px 8px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.tf td { padding: 3px 8px; border-top: 1px solid var(--line); }
+table.tf td.num { text-align: right; }
+table.tf td.ok { color: var(--green); }
+table.tf td.off { color: var(--amber); }
+#trackHeaders { overflow: hidden; grid-row: 4; }  /* its own row even when the picture corner above it is hidden */
 .th { height: var(--lane); border-bottom: 1px solid var(--line); padding: 5px 6px 4px 10px; display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto auto; gap: 2px 6px; position: relative; cursor: pointer; }
 .th.sel { background: #221d10; }
 .th .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
@@ -402,10 +423,37 @@ body.intake #projName { color: var(--cyan); }
 .th .btns button { padding: 0 6px; font-size: 11px; line-height: 17px; }
 .th .btns .m.on { background: #3d2d06; border-color: var(--amber); color: var(--amber); }
 .th .btns .s.on { background: #12331c; border-color: var(--green); color: var(--green); }
+.th .btns .r.on { background: #3a100c; border-color: var(--red); color: var(--red); text-shadow: 0 0 6px rgba(255,74,58,.6); }
+.th .btns .mon.on { background: #0d2a3a; border-color: var(--cyan); color: var(--cyan); }
+.th .inst .inp { padding: 0 5px; line-height: 14px; font-size: 9px; }
+.th .inst .inp.none { color: var(--muted); }
+.th .inlvl { position: absolute; left: 4px; bottom: 0; height: 2px; width: 0; background: var(--green); box-shadow: 0 0 5px rgba(95,224,122,.7); pointer-events: none; }
+.th .inlvl.hot { background: var(--red); box-shadow: 0 0 5px rgba(255,74,58,.7); }
+#recBtn { color: #8a3a34; }
+#recBtn:not(:disabled):hover { color: var(--red); }
+#recBtn.on { color: var(--red); border-color: #000; text-shadow: 0 0 8px rgba(255,74,58,.8); animation: recPulse 1.1s ease-in-out infinite; }
+@keyframes recPulse { 50% { text-shadow: 0 0 2px rgba(255,74,58,.3); color: #b5382d; } }
+@media (prefers-reduced-motion: reduce) { #recBtn.on { animation: none; } }
+#countIn, #recQ { font-size: 10px; padding: 2px 3px; }
+#recBtn:disabled, #clickBtn:disabled, #punchBtn:disabled, #keysBtn:disabled { opacity: .45; cursor: default; }
+#punchBtn.on { color: var(--red); text-shadow: 0 0 6px rgba(255,74,58,.6); }
+.tag.pick { cursor: pointer; }
+.tag.pick:hover { border-color: var(--cyan); }
+.th.tall { align-content: start; }  /* a lane grown for its passes: the controls stay at the top */
+/* the on-screen keys, docked under the bottom panel */
+#keys { grid-row: 4; display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-top: 1px solid #000; background: linear-gradient(#1b1b1d, #131314); overflow-x: auto; }
+#kRange { min-width: 74px; text-align: center; }
+#kbd { position: relative; display: flex; flex: none; height: 62px; touch-action: none; user-select: none; }
+#kbd .w { width: 24px; height: 62px; background: linear-gradient(#e4dfd2, #c9c4b6); border: 1px solid #000; border-radius: 0 0 2px 2px; position: relative; cursor: pointer; }
+#kbd .w span { position: absolute; bottom: 3px; left: 0; right: 0; text-align: center; font: 8px var(--mono); color: #5a564d; pointer-events: none; }
+#kbd .b { position: absolute; top: 0; width: 15px; height: 38px; background: linear-gradient(#34343a, #0c0c0d); border: 1px solid #000; border-radius: 0 0 2px 2px; z-index: 1; cursor: pointer; }
+#kbd .w.dn { background: linear-gradient(#ffd060, #d98f00); }
+#kbd .b.dn { background: linear-gradient(#b07a00, #5e4100); }
+.kHint { margin-left: auto; white-space: nowrap; }
 .th .inst { grid-column: 1 / 3; color: var(--muted); font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .th .vol { grid-column: 1 / 3; display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .th .vol input { flex: 1; height: 12px; }
-#timeline { display: grid; grid-template-rows: var(--rulerH) var(--chordH) 1fr; min-height: 0; min-width: 0; }
+#timeline { display: grid; grid-template-rows: var(--rulerH) var(--chordH) var(--picH) 1fr; min-height: 0; min-width: 0; }
 #ruler { height: var(--rulerH); display: block; border-bottom: 1px solid var(--line); cursor: pointer; }
 #lanesWrap { overflow: auto; min-height: 0; position: relative; }
 #lanes { display: block; }
@@ -470,5 +518,7 @@ ul.tight { margin: 4px 0; padding-left: 18px; }
 #menu { position: fixed; z-index: 60; background: #161617; border: 1px solid #000; border-radius: 2px; padding: 4px; min-width: 170px; box-shadow: 0 6px 20px rgba(0,0,0,.6); }
 #menu div { padding: 5px 10px; border-radius: 2px; cursor: pointer; }
 #menu div:hover { background: #26210f; color: var(--amber); }
+#menu div.mh { cursor: default; padding: 7px 10px 2px; font: 9px var(--legend); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+#menu div.mh:hover { background: none; color: var(--muted); }
 #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #2a1210; border: 1px solid var(--bad); padding: 8px 14px; border-radius: 2px; z-index: 70; max-width: 70vw; }
 #toast.info { background: #14140f; border-color: var(--amber); }

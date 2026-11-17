@@ -39,6 +39,10 @@ Workflow:
    buried or fight for one band, and probe-renders each instrument to catch silent/out-of-range pitches, transposed
    patches, slow attacks and drum notes that don't sound like their names. Fix what it flags and listen again.
 
+Music to picture: picture(file=<video>) reads a video (cuts, loud production sound), picture_frames(at="cuts")
+shows every shot, hits(add=[...]) marks the moments the music must catch, tempo_fit() finds the tempo that puts them
+on beats (do it before writing notes), render(out="cue.mp4") exports the video with the music on it.
+
 TTN notation: D4:q!mf F4 A4:h | (D3 A3 F4):w | r:h C5:e. B4:s ...  durations w h q e s t (dotted '.', triplet '3',
 beats '1.5'), sticky; velocity !p..!ff or !0-127; ' staccato, > accent, ~ tie, | bar check, @beat reposition.
 C4 = middle C (MIDI 60).
@@ -241,6 +245,56 @@ def markers(add: list[dict] | None = None, remove: list[str] | None = None, clea
 
 
 @tool
+def picture(file: str | None = None, start: float | None = None, clear: bool = False, note: str | None = None,
+            threshold: float = 0.3, project: str | None = None) -> dict:
+    """The video the music is written to. No arguments: what is there - duration, frame rate, cuts as
+    [picture seconds, bar:beat], sound.loud ([from, to, dB]: dialogue or effects the music must leave room for),
+    sound.peaks ([seconds, dB]: sudden loud moments, likely hit points), screenshots, hits.
+    file: a video becomes the picture (copied into the session); an image is kept as a screenshot with `note`.
+    start: song time in seconds at which the video's first frame plays (negative: the music enters later).
+    threshold: how big a change counts as a cut (lower finds more). Look at it with picture_frames()."""
+    return api.picture(file, start, clear, note, threshold, project)
+
+
+@tool
+def picture_frames(at: Any = None, start: Any = None, end: Any = None, count: int = 12,
+                   project: str | None = None) -> Any:
+    """Look at the picture: frames on one image, each labelled with its number, timecode and bar:beat.
+    at="cuts": the first frame of every shot (the quickest way to read a scene). at="hits": the frame at each hit
+    point. at="stills": the screenshots. at=[12.4, "1:02.5"]: those moments. Without at: `count` frames spread
+    evenly between start and end (picture seconds). At most 24 frames a call."""
+    from mcp.server.mcpserver.utilities.types import Image
+    rep = api.picture_frames(at, start, end, count, project)
+    file = rep.pop("file") if _launched() else rep["file"]  # a launched agent cannot open a path
+    return (_wire(rep), Image(path=file))
+
+
+@tool
+def hits(add: list[dict] | None = None, remove: list[str] | None = None, clear: bool = False,
+         project: str | None = None) -> dict:
+    """Hit points: moments of the picture the music should mark (a cut, an impact, a reveal). They belong to the
+    picture, so they keep their time when the tempo changes. add: [{"t": 12.4, "name": "door slams"}]; t is
+    picture time in seconds, "m:ss.s" or timecode "HH:MM:SS:FF". "soft": true for one that only needs to be near a
+    beat. remove: names or times. Returns each hit with at (bar:beat), off_ms (distance from the nearest beat;
+    + = the hit is late) and on ("bar" or "beat" when it lands within half a frame)."""
+    return api.hits(add, remove, clear, project)
+
+
+@tool
+def tempo_fit(mode: str = "steady", low: float | None = None, high: float | None = None, tempo: float | None = None,
+              bend: float = 8.0, on: str = "beat", grid: float = 1.0, apply: bool = False,
+              project: str | None = None) -> dict:
+    """Choose the tempo so the hit points land on beats.
+    mode="steady": the five constant tempos between low and high bpm that catch the hits best, each with rms_ms and
+    the miss per hit in ms (grid: 1 = beats, 0.5 = eighths). Under about 40 ms a hit reads as on the beat.
+    mode="map": a tempo map around `tempo` that puts every hard hit exactly on a beat (on="bar": on a bar line) by
+    nudging the tempo between hits by at most `bend` percent; hits it cannot reach are listed in missed.
+    Nothing is written without apply=True (steady: writes `tempo`, or the best candidate). Notes already written
+    keep their bars, so fit the tempo before the parts are written."""
+    return api.tempo_fit(mode, low, high, tempo, bend, on, grid, apply, project)
+
+
+@tool
 def harmony(progression: str | None = None, at: Any = None, end: Any = None, section: str | None = None,
             chord_length: Any = None, key: str | None = None, clear: bool = False, project: str | None = None) -> dict:
     """The chord track: one harmonic timeline for the song. chords() and pattern() follow it when called without a
@@ -282,12 +336,14 @@ def track_add(name: str, instrument: Any = None, kind: str = "midi", volume_db: 
 def track_update(track: str, name: str | None = None, instrument: Any = None, instrument_params: dict | None = None,
                  volume_db: float | None = None, pan: float | None = None, mute: bool | None = None,
                  solo: bool | None = None, output: str | None = None, sends: list[dict] | None = None,
-                 role: str | None = None, layer: str | None = None, project: str | None = None) -> dict:
+                 role: str | None = None, layer: str | None = None, input: Any = None,
+                 project: str | None = None) -> dict:
     """Change a track. sends: [{"to": "Reverb", "db": -10}] (replaces sends). instrument_params merge into the
     instrument (built-in synth params like {"cutoff": 900, "release": 1.2}, or VST3 params by name). Effects are
-    not set here: fx_add, then fx_update."""
+    not set here: fx_add, then fx_update. input (audio tracks): the interface input it records, from 1
+    ([1, 2] = a stereo pair, 0 = none)."""
     return api.track_update(track, project, name, instrument, volume_db, pan, mute, solo, output, sends, role,
-                            layer, None, instrument_params)
+                            layer, None, instrument_params, input)
 
 
 @tool
@@ -443,6 +499,15 @@ def clip_edit(clip: str, op: str, to: Any = None, track: str | None = None, time
     rename(name) mute unmute stretch(bpm, pitch) - audio: bpm = its own tempo, follows the song's (0 = off);
     pitch = semitones."""
     return api.clip_edit(clip, op, project, to, track, times, length, at, name, bpm, pitch)
+
+
+@tool
+def comp(track: str, start: Any, end: Any, use: int, project: str | None = None, group: bool = False) -> dict:
+    """Comping: from start to end, hear recording pass `use` on a track and mute the others there (cut at the
+    edges; nothing is deleted). Passes are the `pass` numbers on the track's clips in project_info: one per time
+    round the loop while recording, one per new recording over old material, 0 = not recorded. The answer lists
+    what is heard where. group=true: audio tracks recorded together with it (a drum kit's mics) follow."""
+    return api.comp(track, start, end, use, project, group)
 
 
 @tool

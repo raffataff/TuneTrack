@@ -4,19 +4,22 @@ Read this first if you are picking up the studio work in a new session. It is se
 wants, what was decided and why, what exists, what is verified, what to build next, and what only the owner can
 unblock. Keep it current: when a stage lands or a decision changes, edit this file in the same change.
 
-Last updated: 2026-11-16. Merged to `main`: `studio-core` (PR #4), `desk-takes` (PR #5, 47e445a: takes on the
+Last updated: 2026-11-17. Merged to `main`: `studio-core` (PR #4), `desk-takes` (PR #5, 47e445a: takes on the
 Desk, benches, Needs You per situation, reports and scorecard, the usage cuts, the Mix console, per-seat craft
 text, the take fixes below, and stage 3's first cut), a dependency bump (PR #6), `crew-usage` (PR #7, 826a36e:
 the take-path fix, `listen()` for a bar range, lean MCP instructions, batched auditions, open tasks for the seats
 that add tasks), `offline-engine` (PR #8, 880e673: stage 3.2, offline rendering through the engine), and
 `engine-lanes` (PR #9: stage 3.3, strips on several cores, sample-rate conversion, the mono sidechain key, SFZ
 through sfizz; and stage 3.4, automation of any device setting, tempo-synced effects, time-stretch of audio clips).
+On branch `picture`, not committed: stage 5's first cut (the picture, hit points, tempo fitting) and stage 4
+(tracking: recording, passes, comping, punch, keyboards, devices; all built, nothing recorded through the
+interface yet); both in section 6.
 
 ---
 
 ## 1. What the owner wants
 
-TuneTrack today is an AI-driven music workstation for game soundtracks: a Python library, 70 MCP tools, a CLI, a
+TuneTrack today is an AI-driven music workstation for game soundtracks: a Python library, 75 MCP tools, a CLI, a
 skill, and a small browser editor over an offline render engine. The owner wants it to become their main music
 tool, for games, video and their own music: an **agentic studio**.
 
@@ -86,7 +89,7 @@ Defined in `src/tunetrack/roles.py` (purpose, what each may change, tool list, s
 | arranger | notes, tracks | Who plays what, voicings, articulations, dynamics. Merges into composer on small jobs. |
 | rhythm | notes, tracks | Drums, percussion, bass, feel. |
 | sound | sound, tracks | Chooses and shapes instruments. |
-| tracking | notes, tracks | Recorded audio. Optional; human by default. |
+| tracking | notes, tracks | Recorded audio: a person records on the Desk, an agent can comp and clean. Optional. |
 | mix | mix, master | Balance, EQ, dynamics, space, automation, master chain. |
 | review | nothing | Independent ears; reports and files fix tasks. Best on a different model from the composer. |
 
@@ -117,6 +120,8 @@ On `main`.
 | `src/tunetrack/server.py` | `/api/events` (server-sent events: project version + board activity, and with `?take=` the version of the take the Desk has open), board and crew functions callable from the editor (`STUDIO`), `board` and `crew` in `/api/state`, `studio_view()` for cheap redraws. A take on the Desk: `/api/state?take=tk3` and `/api/version?take=tk3`, a `take` field on `/api/call` that points the Desk's own calls at that take, and `take_cut()`. Stops hosted crews on exit. |
 | `src/tunetrack/web/` | The studio UI. `index.html` (one header, two rooms), `style.css` (the rack look; all drawn in CSS, no fonts or images fetched), `studio.js` (Studio room: rack, seat workstations, Needs You, monitor/talkback, A/B audition), `app.js` (Desk room: arrangement / piano roll / mixer, and the take bar that says whether the Desk is editing the session or a take). |
 | `src/tunetrack/cli.py` | `tunetrack crew detect / status / run [--brief] [--parallel] [--max-runs]`; `tunetrack takes clean [--project] [--days N] [--yes]`; `call` and `functions` now reach `studio` and `takes` too. |
+| `src/tunetrack/picture.py` | Stage 5: the video the music is written to (`set_video`, `probe`, `scan` for cuts and production sound, `sheet` for frames, `mux`), hit points (`edit_hits`, `hit_rows`) and the tempo that catches them (`fit_constant`, `fit_map`). `web/picture.js` is its lane and video window on the Desk. |
+| `src/tunetrack/tracking.py` | Stage 4: what a recording becomes (`passes`, `place_audio`, `place_midi`, `commit`) and comping (`comp`, `split_clip`). `livehost.py` holds what is armed and runs `record` / `record_stop`; `web/tracking.js` is the Desk's side. |
 | `src/tunetrack/model.py`, `engine.py`, `api.py` | Small changes, below. |
 
 Changes to existing code that are easy to miss:
@@ -782,15 +787,160 @@ Left, in order:
    Not done: no UI to draw or edit automation (agents and the API only); VST3 automation is per block, not sample
    accurate; nobody has heard any of it.
 
-### Stage 4: tracking
+### Stage 4: tracking (built 2026-11-17 in two cuts, branch `picture`, not committed)
 
-ASIO input, record-arm, monitoring, takes and comping on audio tracks, MIDI keyboard input.
+The one idea: **a recording is passes, and a pass is an ordinary clip.** Each time round the loop while recording,
+and each new recording over old material, is a pass. `Clip.lane` is the pass number (0 = not recorded); the passes
+of a track share a stretch of time and one is heard, the others are muted clips, which every renderer already
+skips. So comping is clip editing (cut at the edges, mute, unmute), nothing is ever deleted, takes merge it as they
+merge any clip, and there is no second model. "Take" was taken (the crew's), so code and UI say pass.
 
-### Stage 5: picture and game
+Built (`engine/src/Recorder.h`, `src/tunetrack/tracking.py`, `web/tracking.js`, `tests/test_tracking.py`):
 
-Video track locked to the transport; the Spotting seat reads frames and cuts (needs `ffmpeg`) and writes
-markers and a tempo map so hits land on beats; screenshots and recorded gameplay first, an agent playing the
-game later.
+- **Engine.** The device opens with its inputs when asked (`device` with `"inputs": true`, or `--inputs`; an ASIO
+  driver is one device both ways, elsewhere the system's default input; if that fails it runs on with outputs and
+  says why in `input_problem`). A strip's `"input": {"ch", "monitor"}` puts an `InputNode` before its inserts,
+  summed with what is already recorded, heard only while monitoring. `record` writes each armed audio track's
+  input channels as they arrive (24-bit WAV, mono or a pair, through JUCE's threaded writer) and the keyboard's
+  events, with `marks` saying where the transport was at the start and at every loop wrap; `record_stop` returns
+  them with the latency of the graph, the way out and the way in. While recording the transport does not stop at
+  the song's end. `click` is a metronome after the master (`ClickNode`; never offline), and `count_until` plays it
+  before the punch only. The transport can now start before sample 0 (a count-in from bar 1): the seek sentinel
+  moved from -1 to `Transport::noSeek`. MIDI inputs are opened by `inputs` (every keyboard, again for one plugged
+  in later) and reach the armed strip's instrument through its `MidiSourceNode` (`thru`), sounding stopped or
+  playing; `midi` injects events. `pull` grew `input` (a file as the device's input), `midi` and `hold`, so all of
+  this is tested without a device and without a sound.
+- **Python.** `Track.input` (interface inputs from 1; `track_update(input=)`), `Clip.lane`. Armed and monitored are
+  not in the project: `livehost` keeps them per engine and passes them to `live.build_spec(tracking=)`; an armed
+  MIDI track's instrument is loaded even with no notes. `livehost.record(beat, count_in)` / `record_stop()` (and
+  plain stop) write the result into what the Desk shows, session or take, as one undo step (`tracking.commit`):
+  one clip per pass on one file (`audio/rec/<stamp>-<track>.wav`), moved earlier by the latency, the count-in cut
+  off, each pass heard over its own stretch with a later one over an earlier one, older material under them muted,
+  a short last pass (stopped mid-loop) kept but not heard. Keyboard events become notes as played, no quantising,
+  moved by the way out only; sustain and controllers go to the clip's cc lanes. `record_offset_ms` in the library
+  config corrects a driver that reports its latency wrong.
+- **Comping.** `comp(track, start, end, use=<pass>)` (API, MCP tool 75, the Tracking seat has it): the pass heard
+  over a stretch. Audio cuts get a 4 ms fade either side; comping back joins the pieces again.
+  `project_info` shows `pass` on clips.
+- **The Desk.** On each track header R (arm) and, on audio tracks, I (monitor) and the input chip (a menu of the
+  interface's inputs by name, and stereo pairs); a level line under an armed audio track's header. On the
+  transport ● (record from the playhead), CLICK and the count-in (0, 1, 2 bars), shown when the engine is built and
+  usable with LIVE on. A track with passes draws each on a row inside its lane, the heard one bright. Ctrl+drag
+  along a pass comps it in over that stretch; a clip's menu has "Hear pass n here". The tag reads `LIVE · REC`.
+
+Checked: 12 tests (349 in all pass), among them a loop recording through the server (three passes, the file equal
+to what came in, one undo step, a comp) and a keyboard note that sounds and lands on its beat. In the browser on a
+scratch session with an engine that has no device: arm, click, record and stop (nothing came in: it says so), the
+pass rows, a Ctrl+drag comp. Found on the way and fixed: without a picture the Desk's track headers had no height
+(stage 5's grid row; `#trackHeaders` now names its row), and clicking an audio clip threw in `focusRoll`.
+
+Second cut, the same day (everything the first cut listed as left except the owner's own recording):
+
+- **Punch.** `live_record(beat, until=)`: one pass from the punch in to the punch out, then the transport plays
+  half a second on (what was played is still arriving), stops by itself, and the watcher in `livehost` commits
+  it; the live state's `done: {n, recorded | record_error}` tells the Desk (`n` goes up each time). The count-in
+  bars play the music too unless the punch is at the song's start, so they are the pre-roll. While recording, an
+  armed audio track's own material is silent from the punch in to the punch out (`StemNode::duck`, a 5 ms ramp),
+  so the old pass is heard up to the punch and after it, never under it. PUNCH on the transport uses the loop
+  region as the two points.
+- **A device at another rate.** No longer refused. The input is written as it arrives, at the device's rate
+  (`file_sr`), and the marks say when each stretch of the song was *heard* in device samples (the converter's
+  queue is counted in); `tracking.at_project_rate` brings every time into project samples and the clips need
+  nothing else, since a clip's place in its file is in seconds and files at another rate were already resampled
+  on the way into a render. Not heard through the engine there (`live_arm(monitor=)` says to use the interface's
+  direct monitoring); a keyboard plays with a few ms of jitter and is recorded at the time it was played.
+- **Which keyboard plays which track.** Each keyboard has its own queue into the audio thread and a number (the
+  order they were opened; 0 = the on-screen keys, which play every armed track). `live_arm(track, keyboard=name)`
+  is kept with the armed state, `thru_from` in the spec, `midi_src` in the recording; a track keeps only its
+  keyboard's notes.
+- **Devices.** `live_devices()` / `live_device(name=, input=)`: the output and the input device, kept in the
+  library config (`live_device`, `live_input`). A chosen device that is not there at start falls back to the
+  engine's own pick, with a warning.
+- **Quantise on record** (`live_record(quantise=beats)`: starts move, lengths stay), **comping a group**
+  (`comp(group=true)`: audio tracks from the same recording follow, each to its own number for that time
+  round; they are matched by the recording's file stamp), `/api/peaks` (one byte per 5 ms, for real waveforms),
+  and the bench's clips carry pass and muted.
+- **The Desk**: waveforms, taller lanes for many passes, PUNCH, the quantise menu, the keyboard menu on R, the
+  device menu, on-screen keys, Ctrl+Shift+drag to comp a group, passes on the Tracking seat's bench.
+
+Checked: 22 tests in `tests/test_tracking.py`, among them a punch through the server (stops by itself, the old
+pass silent under it and back after it, the new clip equal to what came in), a loop recording through a 44.1 kHz
+device into a 48 kHz project (file equal to the input, marks within 2 samples, clips where they belong), and a
+track that hears keyboard 2 and not keyboard 1. 359 tests pass in all. In the browser on a scratch session (engine
+with no device): lanes grow for five passes, waveforms load, a Ctrl+Shift+drag comps two tracks recorded together,
+the on-screen keys send notes, a punch reports its two points and stops. Not looked at in the browser: the device
+menu and the keyboard menu (nothing to list without a device), the Tracking bench's pass strips.
+
+**Not checked: anything through the SSL 2.** No input has been opened on a real device, so real latency figures,
+monitoring, the click's level, a MIDI keyboard, switching device while the engine runs (`scanForDevices` on a
+live ASIO driver) and the punch's half-second post-roll are all unheard.
+
+Left:
+
+1. **The owner records something**: a guitar or voice pass round a loop, a punch, and a keyboard part. Expect the
+   latency to need `record_offset_ms` (clap against the click, read the offset off the clip).
+2. Small things seen on the way: comping a group follows audio tracks only (MIDI clips carry no mark of their
+   recording); with a punch the loop is off (one pass); input monitoring through the engine needs the device at
+   the project's rate.
+
+### Stage 5: picture and game (first cut built 2026-11-16, branch `picture`, not committed)
+
+Stage 4 was skipped at first at the owner's word and built the day after; nothing here depends on it.
+
+The one idea: **the picture lives in seconds, the music in beats.** `Project.picture["start"]` is the song time at
+which the video's first frame plays, and a hit is a moment of the picture (`Project.hits`: `{"t": picture seconds,
+"name" [, "soft"]}`). So a tempo change moves the bars under the picture and never the hits. With no video, picture
+time is song time, so a game cue can carry hits too. Both fields are left out of `project.json` when empty, and both
+are `form` in a take (whole-value: two takes that both edit the cue sheet conflict).
+
+Built (`src/tunetrack/picture.py`, `web/picture.js`, `tests/test_picture.py`):
+
+- **The video.** `picture(file=...)` copies it to `<session>/picture/` (takes share it), probes it with ffprobe
+  (duration, frame rate, size, codec, sound, start timecode) and makes a 720p H.264 proxy beside it when the browser
+  could not play the original (ProRes, HEVC, over 1080p). `start=` moves the first frame; an image file becomes a
+  screenshot in `brief.stills` instead.
+- **Reading it** (`picture.scan`, once per file, kept in `<name>.scan.json`): cuts from ffmpeg's scene score at
+  320 px (scores from 0.08 up are kept, so `threshold=` needs no second pass; default 0.3), the production sound's
+  level twice a second and its sudden loud moments, and a strip of up to 120 thumbnails for the Desk. `picture()`
+  answers with cuts as `[seconds, bar:beat]`, `sound.loud` spans and `sound.peaks`.
+- **Seeing it.** `picture_frames(at="cuts" | "hits" | "stills" | [times])` returns one contact sheet, each frame
+  labelled with number, timecode and bar:beat, as MCP image content. A launched agent gets the image without the
+  path. **Not checked: which models in use read an image in a tool answer** (the old worry from `analyze()`); a
+  model that cannot will spot from cuts and sound alone, or fail the run.
+- **Hits and tempo.** `hits(add/remove/clear)` takes seconds, `m:ss.s` or `HH:MM:SS:FF` (from the file's start
+  timecode; non-drop) and answers each hit with `at`, `off_ms` and `on` (within half a frame of a beat or bar).
+  `tempo_fit()` lists the five steady tempos that catch the hits best (soft hits count a third);
+  `tempo_fit(mode="map")` nudges the tempo between hard hits, by at most `bend` percent, so each lands exactly on a
+  beat or bar, and names the ones it cannot reach. Nothing is written without `apply=True`. `project_info` lists
+  the hits, so every seat sees them.
+- **Delivery.** `render(out="cue.mp4")` (.mov, .webm) renders the mix one-shot and puts it under the video, lined up
+  by `start`; the video stream is copied when it is H.264.
+- **Seats.** Spotting has `picture`, `picture_frames`, `hits`, `tempo_fit` and a craft text that says the order;
+  the Producer can look (`picture`, `picture_frames`) and is told that with a picture the tempo is fitted before any
+  part is written; the Composer's craft says what a hit asks for. 74 tools.
+- **The Desk.** A PICTURE lane under the chord track (film strip, cut ticks, hits with their miss in ms or a green
+  mark when exact; hit lines run down through the tracks) and a video window that follows the playhead, preview or
+  LIVE: it runs by itself while the transport plays and is pulled back past 120 ms of drift (measured 26 ms);
+  stopped, it shows the frame under the playhead. `+ Pic` sets the picture (a typed path: a page cannot learn a
+  file's path), double-click the lane or `H` marks a hit (while playing it does not stop to ask), right-click
+  renames, softens, removes, or puts the first frame there, `Fit…` lists tempos with the miss per hit and applies
+  one steady or exact. GUIDE plays the video's own sound, off by default and never in a render. `/api/picture`
+  serves the video with Range requests (seeking needs them).
+
+Checked in the browser on a synthetic 20 s video (scratch library): the lane, scrub, play and stop, past the end,
+a hit by key, the fit dialog, an exact map applied. 11 tests (337 in all pass); the video ones skip without ffmpeg.
+
+Left, in order:
+
+1. **The owner's eyes on it with a real video**, and one real spotting run (Spotting on a model that reads images).
+2. The Spotting seat's bench (the cue sheet and frames in its workstation; it still opens on PLAN), and stills
+   shown somewhere in the UI.
+3. Dragging a hit and the picture's start in the lane; tempo changes drawn on the ruler.
+4. Guide sound under LIVE: the browser plays it on the Windows output while the engine holds the ASIO driver;
+   untested on the SSL 2. Putting it through the engine as a track that renders leave out would fix it.
+5. Drop-frame timecode; a free start for the steady fit (shifting where the music enters); hits merged one by one
+   in takes.
+6. The game side: an agent reading or playing the game itself.
 
 ### Stage 6: polish
 
@@ -807,7 +957,8 @@ browser that auditions live, genre style sheets as per-seat skills.
 | Stage 3 | Done 2026-11-14: Build Tools, CMake and JUCE 9 are installed. Done 2026-11-16: Smart App Control switched off (it blocked a fresh engine build, and with it LIVE). Left: choose the repo's licence (below). |
 | Orchestral palette | `BBC Symphony Orchestra (64 Bit).vst3` is in the VST3 folder as of 2026-11-16 (not scanned or tried yet); Spitfire LABS is not. Then `tunetrack scan` and capture patches. |
 | SFZ in the engine | Done 2026-11-16: sfizz's source is in `engine/third_party/sfizz/`. Left: hear an SFZ track on LIVE (real-time streaming is not checked). |
-| Stage 5 | Install `ffmpeg` on PATH. |
+| Stage 5 | Done: `ffmpeg` 9.0.2 is on PATH. Left: try the picture lane with a real video. |
+| Stage 4 | Record through the SSL 2: LIVE on, choose a track's input, R, ●. Say how far off the beat a clap against the click lands (that sets `record_offset_ms`), and whether monitoring through the engine is usable or the interface's direct monitoring is better. Close Cubase first (one ASIO client at a time). |
 | New tools in their own apps | Restart Claude so the MCP server reloads (it runs from this checkout). |
 
 ---

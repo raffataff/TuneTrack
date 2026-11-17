@@ -165,7 +165,7 @@ you - can change at any time.
 | Arranger | Who plays what: voicings, doublings, articulations, dynamics |
 | Rhythm | Drums, percussion, bass, feel |
 | Sound | Chooses and shapes the instruments |
-| Tracking | Recorded audio: takes, comping, placing clips (live recording only) |
+| Tracking | Recorded audio: passes, comping, placing clips (a person records; an agent can comp and clean) |
 | Mix | Balance, EQ, dynamics, space, automation, master |
 | Review | Independent ears: listens against the brief and sends located problems back |
 
@@ -247,9 +247,37 @@ bar 11
   colour tones (9ths, 11ths, 13ths, maj7), passing and neighbour notes, pedal points, slash chords like D/E and long
   octave doublings pass.
 
+## Music to picture
+
+A video (a cutscene, a trailer, recorded gameplay) can be the picture the music is written to. It needs `ffmpeg` on
+PATH. `picture(file="C:/Videos/cutscene.mp4")` copies it into the session and reads it: the cuts, and where its own
+sound is loud. `picture_frames(at="cuts")` puts the first frame of every shot on one image. `hits(add=[{"t": 12.4,
+"name": "door slams"}])` marks the moments the music must catch; they belong to the picture, so they keep their time
+when the tempo changes. `tempo_fit()` lists the steady tempos that put them on beats, `tempo_fit(mode="map")` writes
+a tempo map that lands each one exactly, and `render(out="cue.mp4")` exports the video with the music on it.
+
+In the editor the picture is a film strip under the chord track (cuts, hits and how many milliseconds each hit is
+from a beat) and a video window that follows the transport. `+ Pic` sets it, double-click the strip or press `H` at
+the playhead to mark a hit, `Fit…` chooses the tempo. A screenshot (`picture(file="shot.png", note="...")`) is kept
+as a mood reference instead.
+
+## Recording
+
+With the live engine built and LIVE on, the editor records. Choose the interface input on an audio track's header,
+press `R` to arm it (`I` monitors the input through the track's effects), then `●`: recording starts at the playhead
+after the count-in. With the loop on, each time round is another pass; a new recording over an old one is too.
+Passes sit on rows inside the track, the heard one bright: Ctrl+drag along another pass to hear it over that
+stretch (`comp(track, start, end, use=<pass>)` for agents); with Shift held too, the tracks recorded together (a drum
+kit's mics) follow. Nothing is deleted. `PUNCH` records the loop region only: the count-in bars play the music up
+to the punch in, the old pass is silent under the punch, and recording stops by itself after the punch out.
+An armed instrument track is played and recorded from any MIDI keyboard that is plugged in (right-click `R` to give
+a track one keyboard), or from `KEYS`, a piano on screen that the computer keyboard plays too; the menu beside the
+count-in moves recorded notes onto a grid. Click the `LIVE ·` tag to choose the audio device and where to record
+from. `record_offset_ms` in `library/config.json` corrects an interface that reports its latency wrong.
+
 ## For agents
 
-70 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
+75 MCP tools (`tunetrack mcp`), the same operations as `tunetrack call <fn> '<json>'` (list them with `tunetrack functions`).
 The skill (`skill/SKILL.md`) is the composition playbook: understanding the project, forms per cue type, melody/harmony/bass/
 arrangement craft, genre palettes, mixing targets, the review loop and delivery per engine.
 

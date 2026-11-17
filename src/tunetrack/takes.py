@@ -8,7 +8,8 @@ Several seats can work at once, each in its own take, without seeing each other'
 take is a three-way merge: session + (take - base). The merge works on the units a studio actually divides labour
 by, so a Composer's notes and a Mix engineer's fader moves on the same track combine cleanly:
 
-    form     tempo, key, metre, loop, length; markers and the chord track (merged per bar range)
+    form     tempo, key, metre, loop, length, the picture and its hit points; markers and the chord track (merged
+             per bar range)
     brief    name and brief
     tracks   a track existing, its name / role / layer / colour
     sound    a track's instrument
@@ -35,12 +36,12 @@ from pathlib import Path
 from . import api, roles, studio
 from .model import Project, _atomic_write, project_lock, session_root
 
-FORM_FIELDS = ("tempo", "tempo_changes", "time_sig", "key", "length", "loop")
+FORM_FIELDS = ("tempo", "tempo_changes", "time_sig", "key", "length", "loop", "picture", "hits")
 BRIEF_FIELDS = ("name",)
 MASTER_FIELDS = ("sample_rate", "tail", "eq_engine")
-TRACK_META = ("name", "kind", "role", "layer", "color")
+TRACK_META = ("name", "kind", "role", "layer", "color", "input")
 TRACK_MIX = ("volume_db", "pan", "mute", "solo", "output", "sends", "fx")
-CLIP_META = ("name", "muted", "color")
+CLIP_META = ("name", "muted", "color", "lane")
 CATEGORIES = (roles.FORM, roles.BRIEF, roles.TRACKS, roles.SOUND, roles.MIX, roles.NOTES, roles.MASTER)
 _EPS = 1e-6
 

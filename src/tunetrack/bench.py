@@ -139,7 +139,9 @@ def seat_bench(seat: str, take: str | None = None, have: str | None = None, sess
         b = was.get(t["id"])
         e = {"id": t["id"], "name": t["name"], "kind": t.get("kind", "midi"), "role": t.get("role"),
              "color": t.get("color"), "instrument": takes._instr(t.get("instrument")) if t.get("kind", "midi") == "midi" else None,
-             **_mix(t, names), "clips": [[c.get("start", 0), c.get("length", 0), c.get("kind", "midi")] for c in t.get("clips", [])]}
+             **_mix(t, names),              # [start, length, kind, recording pass (0 = not recorded), 1 when muted (a pass not heard there)]
+             "clips": [[c.get("start", 0), c.get("length", 0), c.get("kind", "midi"), int(c.get("lane") or 0),
+                        1 if c.get("muted") else 0] for c in t.get("clips", [])]}
         if base is not None and b is None:
             e["new"] = True
         elif b is not None:

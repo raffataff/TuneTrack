@@ -87,7 +87,7 @@ async function loadState() {
       leaveTake(); return loadState();
     }
   }
-  S.doc = st.doc; S.version = st.version; S.sessionVersion = st.session_version; S.path = st.project; S.takeMeta = st.take;
+  S.doc = st.doc; S.pic = st.picture || null; S.version = st.version; S.sessionVersion = st.session_version; S.path = st.project; S.takeMeta = st.take;
   window.Studio?.set(st.board, st.crew);
   // notes as last loaded, per clip: whole-list saves send these so the server can refuse a stale overwrite
   S.base = {}; for (const t of S.doc.tracks) for (const c of t.clips) if (c.notes) S.base[c.id] = c.notes.map((n) => [...n]);
@@ -297,14 +297,16 @@ document.querySelectorAll("#tabs button[data-tab]").forEach((b) => b.onclick = (
 function drawHeaders() {
   const box = $("#trackHeaders"); box.innerHTML = "";
   if (!S.doc) return;
+  const lay = laneLayout(), L = laneH();
   S.doc.tracks.forEach((t, i) => {
     const el = document.createElement("div");
-    el.className = "th" + (S.sel.track === t.id ? " sel" : "");
+    el.className = "th" + (S.sel.track === t.id ? " sel" : "") + (lay[i].h !== L ? " tall" : "");
+    if (lay[i].h !== L) el.style.height = lay[i].h + "px";  // a lane grown for its passes
     const inst = t.kind === "midi" ? (t.instrument ? instLabel(t.instrument) : "no instrument") : t.kind;
     el.innerHTML = `<div class="bar" style="background:${trackColor(t, i)}"></div>
       <div class="name" title="${esc(t.name)}">${esc(t.name)}</div>
-      <div class="btns"><button class="m ${t.mute ? "on" : ""}" title="Mute">M</button><button class="s ${t.solo ? "on" : ""}" title="Solo">S</button></div>
-      <div class="inst" title="${esc(inst)}">${esc(inst)}${t.role ? " · " + esc(t.role) : ""}</div>
+      <div class="btns"><button class="m ${t.mute ? "on" : ""}" title="Mute">M</button><button class="s ${t.solo ? "on" : ""}" title="Solo">S</button>${window.Tracking?.headerButtons(t) || ""}</div>
+      <div class="inst" title="${esc(inst)}">${window.Tracking?.headerInst(t) || esc(inst) + (t.role ? " · " + esc(t.role) : "")}</div>
       <div class="vol"><input type="range" min="-60" max="12" step="0.5" value="${t.volume_db}"><span>${(+t.volume_db).toFixed(1)}</span></div>`;
     el.onclick = (e) => { if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") return; selectTrack(t.id); };
     el.ondblclick = (e) => { if (e.target.classList.contains("name")) renameTrack(t); };
@@ -315,8 +317,10 @@ function drawHeaders() {
     vol.oninput = () => { el.querySelector(".vol span").textContent = (+vol.value).toFixed(1); };
     vol.onchange = () => act("track_update", { track: t.id, volume_db: +vol.value });
     vol.ondblclick = () => act("track_update", { track: t.id, volume_db: 0 });
+    window.Tracking?.bindHeader(el, t);
     box.appendChild(el);
   });
+  window.Tracking?.meters();
 }
 function instLabel(i) {
   if (i.patch) return `${i.name} · ${i.patch}`;
@@ -338,6 +342,17 @@ function trackMenu(e, t) {
 // ---------------------------------------------------------------- arrangement
 const lanesWrap = $("#lanesWrap"), lanes = $("#lanes"), ruler = $("#ruler");
 const laneH = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue("--lane"));
+// Where each track's lane sits ({y, h} per track; .total is the height of them all). A lane is laneH() tall and
+// grows for a track with more than 2 recording passes (about PASS_ROW px a row), so its pass rows stay readable.
+const PASS_ROW = 18;
+function laneLayout() {
+  const L = laneH(); let y = 0;
+  const out = (S.doc ? S.doc.tracks : []).map((t) => {
+    const p = passRows(t), h = p && p.length > 2 ? Math.max(L, p.length * PASS_ROW + 6) : L, r = { y, h };
+    y += h; return r;
+  });
+  out.total = y; return out;
+}
 function fitCanvas(cv, w, h) {
   const r = devicePixelRatio || 1;
   if (cv.width !== Math.round(w * r) || cv.height !== Math.round(h * r)) { cv.width = Math.round(w * r); cv.height = Math.round(h * r); }
@@ -347,8 +362,8 @@ function fitCanvas(cv, w, h) {
 function drawArrangement() {
   const g0 = ruler.getContext("2d");
   if (!S.doc) { g0.clearRect(0, 0, ruler.width, ruler.height); fitCanvas(lanes, 10, 10); return; }
-  const L = laneH(), n = S.doc.tracks.length, endB = songEnd() + bpb() * 8;
-  const W = Math.max(lanesWrap.clientWidth, endB * S.zoom), H = Math.max(lanesWrap.clientHeight - 2, n * L);
+  const lay = laneLayout(), endB = songEnd() + bpb() * 8;
+  const W = Math.max(lanesWrap.clientWidth, endB * S.zoom), H = Math.max(lanesWrap.clientHeight - 2, lay.total);
   const g = fitCanvas(lanes, W, H);
   g.fillStyle = "#101011"; g.fillRect(0, 0, W, H);
   if (S.doc.loop) { g.fillStyle = "rgba(95,224,122,0.06)"; g.fillRect(S.doc.loop.start * S.zoom, 0, (S.doc.loop.end - S.doc.loop.start) * S.zoom, H); }
@@ -356,42 +371,64 @@ function drawArrangement() {
     g.fillStyle = bar % 4 ? "#1b1b1d" : "#27272a"; g.fillRect(Math.round(b * S.zoom), 0, 1, H);
   }
   S.doc.tracks.forEach((t, i) => {
-    const y = i * L;
+    const { y, h: L } = lay[i];
     if (S.sel.track === t.id) { g.fillStyle = "rgba(255,176,0,0.05)"; g.fillRect(0, y, W, L); }
     g.fillStyle = "#202022"; g.fillRect(0, y + L - 1, W, 1);
     const col = trackColor(t, i);
     for (const c of t.clips) drawClip(g, t, c, y, L, col);
   });
   if (S.drag && S.drag.kind === "clip" && S.drag.ghost) {
-    const d = S.drag.ghost; g.strokeStyle = "#fff"; g.setLineDash([4, 3]);
-    g.strokeRect(d.start * S.zoom + 0.5, d.row * L + 3.5, d.length * S.zoom - 1, L - 8); g.setLineDash([]);
+    const d = S.drag.ghost, r = lay[d.row] || { y: d.row * laneH(), h: laneH() }; g.strokeStyle = "#fff"; g.setLineDash([4, 3]);
+    g.strokeRect(d.start * S.zoom + 0.5, r.y + 3.5, d.length * S.zoom - 1, r.h - 8); g.setLineDash([]);
   }
   for (const m of S.doc.markers) { g.fillStyle = "rgba(255,176,0,.45)"; g.fillRect(m.at * S.zoom, 0, 1, H); }
+  window.Picture?.overlay(g, H);
+  window.Tracking?.overlay(g, lay);
   g.fillStyle = "#ff4a3a"; g.fillRect(S.playhead * S.zoom, 0, 1.5, H);
   drawRuler();
 }
+// Recording passes share a stretch of time (tracking.js): a track that has them shows each pass on a row of its
+// own inside its lane, the heard one bright and the others dim.
+function passRows(t) {
+  const ls = [...new Set(t.clips.map((c) => c.lane || 0))].sort((a, b) => a - b);
+  return ls.length > 1 ? ls : null;
+}
+function clipBox(t, lane, y, L) {
+  const rows = passRows(t);
+  if (!rows) return [y + 3, L - 8];
+  const h = (L - 6) / rows.length;
+  return [y + 3 + Math.max(0, rows.indexOf(lane || 0)) * h, h - 1];
+}
 function drawClip(g, t, c, y, L, col) {
   const x = c.start * S.zoom, w = Math.max(3, c.length * S.zoom), sel = S.sel.clip === c.id;
+  const [cy, ch] = clipBox(t, c.lane, y, L), band = ch >= 34 ? 14 : 0;  // a pass row has no room for a title band
   g.globalAlpha = c.muted ? 0.35 : 1;
-  g.fillStyle = col + "33"; g.fillRect(x + 1, y + 3, w - 2, L - 8);
-  g.fillStyle = col; g.fillRect(x + 1, y + 3, w - 2, 14);
-  g.strokeStyle = sel ? "#ffffff" : col; g.lineWidth = sel ? 2 : 1; g.strokeRect(x + 1.5, y + 3.5, w - 3, L - 9); g.lineWidth = 1;
-  g.fillStyle = "#0c0c0d"; g.font = "11px Segoe UI, system-ui, sans-serif";
-  g.save(); g.beginPath(); g.rect(x + 2, y + 3, w - 4, L - 8); g.clip();
-  g.fillText((c.name || (c.kind === "audio" ? (c.file || "").split("/").pop() : ""))
-    + (c.bpm ? ` · ${+c.bpm.toFixed(2)} bpm` : "") + (c.pitch ? ` · ${c.pitch > 0 ? "+" : ""}${+c.pitch.toFixed(2)} st` : ""), x + 5, y + 14);
+  g.fillStyle = col + "33"; g.fillRect(x + 1, cy, w - 2, ch);
+  g.fillStyle = col; g.fillRect(x + 1, cy, w - 2, band || 2);
+  g.strokeStyle = sel ? "#ffffff" : col; g.lineWidth = sel ? 2 : 1; g.strokeRect(x + 1.5, cy + 0.5, w - 3, ch - 1); g.lineWidth = 1;
+  g.save(); g.beginPath(); g.rect(x + 2, cy, w - 4, ch); g.clip();
+  if (band) {
+    g.fillStyle = "#0c0c0d"; g.font = "11px Segoe UI, system-ui, sans-serif";
+    g.fillText((c.name || (c.kind === "audio" ? (c.file || "").split("/").pop() : ""))
+      + (c.bpm ? ` · ${+c.bpm.toFixed(2)} bpm` : "") + (c.pitch ? ` · ${c.pitch > 0 ? "+" : ""}${+c.pitch.toFixed(2)} st` : ""), x + 5, cy + 11);
+  }
+  const top = cy + (band ? band + 2 : 3), h = Math.max(2, ch - (band ? band + 4 : 5));
   if (c.kind === "midi" && c.notes.length) {
     let lo = 127, hi = 0; for (const n of c.notes) { lo = Math.min(lo, n[0]); hi = Math.max(hi, n[0]); }
-    const span = Math.max(12, hi - lo + 2), top = y + 19, h = L - 26;
+    const span = Math.max(12, hi - lo + 2);
     g.fillStyle = col;
     for (const n of c.notes) {
       if (n[1] >= c.length) continue;
       const ny = top + (hi + 1 - n[0]) / span * h;
       g.fillRect(x + n[1] * S.zoom, ny, Math.max(1.5, Math.min(n[2], c.length - n[1]) * S.zoom - 0.5), Math.max(1.5, h / span - 0.5));
     }
-  } else if (c.kind === "audio") {
-    g.fillStyle = col + "99"; for (let i = 0; i < w; i += 3) { const a = (Math.sin(i * 0.37) * 0.5 + 0.5) * (L - 30); g.fillRect(x + i, y + 22 + (L - 30 - a) / 2, 2, a); }
+  } else if (c.kind === "audio" && !window.Tracking?.wave(g, c, x, w, top, h, col)) {
+    // a stand-in for the waveform until the file's peaks arrive (or when it has none), taken from where in the
+    // file the clip plays so a cut does not redraw it
+    const o = (c.offset || 0) * 40;
+    g.fillStyle = col + "99"; for (let i = 0; i < w; i += 3) { const a = (Math.sin((i / S.zoom * 9 + o) * 0.37) * 0.5 + 0.5) * h; g.fillRect(x + i, top + (h - a) / 2, 2, a); }
   }
+  if (!band && w > 26) { g.fillStyle = c.muted ? col : "#ffffff"; g.font = "9px Segoe UI, system-ui, sans-serif"; g.fillText("P" + (c.lane || 0), x + 4, cy + Math.min(ch - 2, 10)); }
   g.restore(); g.globalAlpha = 1;
 }
 function drawRuler() {
@@ -412,7 +449,7 @@ function drawRuler() {
   for (const m of S.doc.markers) { const x = m.at * S.zoom - sx; g.fillStyle = "#ffb000"; g.fillRect(x, 6, 2, H - 6); g.fillText(m.name, x + 4, 16); }
   const px = S.playhead * S.zoom - sx; g.fillStyle = "#ff4a3a";
   g.beginPath(); g.moveTo(px - 5, H - 9); g.lineTo(px + 5, H - 9); g.lineTo(px, H); g.fill();
-  drawChords();
+  drawChords(); window.Picture?.draw(); window.Picture?.sync();
 }
 
 // ---------------------------------------------------------------- chord track
@@ -557,10 +594,17 @@ lanesWrap.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 function laneHit(e) {
-  const r = lanes.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, L = laneH();
-  const row = Math.floor(y / L), t = S.doc && S.doc.tracks[row], beat = x / S.zoom;
+  const r = lanes.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, lay = laneLayout();
+  let row = y < 0 ? -1 : lay.length + Math.floor((y - lay.total) / laneH());  // under the last lane: past the tracks
+  for (let i = 0; i < lay.length; i++) if (y >= lay[i].y && y < lay[i].y + lay[i].h) { row = i; break; }
+  const t = S.doc && S.doc.tracks[row], beat = x / S.zoom;
   let clip = null, edge = false;
-  if (t) for (const c of t.clips) if (beat >= c.start && beat <= c.start + c.length) { clip = c; edge = (c.start + c.length) * S.zoom - x < 7; }
+  if (t) for (const c of t.clips) {
+    if (beat < c.start || beat > c.start + c.length) continue;
+    const [cy, ch] = clipBox(t, c.lane, lay[row].y, lay[row].h);
+    if (passRows(t) && (y < cy || y > cy + ch)) continue;  // passes overlap in time: the row under the pointer
+    clip = c; edge = (c.start + c.length) * S.zoom - x < 7;
+  }
   return { row, t, beat, clip, edge, x, y };
 }
 lanes.addEventListener("mousedown", (e) => {
@@ -569,6 +613,7 @@ lanes.addEventListener("mousedown", (e) => {
   if (!h.t) return;
   S.sel.track = h.t.id;
   if (!h.clip) { S.sel.clip = null; renderAll(); return; }
+  if (e.ctrlKey && passRows(h.t) && window.Tracking) { S.sel.clip = h.clip.id; Tracking.compStart(e, h); return; }  // comp: Ctrl+drag along a pass
   if (S.sel.clip !== h.clip.id) { S.sel.clip = h.clip.id; S.sel.notes.clear(); focusRoll(); }
   S.drag = { kind: "clip", mode: h.edge ? "resize" : (e.altKey ? "copy" : "move"), clip: h.clip, t: h.t, x0: h.x, beat0: h.beat,
     ghost: { start: h.clip.start, length: h.clip.length, row: h.row }, moved: false };
@@ -583,6 +628,7 @@ window.addEventListener("mousemove", (e) => {
     else { d.ghost.start = Math.max(0, snapB(d.clip.start + dx)); d.ghost.row = Math.max(0, Math.min(S.doc.tracks.length - 1, h.row)); }
     drawArrangement();
   } else if (S.drag.kind === "ruler") rulerDrag(e);
+  else if (S.drag.kind === "comp") Tracking.compDrag(e);
   else if (S.drag.kind === "chord") chordDrag(e);
   else rollDrag(e);
 });
@@ -597,6 +643,7 @@ window.addEventListener("mouseup", async (e) => {
   } else if (d.kind === "ruler") {
     if (d.loop && d.b1 !== d.b0) await act("project_set", { loop: { start: Math.min(d.b0, d.b1), end: Math.max(d.b0, d.b1) } });
   } else if (d.kind === "chord") await chordDrop(d);
+  else if (d.kind === "comp") await Tracking.compDrop(d);
   else rollUp(e);
 });
 lanes.addEventListener("dblclick", async (e) => {
@@ -618,6 +665,7 @@ lanes.addEventListener("contextmenu", (e) => {
     ["Duplicate", () => act("clip_edit", { clip: c.id, op: "duplicate", times: 1 })],
     ["Split at playhead", () => act("clip_edit", { clip: c.id, op: "split", at: S.playhead })],
     [c.muted ? "Unmute" : "Mute", () => act("clip_set", { clip: c.id, muted: !c.muted })],
+    ...(window.Tracking?.clipMenu(h.t, c) || []),
     ["Delete", () => act("clip_edit", { clip: c.id, op: "delete" })],
   ]);
 });
@@ -658,7 +706,7 @@ function focusRoll() {
   if (S.tab !== "roll") document.querySelector('#tabs button[data-tab="roll"]').click();
   const [, c] = selClip();
   drawRoll();
-  if (c && c.notes.length) {
+  if (c && c.notes && c.notes.length) {  // an audio clip has none
     const avg = c.notes.reduce((a, n) => a + n[0], 0) / c.notes.length;
     rollWrap.scrollTop = (127 - avg) * S.rowH - rollWrap.clientHeight / 2;
   } else rollWrap.scrollTop = (127 - 66) * S.rowH - rollWrap.clientHeight / 2;
@@ -866,7 +914,7 @@ function stop(rewind) {
     if (L.busy) L.stopAfter = true;  // a live_play still in flight: stop once it lands
     else if (L.st.on && L.st.playing) {
       L.st.playing = false; L.hold = true;
-      api("live_stop").then((s) => { L.hold = false; liveState(s); }, (e) => { L.hold = false; toast(e.message); });
+      api("live_stop").then((s) => { L.hold = false; liveState(s); window.Tracking?.stopped(s); }, (e) => { L.hold = false; toast(e.message); });
     }
   }
   if (rewind) setPlayhead(0);
@@ -908,6 +956,7 @@ function liveState(st) {
   $("#liveBtn").classList.toggle("hidden", !st.available); $("#liveBtn").classList.toggle("on", L.on);
   if (L.hold) st.playing = false;  // frames sent before our live_stop landed
   if (flip) renderAll();
+  window.Tracking?.sync();
   if (!liveMode()) return;
   $("#playBtn").classList.toggle("on", !!st.playing || L.busy);
   audioTag(); liveMeters();
@@ -919,18 +968,20 @@ function liveTick() {
   let b = secToBeat(beatToSec(st.beat || 0) + (performance.now() - L.at) / 1000);
   const lp = S.doc.loop;
   if (st.looping && lp && lp.end > lp.start && b >= lp.end) b = lp.start + ((b - lp.start) % (lp.end - lp.start));
-  showPlayhead(b);
+  showPlayhead(Math.max(0, b));  // a count-in runs before the start
   L.raf = requestAnimationFrame(liveTick);
 }
 function liveTag(el, what) {
   const L = S.eng, st = L.st, d = st.device;
   el.title = (st.on && d ? `${d.name} · ${d.sr} Hz · ${d.block} samples · CPU ${Math.round((st.cpu || 0) * 100)}% · ${st.dropouts || 0} dropout(s)\n` : "")
     + (st.on && d && d.converted ? `The project is ${d.rate} Hz and this output cannot run at that rate: playback is converted to ${d.sr} Hz.\n` : "")
-    + (st.error ? st.error + "\n" : "") + "Live is the raw mix: no loudness normalisation or limiter, unlike an export.";
+    + (st.error ? st.error + "\n" : "") + "Live is the raw mix: no loudness normalisation or limiter, unlike an export."
+    + (st.on ? "\nClick: choose the audio device to play through and record from." : "");
   const cut = (s) => s.length > 40 ? s.slice(0, 39) + "…" : s;
   const [text, cls] = st.loading || L.busy ? ["LIVE · LOADING", "tag stale"] : st.error ? ["LIVE · " + cut(st.error), "tag bad"]
+    : st.recording ? [what + "LIVE · REC", "tag bad"]
     : st.on ? [what + "LIVE · " + (d ? d.type : "?"), "tag cy"] : ["LIVE · READY", "tag"];
-  el.textContent = text; el.className = cls;
+  el.textContent = text; el.className = cls + (st.on ? " pick" : "");  // pick: a click opens the device menu (tracking.js)
 }
 const peakPct = (p) => p > 0 ? Math.max(0, Math.min(100, (20 * Math.log10(p) + 60) / 60 * 100)) : 0;
 function liveMeters() {
@@ -1129,9 +1180,14 @@ function renderBrief() {
 function modal(html) { $("#modalBox").innerHTML = html; $("#modal").classList.remove("hidden"); return $("#modalBox"); }
 function closeModal() { $("#modal").classList.add("hidden"); }
 $("#modal").addEventListener("mousedown", (e) => { if (e.target.id === "modal") closeModal(); });
+// items: [label, fn]; an item without fn is a section heading.
 function menu(e, items) {
   const m = $("#menu"); m.innerHTML = ""; if (!items.length) return;
-  items.forEach(([label, fn]) => { const d = document.createElement("div"); d.textContent = label; d.onclick = () => { m.classList.add("hidden"); fn(); }; m.appendChild(d); });
+  items.forEach(([label, fn]) => {
+    const d = document.createElement("div"); d.textContent = label;
+    if (fn) d.onclick = () => { m.classList.add("hidden"); fn(); }; else d.className = "mh";
+    m.appendChild(d);
+  });
   m.style.left = Math.min(e.clientX, innerWidth - 200) + "px"; m.style.top = Math.min(e.clientY, innerHeight - items.length * 30 - 10) + "px";
   m.classList.remove("hidden");
 }
