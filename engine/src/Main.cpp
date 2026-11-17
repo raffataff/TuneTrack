@@ -699,6 +699,12 @@ public:
                     }
             return reply (cmd, object ({}));
         }
+        if (op == "mix")
+        {
+            // a fader, pan or send being moved: heard now, no reload (the saved project reloads afterwards)
+            const auto problems = session.mix (cmd["set"]);
+            return reply (cmd, object ({ { "problems", problems } }));
+        }
         if (op == "stop")
         {
             transport.playing = false;

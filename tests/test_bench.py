@@ -206,3 +206,24 @@ def test_a_bus_cannot_be_routed_back_into_itself(song):
             api.track_update(bad, output=a)
     api.track_update(a, output="master")
     api.track_update(b, output=a)  # the other way round is fine once the first route is gone
+
+
+def test_the_console_gets_each_effects_settings(song):
+    api.fx_add("Piano", "builtin:eq")
+    api.fx_update("Piano", 0, params={"mid_gain": -4.5, "lpf": 30000})
+    api.fx_add("master", "builtin:compressor")
+    b = seat_bench("mix")
+    eq = _track(b, "Piano")["fx"][0]
+    assert eq["type"] == "builtin" and eq["name"] == "eq" and eq["device"] == "builtin:eq"
+    knobs = {s["name"]: s for s in eq["settings"]}
+    assert knobs["mid_gain"]["value"] == -4.5 and knobs["mid_gain"]["default"] == 0
+    assert knobs["mid_gain"]["lo"] < 0 < knobs["mid_gain"]["hi"] and knobs["mid_freq"]["log"] is True
+    assert knobs["lpf"]["hi"] == 30000  # a stored value past the knob's travel widens it
+    comp = b["master"]["fx"][0]
+    assert comp["device"] == "builtin:compressor" and [s["name"] for s in comp["settings"]][:2] == ["threshold", "ratio"]
+
+
+def test_a_plugin_effect_names_the_device_plugin_params_takes():
+    fx = bench._fx({"type": "vst3", "name": "Some EQ", "patch": "warm", "params": {"Gain": 0.4}})
+    assert fx["device"] == "patch:warm" and fx["params"] == {"Gain": 0.4} and "settings" not in fx
+    assert bench._fx({"type": "vst3", "name": "Some EQ"})["device"] == "vst3:Some EQ"

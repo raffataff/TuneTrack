@@ -15,6 +15,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -25,15 +26,15 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import api, bench, config, livehost, picture as pic, studio, takes, tracking
+from . import api, bench, config, gear, livehost, picture as pic, studio, styles, takes, tracking
 from .crew import detect, host, scorecard
 
 PORT = 7373
 WEB = Path(__file__).parent / "web"
 # Only what the editor UI uses. Imports, patch deletion, opening files/apps etc. stay agent/CLI-only.
 CALLABLE = {
-    "audition", "clip_create", "clip_edit", "clip_set", "comp", "fx_add", "fx_remove", "fx_update", "harmony", "hits",
-    "library_status", "markers", "patch_capture", "picture", "plugin_params", "preview", "project_list",
+    "audition", "automation", "clip_create", "clip_edit", "clip_set", "comp", "fx_add", "fx_remove", "fx_update",
+    "harmony", "hits", "library_status", "markers", "patch_capture", "picture", "plugin_params", "preview", "project_list",
     "project_new", "project_open", "project_set", "redo", "render", "sfz_list", "synths_list", "tempo_fit",
     "track_add", "track_duplicate", "track_move", "track_remove", "track_update", "undo",
 }
@@ -100,6 +101,11 @@ def live_loop(on: bool) -> dict:
     return livehost.loop(on)
 
 
+def live_mix(changes: list, take: str | None = None) -> dict:
+    """A fader, pan or send being dragged, heard at once on LIVE (see livehost.mix); the drag saves on release."""
+    return livehost.mix(_live_path(take), changes)
+
+
 def live_window(track: str, slot: str | int = "inst", take: str | None = None) -> dict:
     """Open a hosted plugin's own window on this computer (slot: "inst" or the effect's number, 0 = first)."""
     return livehost.window(_live_path(take), track, slot)
@@ -161,6 +167,48 @@ def live_state() -> dict:
     return livehost.state()
 
 
+def gear_audition(item: str, phrase: str = "auto", live: bool = False) -> dict:
+    """Hear gear in the open project's key and tempo: looping on the live engine, or a short render."""
+    cur = _current()
+    kw = {}
+    if cur:
+        from .model import Project
+        pr = Project.load(cur)
+        kw = {"key": pr.key, "tempo": pr.tempo, "time_sig": pr.time_sig}
+    return gear.audition(item, phrase, bool(live), **kw)
+
+
+def gear_audition_stop(take: str | None = None) -> dict:
+    """Stop a live audition and point the engine back at what the Desk shows (the session, or its open take)."""
+    return gear.audition_stop(str(_live_path(take)) if _current() else None)
+
+
+UI_FILE = "ui.json"  # in the library: how the user has laid the rooms out (one set for every browser and the app)
+
+
+def ui_prefs(set: dict | None = None) -> dict:  # noqa: A002 - the page's word for it
+    """The UI's layout and switches, kept in the library so the desktop app and any browser share them.
+    set: keys to change (a key set to null is removed). Returns everything kept."""
+    f = config.HOME / UI_FILE
+    try:
+        prefs = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    except (OSError, ValueError):
+        prefs = {}
+    if set:
+        if not isinstance(set, dict) or len(json.dumps(set)) > 20000:
+            raise ValueError("set: a small object of layout keys")
+        for k, v in set.items():
+            if v is None:
+                prefs.pop(str(k), None)
+            else:
+                prefs[str(k)] = v
+        config.HOME.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(prefs, indent=1), encoding="utf-8")
+        tmp.replace(f)
+    return prefs
+
+
 # The studio board, as the user (this server never speaks for a seat). Read-only calls and the user's own
 # decisions: assigning seats, handing out tasks, talkback, answering Needs You, accepting or returning takes,
 # cutting and handing in a take of their own, and starting or stopping the crew.
@@ -170,10 +218,12 @@ STUDIO = {f.__name__: f for f in (
     takes.take_list, takes.take_diff, takes.take_accept, takes.take_reject, takes.take_discard,
     takes.take_audition, takes.take_submit, takes.take_sync, take_cut, host.crew_start, host.crew_stop, host.crew_state, host.seat_hold, crew_detect,
     studio_view, bench.seat_bench, studio.report_list, studio.report_read,
-    scorecard.crew_scorecard, scorecard.crew_review, scorecard.crew_history,
+    scorecard.crew_scorecard, scorecard.crew_review, scorecard.crew_history, scorecard.crew_pick,
     live_play, live_stop, live_seek, live_loop, live_window, live_off, live_state,
     live_inputs, live_arm, live_click, live_keys, live_record, live_record_stop, live_devices, live_device,
-    live_guide,
+    live_guide, live_mix, ui_prefs,
+    gear.catalog, gear.gear_state, gear.gear_seen, gear.gear_folders, gear.gear_rescan, gear_audition,
+    gear_audition_stop, styles.style_list,
 )}
 TOKEN = secrets.token_urlsafe(32)
 _HOSTS = {"127.0.0.1", "localhost", "[::1]"}
@@ -404,7 +454,15 @@ async def events(req: Request):
             await asyncio.sleep(0.25)
             idle += 0.25
 
-    return StreamingResponse(stream(), media_type="text/event-stream",
+    async def counted():  # every open page holds one of these streams: that is how app mode knows a window is open
+        _page_opened()
+        try:
+            async for chunk in stream():
+                yield chunk
+        finally:
+            _page_closed()
+
+    return StreamingResponse(counted(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
@@ -528,13 +586,16 @@ def is_running() -> bool:
         return False
 
 
-def ensure_running() -> str:
-    """Start the editor server in the background if it isn't up yet."""
+def ensure_running(app_mode: bool = False) -> str:
+    """Start the editor server in the background if it isn't up yet. app_mode: the server quits by itself once no
+    page has been open for IDLE_QUIT_S (`tunetrack app`, whose window is the only way in). A server that is already
+    up is used as it is."""
     if not is_running():
         flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) \
             | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         log = open(config.HOME / "server.log", "a", encoding="utf-8")  # noqa: SIM115 - handed to the child
-        subprocess.Popen([sys.executable, "-m", "tunetrack.server"], stdout=log, stderr=log,
+        cmd = [sys.executable, "-m", "tunetrack.server"] + (["--idle-quit"] if app_mode else [])
+        subprocess.Popen(cmd, stdout=log, stderr=log,
                          stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True)
         for _ in range(40):
             if is_running():
@@ -543,15 +604,69 @@ def ensure_running() -> str:
     return url()
 
 
-def main(port: int = PORT) -> None:
+# App mode (`tunetrack app`): the server goes away when its window does. Pages are counted by their /api/events
+# stream; the server quits once none has been open for IDLE_QUIT_S, or none arrived within FIRST_PAGE_S of start.
+IDLE_QUIT_S = 90.0
+FIRST_PAGE_S = 120.0
+_pages_lock = threading.Lock()
+_pages = 0
+_last_page: float | None = None  # time.monotonic() when a page last opened or closed; None: no page yet
+
+
+def _page_opened() -> None:
+    global _pages, _last_page
+    with _pages_lock:
+        _pages += 1
+        _last_page = time.monotonic()
+
+
+def _page_closed() -> None:
+    global _pages, _last_page
+    with _pages_lock:
+        _pages = max(0, _pages - 1)
+        _last_page = time.monotonic()
+
+
+def _should_quit(now: float, pages: int, last_seen: float | None, started: float, busy: bool) -> bool:
+    """Whether an app-mode server should shut down: no page open, nothing busy (a crew at work, a recording), and
+    IDLE_QUIT_S since the last page went (FIRST_PAGE_S since start if no page ever came)."""
+    if pages > 0 or busy:
+        return False
+    if last_seen is None:
+        return now - started >= FIRST_PAGE_S
+    return now - last_seen >= IDLE_QUIT_S
+
+
+def _busy() -> bool:
+    """A crew hosted by this server is running, or the live engine is recording."""
+    with host._lock:
+        crews = list(host._hosts.values())
+    return any(h["thread"].is_alive() for h in crews) or livehost._rec is not None
+
+
+def _idle_watch(srv, started: float, every: float = 5.0) -> None:
+    while not srv.should_exit:
+        time.sleep(every)
+        with _pages_lock:
+            pages, last = _pages, _last_page
+        if _should_quit(time.monotonic(), pages, last, started, _busy()):
+            print("tunetrack app: no window open, shutting down", flush=True)
+            srv.should_exit = True
+
+
+def main(port: int = PORT, idle_quit: bool = False) -> None:
     import uvicorn
     config.ensure_dirs()
+    gear.start_watch()  # new plugins and libraries are scanned as they arrive
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    if idle_quit:
+        threading.Thread(target=_idle_watch, args=(srv, time.monotonic()), daemon=True, name="idle-quit").start()
     try:
-        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+        srv.run()
     finally:
         host.stop_all()  # agents the editor started don't outlive it
         livehost.off()   # nor does the live engine (it holds the audio interface)
 
 
 if __name__ == "__main__":
-    main()
+    main(idle_quit="--idle-quit" in sys.argv[1:])

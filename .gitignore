@@ -23,6 +23,11 @@ library/patches/surge-xt-*
 library/patches/dexed-*
 library/.params_*
 library/agents.json
+# the UI's layout, the desktop app's browser profile, which gear the user has seen, the live audition's session
+library/ui.json
+library/app-profile/
+library/gear.json
+library/audition-live/
 # per-session crew usage, keyed by local project paths
 library/crew_history.json
 

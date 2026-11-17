@@ -61,6 +61,9 @@ class Clip:
     color: str | None = None
     # which recording pass this is on its track (tracking.py): passes share a stretch of time and one is heard
     lane: int = 0
+    # which recording and which time round the loop a pass came from, "<stamp>/<round>" (tracks recorded together
+    # share the stamp); None on clips that were not recorded, or recorded before passes said so
+    rec: str | None = None
     # midi
     notes: list[Note] = field(default_factory=list)
     cc: dict[str, list[list[float]]] = field(default_factory=dict)  # "1": [[beat, 0..127]], "bend": [[beat, -1..1]]
@@ -90,6 +93,8 @@ class Clip:
             d["color"] = self.color
         if self.lane:
             d["lane"] = int(self.lane)
+        if self.rec:
+            d["rec"] = self.rec
         if self.kind == "midi":
             self.sort()
             d["notes"] = [n.to_json() for n in self.notes]
@@ -108,7 +113,7 @@ class Clip:
     def from_json(cls, d: dict) -> "Clip":
         c = cls(id=d["id"], kind=d.get("kind", "midi"), name=d.get("name", ""), start=float(d.get("start", 0)),
                 length=float(d.get("length", 4)), muted=bool(d.get("muted", False)), color=d.get("color"),
-                lane=int(d.get("lane") or 0))
+                lane=int(d.get("lane") or 0), rec=d.get("rec") or None)
         c.notes = [Note.from_json(n) for n in d.get("notes", [])]
         c.cc = {str(k): [[float(b), float(v)] for b, v in pts] for k, pts in d.get("cc", {}).items()}
         c.file = d.get("file")

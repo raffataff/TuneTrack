@@ -23,8 +23,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .. import config, roles, studio, takes
-from ..model import LockTimeout, _os_lock, _os_unlock
+from .. import config, roles, studio, styles, takes
+from ..model import LockTimeout, Project, _os_lock, _os_unlock
 from . import briefs, runners
 
 TEXT_LIMIT = 400  # an error line
@@ -324,6 +324,11 @@ class Floor:
                 if not take:
                     made = takes.take_new(task["title"], task["id"], seat, use=False, session=self.session)
                     take = next(t for t in studio.take_index(self.path) if t["id"] == made["take"])
+            # A run that only auditions goes on the seat's cheaper audition model, if it names one. The audition
+            # that may close the last open work stays on the main model: that run is where the final listen is.
+            model = occ.get("model")
+            if audition and occ.get("audition_model") and not self._last_work(task, asked, more, st):
+                model = occ["audition_model"]
             project = (self.path / "takes" / take["id"] if take else
                        self.path / "takes" / audition["take"] if audition else self.path)
             unread = studio.inbox(seat, mark_read=False, session=self.session)["messages"]
@@ -334,8 +339,8 @@ class Floor:
             (self.path / "studio" / "logs").mkdir(parents=True, exist_ok=True)
             work.mkdir(parents=True, exist_ok=True)
             launch = runners.Launch(
-                runner=occ["runner"], model=occ.get("model"), effort=occ.get("effort"),
-                system=briefs.system(seat, in_take, s.get("notes", "")),
+                runner=occ["runner"], model=model, effort=occ.get("effort"),
+                system=briefs.system(seat, in_take, s.get("notes", ""), self._style()),
                 prompt=briefs.task_prompt(task, studio.studio_status(self.session), take,
                                           [done[d] for d in task.get("depends", []) if d in done],
                                           unread, audition, asked, more),
@@ -343,7 +348,7 @@ class Floor:
                 mcp={"tunetrack": {"command": sys.executable, "args": ["-m", "tunetrack.mcp_server"], "env": env}},
                 log=str(self.path / "studio" / "logs" / f"{task['id']}-{task.get('attempts', 0) + 1}-{seat}.jsonl"))
             if occ["runner"] == "script":
-                launch.script, launch.model = occ.get("model"), None
+                launch.script, launch.model = model, None
             run = self._start(launch)
         except Exception as e:  # noqa: BLE001 - a seat that cannot start is the user's to see, not a crash
             self._blocker(task, f"{roles.get(seat).title} could not start", f"{type(e).__name__}: {e}",
@@ -354,8 +359,11 @@ class Floor:
         for t, _a, _q in more:
             studio.task_update(t["id"], state="working", session=self.session)
         studio.seat_presence(seat, "online", session=self.session, pid=run.pid)
+        ran = occ if model == occ.get("model") else {**occ, "model": model, "label": None}
+        # runner/model/effort let the crew history propose this occupant again (scorecard.crew_pick)
         studio.log("run", self.session, seat=seat, task=task["id"], what="start",
-                   agent=studio.occupant_label(occ), take=take["id"] if take else None,
+                   agent=studio.occupant_label(ran), runner=occ["runner"], model=model, effort=occ.get("effort"),
+                   take=take["id"] if take else None,
                    **({"also": [t["id"] for t, _a, _q in more]} if more else {}))
         rec = {"run": run, "task": task["id"], "started": time.time(), "take": take["id"] if take else None,
                "seen": [m["id"] for m in unread], "also": [t["id"] for t, _a, _q in more]}
@@ -382,6 +390,21 @@ class Floor:
                 continue
             out.append((t, takes.take_diff(tk["id"], self.session), tasks.get(tk.get("task") or "")))
         return out
+
+    def _style(self) -> str | None:
+        """The session's genre style sheet, read at each launch (the Producer may set it mid-session)."""
+        try:
+            return styles.pick(Project.load(self.path).brief)
+        except (OSError, ValueError, KeyError):
+            return None
+
+    @staticmethod
+    def _last_work(task: dict, asked: dict | None, more: list, st: dict) -> bool:
+        """True when nothing would be left open once this run's takes are accepted: no task besides these
+        auditions and the tasks their takes were made for. That run is where the Producer does its final listen."""
+        mine = {task["id"], (asked or {}).get("id")} | {t["id"] for t, _a, _q in more} | {
+            (q or {}).get("id") for _t, _a, q in more}
+        return not any(t["state"] in studio.OPEN and t["id"] not in mine for t in st["tasks"])
 
     def _settle_also(self, rec: dict, ok: bool, paused: bool, said: str) -> None:
         """The other auditions heard in a run that has ended. One the Producer decided is closed already (a take's
@@ -419,9 +442,13 @@ class Floor:
                 elif kind == "error":
                     errors.append(str(ev.get("message", ""))[:TEXT_LIMIT])
                 elif kind == "usage":
+                    used = rec.setdefault("used", {"input_tokens": 0, "output_tokens": 0})  # this run, for the history
                     for k in ("input_tokens", "output_tokens"):
                         self.usage[k] += int(ev.get(k) or 0)
+                        used[k] += int(ev.get(k) or 0)
                     self.usage["cost_usd"] += float(ev.get("cost_usd") or 0.0)
+                    if ev.get("cost_usd") is not None:
+                        used["cost_usd"] = used.get("cost_usd", 0.0) + float(ev["cost_usd"])
                 elif kind == "done":
                     done = ev
         except Exception as e:  # noqa: BLE001
@@ -445,7 +472,7 @@ class Floor:
                f"it was stopped: its task now waits on {', '.join(held)}" if held else
                (errors[-1] if errors else ""))
         studio.log("run", self.session, seat=seat, task=tid, what="end", ok=bool(done.get("ok")), tools=tools,
-                   error=why or None)
+                   error=why or None, **rec.get("used", {}))
         if done.get("ok") and not why:  # the messages in its task message have been read: not sent again next time
             studio.messages_read(seat, rec.get("seen") or [], self.session)
         self._settle_also(rec, bool(done.get("ok")) and not why, bool(rec.get("paused") or held), said)

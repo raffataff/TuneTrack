@@ -45,6 +45,7 @@
     <button id="briefBtn" class="key" title="Give the Producer a new brief">BRIEF</button>
     <span id="crewRead" class="vfd small">STANDBY</span>
   </div>
+  <button id="gearBtn" class="key" title="Gear: every instrument and effect you have, new ones marked. Audition them and put them on a track."><i class="lamp"></i>GEAR <b id="gearCount"></b></button>
   <button id="needsBtn" class="key needs" title="What is waiting on you"><i class="lamp"></i>NEEDS YOU <b id="needsCount">0</b></button>
   <nav id="rooms" title="Studio: the crew. Desk: arrangement, piano roll and mixer.">
     <button data-room="studio" class="active">STUDIO</button><button data-room="desk">DESK</button>
@@ -159,7 +160,10 @@
 <div id="toast" class="hidden"></div>
 <script src="/web/app.js"></script>
 <script src="/web/picture.js"></script>
+<script src="/web/automation.js"></script>
 <script src="/web/tracking.js"></script>
 <script src="/web/studio.js"></script>
+<script src="/web/voice.js"></script>
+<script src="/web/gear.js"></script>
 </body>
 </html>

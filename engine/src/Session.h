@@ -43,6 +43,11 @@ public:
         pool.run (schedule.get(), numSamples);
     }
 
+    // Message thread. Move faders, pans and send levels at once, without a reload: [{id, db?, pan?}, {id, to, db}]
+    // (id "master" is the master fader; `to` names the bus a send goes to). The next apply() sets them from the
+    // spec again. Returns the changes that found nothing to move, or an empty string.
+    juce::String mix (const juce::var& changes);
+
     juce::var peaks();
     void resetBuiltIns();  // clear the state of every built-in synth, effect and SFZ instrument (not the hosted plugins)
     int latency() const { return totalLatency; }

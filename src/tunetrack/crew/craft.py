@@ -61,6 +61,10 @@ A loop is a whole number of bars and its last bar leads back into its first. Ada
 same key, tempo and length, tracks tagged with layer, render(layers=True).
 
 """ + GENRES + """
+Style sheets give each seat the detail of one genre: project_set(brief={"style": <name>}) with chiptune, lofi,
+orchestral, epic, synthwave, cozy, ambient, horror, electronic or playful ("none" for none). Unset, the words of
+brief.genre pick one. Set it while planning, before any part is written.
+
 Acoustic and orchestral parts need sampled instruments (patch: or sfz:). When status() shows none for the palette
 the brief asks for, that is the user's call (ask_human: capture patches, install a library, or a stylised synth
 version). Never plan a synth in an orchestra's place without saying so.
@@ -240,7 +244,8 @@ MIX = """Craft: balance first, then tone, then space.
   attack 0.002, release 0.12, makeup 0. A key that rings through the whole beat clamps instead of pumping: use a
   short key (a muted ghost-kick track works; a key still drives the compressor when muted). Waves plugins cannot
   be keyed. The report lists connections under sidechains.
-- A section that needs a different balance: automation(track, "volume_db", points). EQ cannot be automated.
+- A section that needs a different balance: automation(track, "volume_db", points); an EQ band or any effect
+  setting for a section: automation(track, param, points, device=<effect index>).
 - Loudness: the master is normalised to target_lufs (-16 by default). Menu and background cues sit at -18 to -20,
   battle at -14 to -16; set it with project_set when the brief implies one.
 - The notes are not yours. A part that cannot be fixed at the console (wrong register, two parts on the same

@@ -389,3 +389,84 @@ def test_each_keyboard_plays_the_track_that_listens_to_it(session):
         assert np.abs(mine).max() > 0.01 and rec["midi_src"] == [2, 2]
     finally:
         player.close()
+
+
+# ---- MIDI passes in a group comp; a punch round the loop ---------------------------------------------------------
+
+def test_midi_passes_carry_their_recording_and_follow_a_group_comp():
+    p = Project(name="m", tempo=120)
+    kit, keys, old = Track(id="t0", name="Kit", kind="audio"), Track(id="t1", name="Keys"), Track(id="t2", name="Old")
+    p.tracks += [kit, keys, old]
+    stamp = "20261117-150000"
+    # three times round 16 beats from the song's start: the kit on every round, the keyboard sat the first one out
+    ev = [x for r in (1, 2) for x in (r * 16 * BEAT + BEAT, 0x90, 60 + r, 100, r * 16 * BEAT + 2 * BEAT, 0x80, 60 + r, 0)]
+    rec = {"sr": SR, "marks": [0, 0, 16 * BEAT, 0, 32 * BEAT, 0], "samples": 48 * BEAT, "comp": {}, "midi": ev}
+    a = tracking.place_audio(p, kit, f"audio/rec/{stamp}-t0.wav", rec)
+    m = tracking.place_midi(p, keys, rec, stamp=stamp)
+    assert [c.rec for c in a] == [f"{stamp}/0", f"{stamp}/1", f"{stamp}/2"]
+    assert [(c.lane, c.rec) for c in m] == [(1, f"{stamp}/1"), (2, f"{stamp}/2")]
+    assert Clip.from_json(m[0].to_json()).rec == m[0].rec
+    old.clips = [Clip(id="o1", start=0, length=8, lane=1)]     # an old MIDI pass with no mark: left alone
+    p.next_id = 90
+    assert tracking.mates(p, kit, 0, 8, 2) == [(keys, 1)]       # the kit's second round is the keyboard's first pass
+    assert tracking.mates(p, kit, 0, 8, 1) == []                # nothing was played on the keyboard that round
+    assert tracking.mates(p, keys, 0, 8, 2) == [(kit, 3)]
+    assert tracking.split_clip(p, keys, m[0], 4).rec == m[0].rec
+
+
+def test_comp_group_follows_a_midi_track_through_the_api(tmp_path):
+    api.project_new("G", folder=str(tmp_path / "g"), tempo=120)
+    api.track_add("Gtr", kind="audio")
+    api.track_add("Keys", "synth:pluck")
+    p = api.load()
+    gtr, keys = p.track("Gtr").id, p.track("Keys").id
+    rec = {"sr": SR, "marks": [0, 0, 16 * BEAT, 0], "samples": 32 * BEAT, "comp": {}, "audio": {gtr: {}},
+           "midi": [BEAT, 0x90, 60, 100, 2 * BEAT, 0x80, 60, 0, 17 * BEAT, 0x90, 62, 100, 18 * BEAT, 0x80, 62, 0]}
+    tracking.commit(p.path, rec, {gtr: f"audio/rec/20261117-160000-{gtr}.wav"}, [keys])
+    assert {c.rec for c in api.load().track("Keys").clips} == {"20261117-160000/0", "20261117-160000/1"}
+    res = api.comp("Gtr", 0, 4, use=1, group=True)
+    assert res["with"] == {"Keys": 1}
+    assert [(c.start, c.end, c.lane) for c in sorted(api.load().track("Keys").clips, key=lambda c: c.start)
+            if not c.muted] == [(0.0, 4.0, 1), (4.0, 16.0, 2)]
+
+
+@ENGINE_RUNS
+def test_a_punch_with_the_loop_on_is_a_pass_each_time_round(session, monkeypatch):
+    import time
+    from tunetrack import livehost, server
+    p, tmp, _played = session
+    monkeypatch.setattr(livehost, "NO_DEVICE", True)
+    api.project_set(loop="2:1-4:1")                       # beats 4..12; the punch is beats 6..10 inside it
+    rng = np.random.default_rng(11)
+    played = (0.2 * rng.standard_normal((12 * SR, 2))).astype(np.float32)
+    sf.write(str(tmp / "in12.wav"), played, SR, subtype="FLOAT")
+    gtr, keys = p.track("Gtr").id, p.track("Keys").id
+    # a note at song beat 7 each time round: the recording starts at beat 2 (a bar of count-in) and wraps back
+    # to beat 4 after 10 beats and after 18
+    at = (5, 13, 21)
+    ev = [[b * BEAT, 0x90, 60 + i, 100] for i, b in enumerate(at)] + \
+         [[b * BEAT + BEAT // 2, 0x80, 60 + i, 0] for i, b in enumerate(at)]
+    try:
+        server.live_arm("Gtr", arm=True)
+        server.live_arm("Keys", arm=True)
+        st = server.live_record(beat=6.0, count_in=1, until=10.0, loop=True)
+        assert st["recording"] and st["punch"] == [6.0, 10.0]
+        _pull(livehost._player.engine, tmp, 22 * BEAT, input=str(tmp / "in12.wav"), midi=sorted(ev), hold=True)
+        time.sleep(1.0)
+        assert livehost.state()["recording"]              # it does not stop by itself: round again until stopped
+        st = server.live_stop()
+        assert not st["recording"] and st["recorded"]["heard"] == {gtr: [2], keys: [2]}
+    finally:
+        server.live_off()
+    clips = sorted(api.load().track("Gtr").clips, key=lambda c: c.lane)
+    assert [(c.lane, c.start, round(c.length, 3), c.muted) for c in clips] == \
+        [(1, 6.0, 4.0, True), (2, 6.0, 4.0, False), (3, 6.0, 2.0, True)]   # each round kept inside the punch only
+    assert [round(c.offset, 4) for c in clips] == [2.0, 6.0, 10.0]
+    got = sf.read(str(api.load().root / clips[1].file), dtype="float32", always_2d=True)[0]
+    assert np.allclose(got[12 * BEAT:16 * BEAT, 0], played[12 * BEAT:16 * BEAT, 1], atol=2e-7)
+    kc = sorted(api.load().track("Keys").clips, key=lambda c: c.lane)
+    assert [[(n.pitch, c.start + n.start) for n in c.notes] for c in kc] == [[(60, 7.0)], [(61, 7.0)], [(62, 7.0)]]
+    assert {c.rec.split("/")[0] for c in kc} == {clips[0].rec.split("/")[0]}
+    res = api.comp("Gtr", 6, 10, use=1, group=True)       # the first round, on both tracks
+    assert res["with"] == {"Keys": 1}
+    assert [c.lane for c in api.load().track("Keys").clips if not c.muted and c.start < 10 and c.end > 6] == [1]

@@ -747,3 +747,76 @@ def test_seats_that_add_tasks_are_shown_the_open_work(song, tmp_path):
     assert "Open tasks" not in briefs.task_prompt(st["T1"], board)  # a Composer adds none
     prod = briefs.system("producer", False)
     assert "task_update(task, detail=...)" in prod and "task_add only for work none of them covers" in prod
+
+
+AUDITIONER = """
+    take = re.search(r"handed in (tk\\d+)", prompt)
+    say(type="usage", input_tokens=900, output_tokens=100, cost_usd=0.02)
+    if take:
+        tool("take_accept"); takes.take_accept(take.group(1))
+    tool("status")
+    say(type="text", text="Accepted." if take else "Planned.")
+"""
+
+
+def _producer_with_audition_model(tmp_path) -> tuple[str, str]:
+    main, cheap = agent(tmp_path, "main", AUDITIONER), agent(tmp_path, "cheap", AUDITIONER)
+    studio.seat_assign("producer", "agent", runner="script", model=main, audition_model=cheap)
+    return main, cheap
+
+
+def _starts() -> list[dict]:
+    return [e for e in studio.events(limit=500)["events"] if e["kind"] == "run" and e.get("what") == "start"]
+
+
+def test_an_audition_only_run_goes_on_the_seats_cheaper_model(song, tmp_path):
+    main, cheap = _producer_with_audition_model(tmp_path)
+    assert [s.get("auditions") for s in studio.studio_status()["seats"] if s["seat"] == "producer"] == [cheap]
+    assert "auditions" not in json.dumps(studio.studio_status(lean=True))  # agents are not told
+    studio.task_add("mix", "Mix it")  # open work after this take: this audition is not where the cue is finished
+    _handed_in()
+    out = floor.Floor(song).run(poll=0.05)
+    assert out["launches"] == 1 and (69, 8.0) in piano(song)
+    [start] = _starts()
+    assert (start["model"], start["runner"], start["agent"]) == (cheap, "script", f"script · {cheap}")
+    [aud] = [t for t in studio.task_list(state="done")["tasks"] if t["title"].startswith("Audition")]
+    assert aud["result"] == "tk1 accepted"
+
+
+def test_the_last_audition_and_planning_stay_on_the_main_model(song, tmp_path):
+    main, cheap = _producer_with_audition_model(tmp_path)
+    _handed_in()  # nothing else open: accepting it may finish the cue, so the final listen is in this run
+    floor.Floor(song).run(poll=0.05)
+    assert [e["model"] for e in _starts()] == [main]
+    studio.task_add("producer", "Plan the next cue")
+    studio.task_add("mix", "Mix it")
+    floor.Floor(song).run(poll=0.05)  # not an audition: on the main model even with other work open
+    assert [e["model"] for e in _starts()] == [main, main]
+
+
+def test_the_audition_model_is_kept_cleared_and_only_for_agents(song, tmp_path):
+    main, cheap = _producer_with_audition_model(tmp_path)
+    studio.seat_assign("producer", "agent", runner="script", model=main)  # same runner, not given: kept
+    assert studio.read()["seats"]["producer"]["occupant"]["audition_model"] == cheap
+    studio.seat_assign("producer", model=main)  # an update without it keeps it too
+    assert studio.read()["seats"]["producer"]["occupant"]["audition_model"] == cheap
+    studio.seat_assign("producer", "agent", runner="kilo", model="paid")  # another runner: its models differ
+    assert "audition_model" not in studio.read()["seats"]["producer"]["occupant"]
+    assert studio.seat_assign("producer", audition_model="free")["auditions"] == "free"
+    assert "auditions" not in studio.seat_assign("producer", audition_model="")
+    assert studio.read()["seats"]["producer"]["occupant"]["audition_model"] is None
+    studio.seat_assign("producer", "human")
+    with pytest.raises(ValueError, match="agent"):
+        studio.seat_assign("producer", audition_model="free")
+
+
+def test_a_runs_usage_is_kept_on_its_end_event_and_in_the_scorecard(song, tmp_path):
+    from tunetrack.crew import scorecard
+    main, cheap = _producer_with_audition_model(tmp_path)
+    _handed_in()
+    floor.Floor(song).run(poll=0.05)
+    [end] = [e for e in studio.events(limit=500)["events"] if e["kind"] == "run" and e.get("what") == "end"]
+    assert (end["input_tokens"], end["output_tokens"], end["cost_usd"]) == (900, 100, 0.02)
+    [row] = [r for r in scorecard.crew_scorecard()["rows"] if r["seat"] == "producer"]
+    assert (row["runner"], row["model"], row["tokens"], row["metered"], row["priced"]) == ("script", main, 1000, 1, 1)
+    assert row["usd_per_take"] == 0.02 and row["tokens_per_take"] == 1000  # one finished task, no takes of its own

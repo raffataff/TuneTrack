@@ -18,7 +18,7 @@ import math
 import re
 from pathlib import Path
 
-from . import harmony, roles, studio, takes
+from . import harmony, roles, studio, synths, takes
 from . import picture as pic
 from .model import Project
 
@@ -58,8 +58,53 @@ def _source(path: Path, seat: str, take: str | None) -> tuple[Path, dict | None,
     return path, None, mine
 
 
+# The console's knobs for the built-in effects: (low, high, step, unit, log scale) per setting. The effect's own
+# entry wins over the setting's name ("rate" is Hz of wobble on the chorus, a sample rate on the bitcrusher).
+_HZ = (20.0, 20000.0, 1.0, "Hz", True)
+_DB = (-24.0, 24.0, 0.1, "dB", False)
+_MIX = (0.0, 1.0, 0.01, "", False)
+_RANGE = {
+    "hpf": _HZ, "lpf": _HZ, "low_freq": _HZ, "mid_freq": _HZ, "high_freq": _HZ, "damping": _HZ, "cutoff": _HZ,
+    "low_cut": _HZ, "low_gain": _DB, "mid_gain": _DB, "high_gain": _DB, "gain_db": _DB, "output": _DB,
+    "mid_q": (0.1, 10.0, 0.01, "", True), "q": (0.1, 10.0, 0.01, "", True),
+    "threshold": (-60.0, 0.0, 0.1, "dB", False), "ratio": (1.0, 20.0, 0.1, ":1", True),
+    "attack": (0.0005, 0.25, 0.0005, "s", True), "release": (0.01, 2.0, 0.01, "s", True),
+    "makeup": (0.0, 24.0, 0.1, "dB", False), "drive": (0.0, 36.0, 0.1, "dB", False), "mix": _MIX,
+    "predelay": (0.0, 250.0, 1.0, "ms", False), "decay": (0.1, 20.0, 0.1, "s", True),
+    "low_decay": (0.1, 20.0, 0.1, "s", True), "time": (0.0625, 4.0, 0.0625, "beats", False),
+    "feedback": (0.0, 0.95, 0.01, "", False), "spread": (0.0, 50.0, 0.5, "ms", False),
+    "depth": (0.0, 20.0, 0.1, "ms", False), "width": (0.0, 2.0, 0.01, "", False),
+    "mode": (0.0, 1.0, 1.0, "", False), "bits": (1.0, 16.0, 1.0, "bits", False),
+}
+_RANGE_FX = {("chorus", "rate"): (0.05, 10.0, 0.01, "Hz", True), ("bitcrush", "rate"): (1000.0, 48000.0, 1.0, "Hz", True),
+             ("filter", "mode"): (0.0, 1.0, 1.0, "LP/HP", False)}
+
+
+def _settings(name: str, params: dict) -> list[dict]:
+    """A built-in effect's settings as the console draws them: value, default and the knob's travel."""
+    entry = synths.FX.get(name)
+    if not entry:
+        return []
+    out = []
+    for k, dflt in entry[1].items():
+        v = params.get(k, dflt)
+        lo, hi, step, unit, log = _RANGE_FX.get((name, k)) or _RANGE.get(k) or (
+            min(0.0, dflt * 4), max(1.0, abs(dflt) * 4), 0.01, "", False)  # a setting nobody gave a range yet
+        if isinstance(v, (int, float)):  # a stored value outside the travel widens it rather than being clipped
+            lo, hi = min(lo, float(v)), max(hi, float(v))
+            log = log and lo > 0  # a log knob cannot reach zero
+        out.append({"name": k, "value": v, "default": dflt, "lo": lo, "hi": hi, "step": step, "unit": unit, "log": log})
+    return out
+
+
 def _fx(f: dict) -> dict:
-    out = {"label": f"{f['name']} · {f['patch']}" if f.get("patch") else f["name"]}
+    out = {"label": f"{f['name']} · {f['patch']}" if f.get("patch") else f["name"],
+           "type": f.get("type"), "name": f.get("name"),
+           # what plugin_params takes for this effect (a patch loads with its saved state)
+           "device": f"patch:{f['patch']}" if f.get("patch") else f"{f.get('type')}:{f.get('name')}",
+           "params": dict(f.get("params") or {})}
+    if f.get("type") == "builtin":
+        out["settings"] = _settings(f["name"], out["params"])
     if f.get("bypass"):
         out["bypass"] = True
     if f.get("automation"):
