@@ -7,9 +7,9 @@
 const SHORT = { producer: "PROD", spotting: "SPOT", composer: "COMP", arranger: "ARR", rhythm: "RHY", sound: "SND", tracking: "TRK", mix: "MIX", review: "REV" };
 const TABS = ["bench", "tasks", "takes", "log", "setup"];
 // The first tab is the seat's own bench: its work in the form that seat reads it in (bench.py decides which).
-const VIEW = { producer: "plan", spotting: "plan", composer: "notes", arranger: "notes", rhythm: "notes", tracking: "notes", sound: "sound", mix: "mix", review: "report" };
-const BENCH_NAME = { plan: "plan", notes: "roll", sound: "sounds", mix: "console", report: "report" };
-const DESK_TAB = { plan: "brief", notes: "roll", sound: "inspector", mix: "mixer", report: "report" };
+const VIEW = { producer: "plan", spotting: "picture", composer: "notes", arranger: "notes", rhythm: "notes", tracking: "notes", sound: "sound", mix: "mix", review: "report" };
+const BENCH_NAME = { plan: "plan", picture: "cues", notes: "roll", sound: "sounds", mix: "console", report: "report" };
+const DESK_TAB = { plan: "brief", picture: "brief", notes: "roll", sound: "inspector", mix: "mixer", report: "report" };
 const OPEN_STATES = ["queued", "working", "submitted", "needs_you"];
 const ST = {
   board: null, crew: null, project: null, open: null, tab: {}, units: {}, act: {}, feed: [], lastSeq: 0, es: null,
@@ -338,7 +338,7 @@ function benchWork(body, s) {
       ${src.take ? abKeys(src.take) : ""}<button class="key" data-do="desk" title="${d.view === "mix" ? "Open this on the desk's mixer" : "Open this on the desk to edit it"}">OPEN ON DESK</button>
     </div><div class="workBody"></div>${d.truncated ? `<div class="meta">Too many notes to draw them all here: open it on the desk for the rest.</div>` : ""}</div>`;
   const box = body.querySelector(".workBody");
-  ({ notes: workRoll, mix: workConsole, sound: workSounds, plan: workPlan, report: workReport })[d.view](box, d, B, s);
+  ({ notes: workRoll, mix: workConsole, sound: workSounds, plan: workPlan, picture: workPicture, report: workReport })[d.view](box, d, B, s);
   wireAb(body);
   body.querySelectorAll("[data-hist]").forEach((b) => b.onclick = async () => {
     const redo = b.dataset.hist === "redo";
@@ -587,6 +587,84 @@ function workPlan(box, d) {
       ${lane("CHORDS", f.chords.map((c) => `<i class="chd" style="left:${pct(c.at)};width:${pct(c.len)}">${esc(c.name)}</i>`).join("") || `<span class="meta">no chord track yet</span>`)}
       ${d.tracks.map((t, i) => lane(esc(t.name), t.clips.map((c) => `<i class="clp" style="left:${pct(c[0])};width:${pct(c[1])};background:${trackColor(t, i)}"></i>`).join("") || (t.kind === "bus" ? `<span class="meta">bus</span>` : `<span class="meta">nothing written</span>`), t.clips.length || t.kind === "bus" ? "" : "bare")).join("")}</div>
     <div class="flow">${tasks.map((t) => `<div class="fl ${OPEN_STATES.includes(t.state) ? "" : "done"}"><span class="id">${esc(t.id)}</span><span class="st">${SHORT[t.seat] || esc(t.seat)}</span><span class="ti" title="${esc(t.detail || "")}">${esc(t.title)}</span>${(t.depends || []).length ? `<span class="dep">after ${esc(t.depends.join(" "))}</span>` : ""}<span class="tag ${TAG[t.state] || ""}">${esc(t.state.replace("_", " "))}</span></div>`).join("") || `<div class="empty">No tasks yet. BRIEF starts the session.</div>`}</div>`;
+}
+// Spotting: the picture as the music meets it. A timeline (film strip, cuts, loud production sound, bars, hits),
+// then the cue sheet with a frame per hit, the cuts and the stills. Read-only: hits are marked on the Desk.
+const mss = (t) => `${t < 0 ? "-" : ""}${Math.floor(Math.abs(t) / 60)}:${(Math.abs(t) % 60).toFixed(1).padStart(4, "0")}`;
+function workPicture(box, d, B, s) {
+  const P = d.picture, v = P.picture, f = d.form, take = d.source.take;
+  const q = take ? "&take=" + encodeURIComponent(take) : "";
+  const ver = encodeURIComponent(v ? `${v.file}:${(v.mark || []).join(":")}` : "");
+  const still = (st) => `/api/picture?kind=still&n=${st.n}${q}&v=${encodeURIComponent(st.file)}`;
+  const stills = P.stills.length ? `<div class="picSub">Stills</div><div class="stillsB">${P.stills.map((st) => `<figure><a href="${still(st)}" target="_blank" rel="noopener" title="Open the full image"><img loading="lazy" src="${still(st)}" alt="${esc(st.note || st.file)}"></a><figcaption>${esc(st.note || st.file)}</figcaption></figure>`).join("")}</div>` : "";
+  if (!v && !P.hits.length && !(P.gone || []).length) {
+    box.innerHTML = `<div class="empty">No picture and no hits yet. Set a video with + Pic on the Desk (or the picture tool), and mark hits with H or a double-click on the picture lane.</div>${stills}`;
+    return;
+  }
+  const miss = (h) => h.on ? `ON ${h.on.toUpperCase()}` : h.off_ms == null ? "—" : `${h.off_ms > 0 ? "+" : ""}${h.off_ms} ms`;
+  const row = (h, i, gone) => `<div class="cue ${gone ? "gone" : h.on ? "on" : h.soft ? "soft" : ""}">
+      ${v ? `<img class="th" loading="lazy" alt="" src="/api/picture?kind=frame&t=${h.t}&w=160${q}&v=${ver}">` : `<span class="th"></span>`}
+      <span class="id">${gone ? "×" : i + 1}</span><span class="nm" title="${esc(h.name)}">${esc(h.name)}</span>
+      <span class="num">${esc(h.tc || mss(h.t))}</span><span class="num">${esc(h.at)}</span><span class="miss">${miss(h)}</span>
+      <span class="tags">${h.soft ? `<span class="tag">SOFT</span>` : ""}${h.new ? `<span class="tag cy">NEW</span>` : ""}${gone ? `<span class="tag bad">REMOVED</span>` : ""}</span></div>`;
+  box.innerHTML = `<div class="planHead"><span class="vfd small">${v ? `${esc(v.file)} · ${mss(v.duration)} · ${esc(v.fps)} FPS · FIRST FRAME AT ${esc(v.start)} S${v.tc ? " · TC " + esc(v.tc) : ""}` : "NO VIDEO · HITS IN SONG TIME"} · ${esc(+(+f.tempo).toFixed(2))} BPM</span>
+      ${v && v.size ? `<span class="tag">${esc(v.size.join("×"))}</span>` : ""}${v ? `<span class="tag">${v.audio ? "has sound" : "no sound"}</span>` : ""}<span class="tag">${P.hits.length} HIT${P.hits.length === 1 ? "" : "S"}</span>${v ? `<span class="tag">${P.cuts.length} CUT${P.cuts.length === 1 ? "" : "S"}</span>` : ""}</div>
+    <div class="picTL"><canvas></canvas></div>
+    <div class="cues">${P.hits.map((h, i) => row(h, i)).join("") || `<div class="meta">No hits yet: H or a double-click on the Desk's picture lane marks one.</div>`}${(P.gone || []).map((h) => row(h, 0, true)).join("")}</div>
+    ${P.cuts.length ? `<div class="picSub">Cuts</div><div class="cutsL">${P.cuts.map(([t, at]) => `<span>${mss(t)} · ${esc(at)}</span>`).join("")}</div>` : v ? `<div class="meta">No cuts found${P.strip ? "" : " (the picture has not been read yet)"}.</div>` : ""}
+    ${stills}`;
+  const cv = box.querySelector("canvas"), wrap = cv.parentElement;
+  // the strip is one image for the whole picture: loaded once per file, then every redraw just paints it
+  const key = v && P.strip ? `/api/picture?kind=strip${q}&v=${ver}` : "";
+  if ((B.strip || {}).key !== key) { B.strip = { key, img: null }; if (key) { const im = new Image(); im.onload = () => { if (B.picDraw) B.picDraw(); }; im.src = key; B.strip.img = im; } }
+  const draw = () => {
+    if (!cv.isConnected) return;
+    const span = Math.max(1, P.span), W = Math.max(200, wrap.clientWidth - 2), LAB = 3, H = 14 + 40 + 8 + LAB * 14 + 4;
+    const g = fitCanvas(cv, W, H), X = (t) => 4 + Math.max(0, Math.min(span, t)) * (W - 10) / span, SY = 14, SH = 40;
+    g.fillStyle = "#07090a"; g.fillRect(0, 0, W, H);
+    if (v) {
+      g.fillStyle = "#141416"; g.fillRect(X(0), SY, X(v.duration) - X(0), SH);
+      const im = B.strip && B.strip.img, m = P.strip;
+      if (im && im.complete && im.naturalWidth && m) {
+        const tw = SH * m.w / m.h;
+        for (let i = 0; i < m.n; i++) {
+          const a = X(i * m.step), b = X(Math.min(v.duration, (i + 1) * m.step));
+          g.save(); g.beginPath(); g.rect(a, SY, Math.max(1, b - a - 1), SH); g.clip();
+          for (let x = a; x < b; x += tw + 1) g.drawImage(im, i * m.w, 0, m.w, m.h, x, SY, tw, SH);
+          g.restore();
+        }
+      }
+      g.strokeStyle = "#3b3b40"; g.strokeRect(Math.round(X(0)) + 0.5, SY + 0.5, Math.round(X(v.duration) - X(0)) - 1, SH - 1);
+      g.fillStyle = "rgba(92,200,255,.28)";  // loud production sound: dialogue and effects the music plays around
+      for (const [a, b] of P.loud) g.fillRect(X(a), SY + SH + 2, Math.max(1, X(b) - X(a)), 4);
+      g.fillStyle = "rgba(92,200,255,.8)";
+      for (const [t] of P.peaks) g.fillRect(Math.round(X(t)), SY + SH + 1, 1, 6);
+      g.fillStyle = "rgba(255,255,255,.8)";
+      for (const [t] of P.cuts) { g.fillRect(Math.round(X(t)), SY - 3, 1, 5); g.fillRect(Math.round(X(t)), SY + SH - 2, 1, 5); }
+    }
+    g.font = "9px Consolas, monospace"; g.textBaseline = "alphabetic";
+    const barW = P.bars.length > 1 ? X(P.bars[1][0]) - X(P.bars[0][0]) : W, every = barW >= 22 ? 1 : barW >= 11 ? 2 : barW >= 5 ? 4 : 8;
+    for (const [t, n] of P.bars) {
+      g.fillStyle = (n - 1) % 4 ? "rgba(255,255,255,.08)" : "rgba(255,255,255,.16)"; g.fillRect(Math.round(X(t)), 12, 1, H - 12);
+      if ((n - 1) % every === 0) { g.fillStyle = "#5a564d"; g.fillText(n, X(t) + 3, 10); }
+    }
+    // hits: a line down the whole timeline, the label in the first row it fits in
+    g.font = "10px Consolas, monospace"; g.textBaseline = "top";
+    const ends = new Array(LAB).fill(-1e9), LY = SY + SH + 9;
+    for (const [h, gone] of [...P.hits.map((x) => [x, false]), ...(P.gone || []).map((x) => [x, true])]) {
+      const x = Math.round(X(h.t)), col = gone ? "#ff4a3a" : h.on ? "#5fe07a" : h.soft ? "#b98a2c" : "#ffb000";
+      const label = h.name + (gone ? "  removed" : h.on ? `  ● ${h.on}` : h.off_ms == null ? "" : `  ${h.off_ms > 0 ? "+" : ""}${h.off_ms} ms`);
+      const w = g.measureText(label).width + 8;
+      let r = ends.findIndex((e) => e < x); if (r < 0) r = ends.indexOf(Math.min(...ends));
+      ends[r] = x + w + 4;
+      g.globalAlpha = gone ? 0.6 : 1; g.fillStyle = col;
+      if (gone) { for (let y = SY; y < H; y += 4) g.fillRect(x, y, 1, 2); } else g.fillRect(x, SY, h.soft ? 1 : 2, H - SY);
+      g.fillStyle = "rgba(9,9,10,.86)"; g.fillRect(x + 2, LY + r * 14, w, 13);
+      g.fillStyle = col; g.fillText(label, x + 6, LY + r * 14 + 2); g.globalAlpha = 1;
+      if (h.new) { g.fillStyle = "#5cc8ff"; g.fillRect(x - 2, SY - 4, 6, 3); }
+    }
+  };
+  B.picDraw = draw; draw();
 }
 // Review: the last render of what this seat is listening to, as measured.
 function workReport(box, d) {

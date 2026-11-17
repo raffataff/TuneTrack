@@ -127,6 +127,11 @@ def live_device(name: str | None = None, input: str | None = None, take: str | N
     return livehost.device(_live_path(take), name, input)
 
 
+def live_guide(db: float | None = None, take: str | None = None) -> dict:
+    """The picture's own sound under the music on LIVE at `db` (None: off). Never in a render."""
+    return livehost.guide(_live_path(take), db)
+
+
 def live_click(on: bool) -> dict:
     return livehost.click(on)
 
@@ -168,6 +173,7 @@ STUDIO = {f.__name__: f for f in (
     scorecard.crew_scorecard, scorecard.crew_review, scorecard.crew_history,
     live_play, live_stop, live_seek, live_loop, live_window, live_off, live_state,
     live_inputs, live_arm, live_click, live_keys, live_record, live_record_stop, live_devices, live_device,
+    live_guide,
 )}
 TOKEN = secrets.token_urlsafe(32)
 _HOSTS = {"127.0.0.1", "localhost", "[::1]"}
@@ -461,19 +467,45 @@ async def peaks(req: Request):
 
 async def picture_file(req: Request):
     """The open session's video (the browser's copy of it) or its thumbnail strip. Starlette answers Range
-    requests, which is what lets the page seek in the video."""
+    requests, which is what lets the page seek in the video. kind=frame&t=<picture s>&w=<120-480>: one frame as a
+    JPEG, kept in picture/frames/ (the page's URL carries a version, so it may cache it for good).
+    kind=still&n=<i>: a screenshot from brief.stills."""
     cur = _current()
     if not cur:
         return Response(status_code=404)
+    q, keep = req.query_params, "no-store"
     try:
-        d = _take_dir(cur, req.query_params["take"]) if req.query_params.get("take") else cur
+        d = _take_dir(cur, q["take"]) if q.get("take") else cur
         p = api.load(str(d))
-        f = pic._side(p, ".strip.jpg") if req.query_params.get("kind") == "strip" else pic.video_file(p, web=True)
-    except (KeyError, OSError, ValueError, TypeError):
+        kind = q.get("kind")
+        if kind == "strip":
+            f = pic._side(p, ".strip.jpg")
+        elif kind == "still":
+            n = int(q.get("n", ""))
+            stills = p.brief.get("stills") or []
+            f = p.root / stills[n]["file"] if 0 <= n < len(stills) else None
+        elif kind == "frame":
+            t, w, video = float(q.get("t", "")), int(q.get("w", "160")), pic.video_file(p, web=True)
+            fps = pic._fps(p)
+            if not (0 <= t <= float(p.picture.get("duration") or 0) + 1 and 120 <= w <= 480) \
+                    or not video or not video.is_file():
+                return Response(status_code=404)
+            frame = int(round(t * fps))
+            f = pic.folder(p) / "frames" / f"{video.stem}-{frame}-{w}.jpg"
+            if not f.is_file():
+                data = await run_in_threadpool(pic.frame_jpeg, video, frame / fps, w)
+                if not data:
+                    return Response(status_code=404)
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(data)
+            keep = "public, max-age=31536000, immutable"
+        else:
+            f = pic.video_file(p, web=True)
+    except (KeyError, IndexError, OSError, ValueError, TypeError, AttributeError, RuntimeError):
         return Response(status_code=404)
     if not f or not f.is_file() or cur.resolve() not in f.resolve().parents:
         return Response(status_code=404)
-    return FileResponse(f, headers={"Cache-Control": "no-store"})
+    return FileResponse(f, headers={"Cache-Control": keep})
 
 
 app = _HostGuard(Starlette(routes=[

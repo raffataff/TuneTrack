@@ -388,17 +388,19 @@ def project_info(project: str | None = None, clips: bool = True) -> dict:
 def _picture_line(p: Project) -> dict:
     d = p.picture
     return {"file": d["file"], "duration_s": d.get("duration"), "fps": d.get("fps"), "start_s": d.get("start", 0.0),
-            **({"tc": d["tc"]} if d.get("tc") else {})}
+            **({"tc": d["tc"]} if d.get("tc") else {}), **({"drop_frame": True} if d.get("df") else {})}
 
 
 # ---- picture ----------------------------------------------------------------------------------------------------
 
 def picture(file: str | None = None, start: float | None = None, clear: bool = False, note: str | None = None,
-            threshold: float = pic.CUT, project: str | None = None) -> dict:
+            threshold: float = pic.CUT, drop_frame: bool | None = None, remove_still: str | int | None = None,
+            project: str | None = None) -> dict:
     """The video the music is written to, and screenshots. file: a video (copied into the session, becomes the
     picture) or an image (kept as a screenshot with `note`). start: the song time in seconds at which the video's
-    first frame plays. No arguments: what is there - the cuts, where the production sound is loud, the hits."""
-    if file or start is not None or clear:
+    first frame plays. drop_frame: count timecode drop-frame (29.97 / 59.94 only). remove_still: a screenshot's
+    number (from 1) or file. No arguments: what is there - the cuts, where the production sound is loud, the hits."""
+    if file or start is not None or clear or drop_frame is not None or remove_still is not None:
         with _Edit(project) as p:
             if clear:
                 p.picture = None
@@ -410,14 +412,23 @@ def picture(file: str | None = None, start: float | None = None, clear: bool = F
                 if not p.picture:
                     raise ValueError("no picture to move: set one with picture(file=...)")
                 p.picture = {**p.picture, "start": round(float(start), 4)}
+            if drop_frame is not None:
+                if not p.picture:
+                    raise ValueError("no picture: set one with picture(file=...)")
+                if drop_frame and not pic._drop(float(p.picture.get("fps") or 0)):
+                    raise ValueError(f"drop-frame timecode is for 29.97 and 59.94 fps; this picture runs at "
+                                     f"{p.picture.get('fps')} fps")
+                p.picture = {**p.picture, "df": bool(drop_frame)}
+            if remove_still is not None:
+                pic.remove_still(p, remove_still)
     p = load(project)
     out: dict = {"picture": None}
     if p.picture:
-        sc, tm, fps, tc0 = pic.scan(p), p.tempo_map(), p.picture.get("fps") or 25.0, p.picture.get("tc")
+        sc, tm, (fps, tc0, df) = pic.scan(p), p.tempo_map(), pic.tc_args(p)
         where = lambda t: p.fmt_pos(round(tm.beat(pic.song_sec(p, t)), 2)) if pic.song_sec(p, t) >= 0 else None  # noqa: E731
         end = float(p.picture.get("duration") or 0)
         out["picture"] = {**_picture_line(p), "size": p.picture.get("size"), "ends_at": where(end),
-                          "ends_tc": pic.timecode(end, fps, tc0)}
+                          "ends_tc": pic.timecode(end, fps, tc0, df)}
         out["cuts"] = [[t, where(t)] for t in pic.cuts(p, float(threshold))]
         snd = sc.get("sound") or {}
         if snd:
@@ -439,15 +450,15 @@ def picture_frames(at=None, start=None, end=None, count: int = 12, project: str 
         return pic.stills_sheet(p, out)
     if not p.picture:
         raise ValueError("this project has no picture: set one with picture(file=...)")
-    fps, tc0, dur = p.picture.get("fps") or 25.0, p.picture.get("tc"), float(p.picture.get("duration") or 0)
-    a = pic.parse_time(start, fps, tc0) if start is not None else 0.0
-    b = pic.parse_time(end, fps, tc0) if end is not None else dur
+    (fps, tc0, df), dur = pic.tc_args(p), float(p.picture.get("duration") or 0)
+    a = pic.parse_time(start, fps, tc0, df) if start is not None else 0.0
+    b = pic.parse_time(end, fps, tc0, df) if end is not None else dur
     if at == "cuts":
         times = [0.0] + [t + 2 / fps for t in pic.cuts(p)]
     elif at == "hits":
         times = [h["t"] for h in p.hits]
     elif at:
-        times = [pic.parse_time(t, fps, tc0) for t in (at if isinstance(at, (list, tuple)) else [at])]
+        times = [pic.parse_time(t, fps, tc0, df) for t in (at if isinstance(at, (list, tuple)) else [at])]
     else:
         n = max(1, min(int(count), 24))
         times = [a + (b - a) * (i + 0.5) / n for i in range(n)]
@@ -473,13 +484,15 @@ def hits(add: list | None = None, remove: list | None = None, clear: bool = Fals
 
 def tempo_fit(mode: str = "steady", low: float | None = None, high: float | None = None, tempo: float | None = None,
               bend: float = 8.0, on: str = "beat", grid: float = 1.0, apply: bool = False,
-              project: str | None = None) -> dict:
+              free_start: bool = False, project: str | None = None) -> dict:
     """Find the tempo that puts the hit points on beats. mode "steady": the best constant tempos between low and
-    high. mode "map": around `tempo`, a tempo map that lands every hard hit exactly (see picture.fit_map).
-    apply=True writes the result (steady: `tempo`, else the best candidate)."""
+    high; free_start: the picture's first frame may move by under a beat as well (where the music enters), each
+    candidate saying the `start` it needs. mode "map": around `tempo`, a tempo map that lands every hard hit
+    exactly (see picture.fit_map). apply=True writes the result (steady: `tempo`, else the best candidate)."""
     p = load(project)
     if not p.hits:
         raise ValueError("no hit points yet: add them with hits(add=[...])")
+    start = None
     if mode == "map":
         from .model import TempoMap
         fit = pic.fit_map(p, float(tempo or p.tempo), float(bend), on)
@@ -487,13 +500,18 @@ def tempo_fit(mode: str = "steady", low: float | None = None, high: float | None
         new = (fit["tempo"], fit["tempo_changes"])
     else:
         lo, hi = float(low or max(40.0, p.tempo * 0.75)), float(high or min(240.0, p.tempo * 1.25))
-        cands = pic.fit_constant(p, lo, hi, float(grid))
+        cands = pic.fit_constant(p, lo, hi, float(grid), free_start=bool(free_start))
         res = {"candidates": cands}
         new = (float(tempo) if tempo else cands[0]["tempo"], [])
+        if free_start:
+            start = pic.best_start(p, new[0], float(grid))
     if apply:
         with _Edit(project) as q:
             q.tempo, q.tempo_changes = new[0], [list(c) for c in new[1]]
-        res.update(applied=True, tempo=new[0], hits=pic.hit_rows(load(project)))
+            if start is not None:
+                q.picture = {**q.picture, "start": start}
+        res.update(applied=True, tempo=new[0], hits=pic.hit_rows(load(project)),
+                   **({"start": start} if start is not None else {}))
     return res
 
 

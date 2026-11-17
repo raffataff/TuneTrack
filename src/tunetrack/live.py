@@ -312,12 +312,15 @@ def spec_head(r: Renderer) -> dict:
             "tempo": [[int(round(tm.sec(b) * sr)), float(b), float(bpm)] for b, bpm in zip(tm.beats, tm.bpms)]}
 
 
-def build_spec(p: Project, progress=None, tracking: dict | None = None) -> tuple[dict, list[str]]:
+def build_spec(p: Project, progress=None, tracking: dict | None = None,
+               guide: float | None = None) -> tuple[dict, list[str]]:
     """(engine spec, warnings) for a project. Renders the stems the engine needs, so the first call can be slow.
 
     tracking: {track id: {"arm": bool, "monitor": bool}}, what is set up to record (livehost keeps it; it is not
     part of the project). An audio track with an input gets it on its strip, heard when monitoring; an armed MIDI
-    track's instrument is loaded even with no notes yet and plays the MIDI keyboard."""
+    track's instrument is loaded even with no notes yet and plays the MIDI keyboard.
+    guide: a level in dB for the picture's own sound (dialogue, effects) under the music, on a strip of its own
+    that goes past the master straight to the output: heard while playing live, never in a render."""
     r = Renderer(p, progress)
     sr, tm = r.sr, r.tm
     warnings: list[str] = list(eqmap.warnings(p))
@@ -391,6 +394,15 @@ def build_spec(p: Project, progress=None, tracking: dict | None = None) -> tuple
                 warnings.append(f"'{t.name}': sidechain key '{name}' has no audio; the effect hears silence")
                 d["key"] = "silent"
         out_tracks.append(entry)
+    if guide is not None and (p.picture or {}).get("audio"):
+        from . import picture
+        try:
+            stem = picture.guide_stem(p, sr, r.cache)
+            out_tracks.append({"id": GUIDE, "name": "picture sound", "kind": "audio", "on": True,
+                               "source": {"type": "stem", "file": str(stem)}, "fx": [], "db": float(guide),
+                               "pan": 0.0, "vol_auto": [], "pan_auto": [], "out": "direct", "sends": []})
+        except Exception as e:  # noqa: BLE001 - the music plays without its guide
+            warnings.append(f"picture sound: {e}")
 
     spec = {
         **spec_head(r),
@@ -480,6 +492,9 @@ def strip_source(r: Renderer, t: Track, spec: dict, warnings: list[str]) -> dict
 
 
 # ---- the process ---------------------------------------------------------------------------------------------
+
+GUIDE = "_guide"  # the strip that plays the picture's own sound (no track id starts with "_")
+
 
 class EngineError(RuntimeError):
     pass
@@ -579,10 +594,10 @@ class Engine:
             raise EngineError(str(msg["error"]))
         return msg
 
-    def load(self, p: Project, progress=None, tracking: dict | None = None) -> dict:
+    def load(self, p: Project, progress=None, tracking: dict | None = None, guide: float | None = None) -> dict:
         """Send the project's current state. Devices that did not change keep playing; returns the engine's
         answer with the spec's own warnings added."""
-        spec, warnings = build_spec(p, progress, tracking)
+        spec, warnings = build_spec(p, progress, tracking, guide)
         res = self.load_spec(spec, p.root / "cache" / "live-spec.json")
         res["warnings"] = warnings + list(res.get("warnings", []))
         return res
@@ -656,8 +671,9 @@ class Player:
     whatever edits it (an agent's tools, the editor, a take being accepted) is heard without stopping."""
 
     def __init__(self, path: str | Path, device: str | None = None, on_event=None, per_sample: bool | None = None,
-                 no_device: bool = False):
+                 no_device: bool = False, guide: float | None = None):
         self.path = Path(path)
+        self.guide = guide  # dB of the picture's own sound under the music (None: not heard); see build_spec
         # per_sample: built-in synths behave as in the offline render (what agents measure and what gets exported)
         self.engine = Engine(device=device, no_device=no_device, on_event=on_event,
                              per_sample=synth_per_sample() if per_sample is None else per_sample)
@@ -674,8 +690,17 @@ class Player:
             return None
         self.project = Project.load(self.path)
         self.rev = rev
-        self.loaded = self.engine.load(self.project, tracking=self.tracking)
+        self.loaded = self.engine.load(self.project, tracking=self.tracking, guide=self.guide)
         return self.loaded
+
+    def set_guide(self, db: float | None) -> dict | None:
+        """The picture's own sound under the music at `db` (None: off); reloads (nothing else reloads) when it
+        changed."""
+        db = None if db is None else round(float(db), 1)
+        if db == self.guide:
+            return None
+        self.guide = db
+        return self.sync(force=True)
 
     def track(self, tracking: dict) -> dict | None:
         """Set what is armed and monitored; reloads (no device is reloaded for it) when that changed."""

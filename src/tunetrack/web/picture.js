@@ -8,24 +8,39 @@
 const Picture = (() => {
   const cv = $("#pic"), win = $("#picWin"), vid = $("#picVid"), tcEl = $("#picTc"), vol = $("#picVol");
   let strip = null, stripKey = "", srcKey = "", pending = null, shown = false;
+  // A drag in the lane: a hit along the picture ({kind: "hit"}), or the whole picture against the music ({kind:
+  // "start"}). While it lasts, start() and hits() answer with the dragged value so the lane, the hit lines and the
+  // video window follow the pointer; nothing is written until the button comes up.
+  let drag = null;
   const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { /* no storage */ } return null; };
 
   const pic = () => (S.doc && S.doc.picture) || null;
-  const hits = () => (S.doc && S.doc.hits) || [];
-  const start = () => (pic() && pic().start) || 0;
+  const same = (a, b) => a.name === b.name && Math.abs(a.t - b.t) < 1e-9;  // by value: a reload mid-drag makes new objects
+  const hits = () => {
+    const hs = (S.doc && S.doc.hits) || [];
+    return drag && drag.kind === "hit" && drag.moved ? hs.map((h) => (same(h, drag.h) ? { ...h, t: drag.t } : h)) : hs;
+  };
+  const start = () => (drag && drag.kind === "start" ? drag.start : (pic() && pic().start) || 0);
   const fps = () => (pic() && pic().fps) || 25;
   const tToBeat = (t) => secToBeat(t + start());
   const beatToT = (b) => beatToSec(b) - start();
   const lanePicH = () => parseInt(getComputedStyle(document.body).getPropertyValue("--picH")) || 0;
   const q = () => (S.take ? "&take=" + encodeURIComponent(S.take) : "");
 
+  // HH:MM:SS:FF, or HH:MM:SS;FF drop-frame (29.97 / 59.94: labels skip frame numbers to keep up with the clock).
+  // The same arithmetic as picture.timecode() on the server.
   function tc(t) {
-    const base = Math.max(1, Math.round(fps())), p = pic();
-    let n = Math.round(t * fps());
-    if (p && p.tc) { const a = p.tc.split(":").map(Number); n += ((a[0] * 60 + a[1]) * 60 + a[2]) * base + a[3]; }
+    const f = fps(), base = Math.max(1, Math.round(f)), p = pic();
+    const d = p && p.df ? (Math.abs(f - 29.97) < 0.01 ? 2 : Math.abs(f - 59.94) < 0.02 ? 4 : 0) : 0;
+    const frames = (s) => {
+      const a = s.split(/[:;]/).map(Number), m = a[0] * 60 + a[1];
+      return (m * 60 + a[2]) * base + a[3] - (d ? d * (m - Math.floor(m / 10)) : 0);
+    };
+    let n = Math.round(t * f) + (p && p.tc ? frames(p.tc) : 0);
     const neg = n < 0; n = Math.abs(n);
+    if (d) { const per10 = base * 600 - d * 9, tens = Math.floor(n / per10), r = n % per10; n += d * 9 * tens + (r > d ? d * Math.floor((r - d) / (base * 60 - d)) : 0); }
     const two = (x) => String(x).padStart(2, "0");
-    return (neg ? "-" : "") + `${two(Math.floor(n / (base * 3600)))}:${two(Math.floor(n / (base * 60)) % 60)}:${two(Math.floor(n / base) % 60)}:${two(n % base)}`;
+    return (neg ? "-" : "") + `${two(Math.floor(n / (base * 3600)))}:${two(Math.floor(n / (base * 60)) % 60)}:${two(Math.floor(n / base) % 60)}${d ? ";" : ":"}${two(n % base)}`;
   }
   // How far a hit is from the nearest beat, in seconds (+ = the hit comes after the beat).
   function offBeat(t) { const b = tToBeat(t), nb = Math.round(b); return { off: (t + start()) - beatToSec(nb), bar: Math.abs(nb / bpb() - Math.round(nb / bpb())) < 1e-6 }; }
@@ -57,7 +72,8 @@ const Picture = (() => {
           g.restore();
         }
       } else { g.fillStyle = "#5c574d"; g.font = "11px Segoe UI, system-ui, sans-serif"; g.textBaseline = "middle"; g.fillText(p.file.split("/").pop(), Math.max(6, x0 + 6), H / 2); }
-      g.strokeStyle = "#3b3b40"; g.strokeRect(Math.round(x0) + 0.5, 1.5, Math.round(x1 - x0) - 1, H - 3);
+      g.strokeStyle = drag && drag.kind === "start" ? "#5cc8ff" : "#3b3b40"; g.strokeRect(Math.round(x0) + 0.5, 1.5, Math.round(x1 - x0) - 1, H - 3);
+      g.fillStyle = drag && drag.kind === "start" ? "#5cc8ff" : "#8f897c"; g.fillRect(Math.round(x0), 0, 3, H);  // the first frame: grab it to move the picture
       for (const t of (view && view.cuts) || []) { const x = X(t); if (x >= 0 && x <= W) { g.fillStyle = "rgba(255,255,255,.75)"; g.fillRect(Math.round(x), 0, 1, 5); g.fillRect(Math.round(x), H - 5, 1, 5); } }
     }
     g.font = "10px Cascadia Mono, Consolas, ui-monospace, monospace"; g.textBaseline = "top";
@@ -88,14 +104,62 @@ const Picture = (() => {
     if (!key) return;
     strip = new Image(); strip.onload = draw; strip.src = "/api/picture?kind=strip" + q() + "&v=" + encodeURIComponent(key);
   }
-  const laneT = (e) => beatToT(Math.max(0, (e.clientX - cv.getBoundingClientRect().left + lanesWrap.scrollLeft) / S.zoom));
+  const laneB = (e, free) => { const b = (e.clientX - cv.getBoundingClientRect().left + lanesWrap.scrollLeft) / S.zoom; return free ? b : Math.max(0, b); };
+  const laneT = (e) => beatToT(laneB(e));
   function hitNear(e) {
     const x = e.clientX - cv.getBoundingClientRect().left + lanesWrap.scrollLeft;
     return hits().find((h) => Math.abs(tToBeat(h.t) * S.zoom - x) <= 5) || null;
   }
-  cv.addEventListener("mousedown", (e) => { if (e.button === 0 && S.doc) { const h = hitNear(e); setPlayhead(tToBeat(h ? h.t : laneT(e))); } });
+  // the picture's first frame (its left edge in the lane), or anywhere on it with Shift: what moves the picture
+  function onPicture(e) {
+    const p = pic(); if (!p) return false;
+    const x = e.clientX - cv.getBoundingClientRect().left + lanesWrap.scrollLeft, x0 = tToBeat(0) * S.zoom;
+    if (Math.abs(x - x0) <= 5) return true;
+    const t = laneT(e); return e.shiftKey && t >= 0 && t <= (p.duration || 0);
+  }
+  cv.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || !S.doc) return;
+    const h = hitNear(e);
+    if (h) { drag = { kind: "hit", h: { ...h }, t: h.t, x0: e.clientX, moved: false }; setPlayhead(tToBeat(h.t)); }
+    else if (onPicture(e)) drag = { kind: "start", x0: e.clientX, s0: beatToSec(laneB(e, true)), start0: start(), start: start(), moved: false };
+    else { setPlayhead(tToBeat(laneT(e))); return; }
+    e.preventDefault();
+  });
+  addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    if (Math.abs(e.clientX - drag.x0) > 3) drag.moved = true;
+    if (!drag.moved) return;
+    const f = fps();
+    if (drag.kind === "hit") {
+      // a hit is a moment of the picture: it moves frame by frame, and the video shows the frame it is on
+      drag.t = Math.max(0, Math.round(laneT(e) * f) / f);
+      if (pic()) drag.t = Math.min(drag.t, pic().duration || drag.t);
+      if (!isPlaying()) { S.playhead = Math.max(0, tToBeat(drag.t)); $("#pos").textContent = fmtPos(S.playhead); }
+      status(`${drag.h.name} · ${pic() ? tc(drag.t) : drag.t.toFixed(2) + " s"}`);
+    } else {
+      // the whole picture slides against the music; its first frame lands on the grid (Alt: anywhere, to the ms)
+      const want = drag.start0 + (beatToSec(laneB(e, true)) - drag.s0);  // past the left edge: the music enters later
+      drag.start = e.altKey || !(S.snap > 0) ? Math.round(want * 1000) / 1000 : +beatToSec(snapB(secToBeat(want))).toFixed(4);
+      status(`first frame at ${drag.start.toFixed(3)} s of the music (${fmtPos(Math.max(0, secToBeat(drag.start)))})${e.altKey ? "" : " · Alt: off the grid"}`);
+    }
+    drawArrangement();
+  });
+  addEventListener("mouseup", () => {
+    const d = drag; if (!d) return;
+    drag = null; status("");
+    if (!d.moved) { drawArrangement(); return; }
+    if (d.kind === "hit" && Math.abs(d.t - d.h.t) > 1e-6)
+      act("hits", { remove: [d.h.t], add: [{ t: +d.t.toFixed(4), name: d.h.name, soft: !!d.h.soft }] }).catch(() => {});
+    else if (d.kind === "start" && Math.abs(d.start - d.start0) > 1e-6) act("picture", { start: d.start }).catch(() => {});
+    else drawArrangement();
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drag) { drag = null; status(""); drawArrangement(); } });
   cv.addEventListener("dblclick", (e) => { if (S.doc && !hitNear(e)) addHit(laneT(e)); });
-  cv.addEventListener("mousemove", (e) => { cv.style.cursor = S.doc && hitNear(e) ? "pointer" : "crosshair"; });
+  cv.addEventListener("mousemove", (e) => {
+    if (drag) return;
+    cv.style.cursor = !S.doc ? "default" : hitNear(e) || onPicture(e) ? "ew-resize" : "crosshair";
+    cv.title = pic() ? "Click: move the playhead · drag a hit to move it · drag the first frame (or Shift-drag the picture) to move the picture against the music · double-click or H: mark a hit" : "";
+  });
   cv.addEventListener("contextmenu", (e) => {
     e.preventDefault(); if (!S.doc) return;
     const t = laneT(e), h = hitNear(e);
@@ -125,9 +189,9 @@ const Picture = (() => {
   function openWin() {
     win.classList.remove("hidden"); delete win.dataset.closed; store("tt.pic.win", "1");
     try { const r = JSON.parse(store("tt.pic.box") || "null"); if (r) { win.style.left = Math.max(0, Math.min(innerWidth - 120, r.x)) + "px"; win.style.top = Math.max(40, Math.min(innerHeight - 80, r.y)) + "px"; win.style.width = r.w + "px"; win.style.right = "auto"; win.style.bottom = "auto"; } } catch { /* default place */ }
-    $("#picView").classList.add("on"); sync();
+    $("#picView").classList.add("on"); sync(); guideSync();
   }
-  function closeWin() { win.classList.add("hidden"); win.dataset.closed = "1"; store("tt.pic.win", "0"); $("#picView").classList.remove("on"); vid.pause(); }
+  function closeWin() { win.classList.add("hidden"); win.dataset.closed = "1"; store("tt.pic.win", "0"); $("#picView").classList.remove("on"); vid.pause(); guideSync(); }
   const saveBox = () => { const r = win.getBoundingClientRect(); store("tt.pic.box", JSON.stringify({ x: r.left, y: r.top, w: r.width })); };
   $("#picView").onclick = () => (win.classList.contains("hidden") ? openWin() : closeWin());
   $("#picClose").onclick = closeWin;
@@ -140,9 +204,28 @@ const Picture = (() => {
   });
   new ResizeObserver(() => { if (!win.classList.contains("hidden")) saveBox(); }).observe(win);
   // The video's own sound (dialogue, effects) as a guide under the music. Off by default; never part of a render.
-  function setVol(v) { vid.volume = Math.max(0, Math.min(1, v / 100)); vid.muted = v <= 0; }
+  // In preview the browser plays it from the video. On LIVE the engine holds the audio driver, so the browser's
+  // sound would come out of another device: the video is muted and the engine plays the guide on a strip of its own
+  // (live_guide), for as long as the video window is open.
+  function setVol(v) { vid.volume = Math.max(0, Math.min(1, v / 100)); vid.muted = v <= 0 || liveMode(); }
   vol.value = +(store("tt.pic.vol") || 0); setVol(+vol.value);
-  vol.oninput = () => { setVol(+vol.value); store("tt.pic.vol", vol.value); };
+  vol.oninput = () => { setVol(+vol.value); store("tt.pic.vol", vol.value); guideSync(); };
+  let guideBusy = false;
+  function guideWant() {
+    const p = pic(), v = +vol.value;
+    return p && p.audio && v > 0 && !win.classList.contains("hidden") ? Math.round(200 * Math.log10(v / 100)) / 10 : null;
+  }
+  // called with every LIVE state: one call at a time, and only when the engine's level is not the one wanted
+  function guideSync() {
+    vid.muted = +vol.value <= 0 || liveMode();
+    const st = S.eng.st;
+    if (!liveMode() || !st.on || guideBusy || st.loading) return;
+    const want = guideWant();
+    if (want === (st.guide ?? null)) return;
+    guideBusy = true;
+    api("live_guide", { db: want, take: S.take || null })
+      .then((r) => { guideBusy = false; liveState(r); }, (e) => { guideBusy = false; st.guide = want; toast(e.message); });
+  }
 
   // The video follows the playhead: it runs by itself while the transport plays and is pulled back when it has
   // drifted more than a few frames; stopped, it shows the frame under the playhead.
@@ -204,6 +287,7 @@ const Picture = (() => {
         <label class="field">FROM <input id="tfLow" type="number" value="${Math.round(Math.max(40, S.doc.tempo * 0.75))}" style="width:64px"></label>
         <label class="field">TO <input id="tfHigh" type="number" value="${Math.round(Math.min(240, S.doc.tempo * 1.25))}" style="width:64px"></label>
         <label class="field">GRID <select id="tfGrid"><option value="1">beats</option><option value="0.5">eighths</option></select></label>
+        ${pic() ? `<label class="field" title="Let the picture slide against the music by under a beat, so the music need not enter on its first frame: each tempo then says where the first frame goes"><input type="checkbox" id="tfFree"> MOVE THE PICTURE TOO</label>` : ""}
         <button id="tfFind" class="key">FIND</button></div>
       <div id="tfOut"></div>
       <div class="row"><button class="ghost" id="tfClose">Close</button></div>`);
@@ -213,22 +297,24 @@ const Picture = (() => {
     const find = async () => {
       out.innerHTML = '<p class="hint">looking…</p>';
       try {
-        const r = await api("tempo_fit", { low: +$("#tfLow").value, high: +$("#tfHigh").value, grid: +$("#tfGrid").value });
+        const free = !!($("#tfFree") && $("#tfFree").checked), grid = +$("#tfGrid").value;
+        const r = await api("tempo_fit", { low: +$("#tfLow").value, high: +$("#tfHigh").value, grid, free_start: free });
         const names = Object.keys(r.candidates[0].hits);
-        out.innerHTML = `<table class="tf"><tr><th>BPM</th><th>typical miss</th>${names.map((n) => `<th>${esc(n)}</th>`).join("")}<th></th><th></th></tr>`
-          + r.candidates.map((c, i) => `<tr><td class="num">${c.tempo}</td><td class="num">${c.rms_ms} ms</td>`
+        const moved = (c) => `${c.start} s <span class="hint">(${c.shift_ms > 0 ? "+" : ""}${c.shift_ms} ms)</span>`;
+        out.innerHTML = `<table class="tf"><tr><th>BPM</th><th>typical miss</th>${free ? "<th>first frame at</th>" : ""}${names.map((n) => `<th>${esc(n)}</th>`).join("")}<th></th><th></th></tr>`
+          + r.candidates.map((c, i) => `<tr><td class="num">${c.tempo}</td><td class="num">${c.rms_ms} ms</td>${free ? `<td class="num">${moved(c)}</td>` : ""}`
             + names.map((n) => `<td class="num ${Math.abs(c.hits[n]) <= 40 ? "ok" : "off"}">${c.hits[n] > 0 ? "+" : ""}${c.hits[n]}</td>`).join("")
-            + `<td><button class="mini" data-steady="${i}" title="One tempo throughout">STEADY</button></td><td><button class="mini" data-map="${i}" title="Around this tempo, nudge it between hits (at most 8%) so every hard hit lands exactly on a beat">EXACT</button></td></tr>`).join("")
+            + `<td><button class="mini" data-steady="${i}" title="${free ? "One tempo throughout, and the picture moved to where it says" : "One tempo throughout"}">STEADY</button></td><td>${free ? "" : `<button class="mini" data-map="${i}" title="Around this tempo, nudge it between hits (at most 8%) so every hard hit lands exactly on a beat">EXACT</button>`}</td></tr>`).join("")
           + `</table><p class="hint" style="margin-top:8px">Misses in milliseconds (+ = the hit comes after the beat). Under about 40 ms a hit reads as on the beat.</p>`;
-        out.querySelectorAll("[data-steady]").forEach((b) => (b.onclick = () => use({ tempo: r.candidates[+b.dataset.steady].tempo })));
+        out.querySelectorAll("[data-steady]").forEach((b) => (b.onclick = () => use({ tempo: r.candidates[+b.dataset.steady].tempo, grid, free_start: free })));
         out.querySelectorAll("[data-map]").forEach((b) => (b.onclick = () => use({ mode: "map", tempo: r.candidates[+b.dataset.map].tempo })));
       } catch (e) { out.innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
     };
-    $("#tfFind").onclick = find; find();
+    $("#tfFind").onclick = find; if ($("#tfFree")) $("#tfFree").onchange = find; find();
   }
   $("#addPic").onclick = openSetup; $("#picSet").onclick = openSetup; $("#picFit").onclick = openFit;
 
-  return { draw, overlay, sync, openSetup, openFit };
+  return { draw, overlay, sync, openSetup, openFit, guideSync };
 })();
 window.Picture = Picture;
 if (S.doc) drawArrangement();

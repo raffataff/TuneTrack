@@ -8,8 +8,8 @@ Several seats can work at once, each in its own take, without seeing each other'
 take is a three-way merge: session + (take - base). The merge works on the units a studio actually divides labour
 by, so a Composer's notes and a Mix engineer's fader moves on the same track combine cleanly:
 
-    form     tempo, key, metre, loop, length, the picture and its hit points; markers and the chord track (merged
-             per bar range)
+    form     tempo, key, metre, loop, length, the picture; markers and the chord track (merged per bar range);
+             hit points (merged one by one, a hit being the frame it marks)
     brief    name and brief
     tracks   a track existing, its name / role / layer / colour
     sound    a track's instrument
@@ -36,7 +36,7 @@ from pathlib import Path
 from . import api, roles, studio
 from .model import Project, _atomic_write, project_lock, session_root
 
-FORM_FIELDS = ("tempo", "tempo_changes", "time_sig", "key", "length", "loop", "picture", "hits")
+FORM_FIELDS = ("tempo", "tempo_changes", "time_sig", "key", "length", "loop", "picture")
 BRIEF_FIELDS = ("name",)
 MASTER_FIELDS = ("sample_rate", "tail", "eq_engine")
 TRACK_META = ("name", "kind", "role", "layer", "color", "input")
@@ -114,6 +114,24 @@ def _touched(a: Counter, b: Counter, cc_a: Counter, cc_b: Counter, bpb: float) -
     for p in ((cc_a - cc_b) + (cc_b - cc_a)):
         bars |= _bars(p[1], p[1], bpb)
     return bars
+
+
+def _fps(*docs: dict) -> float:
+    return next((float(d["picture"]["fps"]) for d in docs if (d.get("picture") or {}).get("fps")), 25.0)
+
+
+def _by_frame(hits: list[dict], fps: float) -> dict[int, dict]:
+    return {int(round(float(h["t"]) * fps)): h for h in hits}
+
+
+def _hit_changes(b: list, d: list, fps: float) -> list[str]:
+    """Hit points added, removed and changed, one line each (a hit is the frame it marks)."""
+    B, D = _by_frame(b or [], fps), _by_frame(d or [], fps)
+    said = lambda h: f"'{h['name']}' at {h['t']:.2f} s" + (" (soft)" if h.get("soft") else "")  # noqa: E731
+    out = [f"added {said(D[k])}" for k in D if k not in B]
+    out += [f"removed {said(B[k])}" for k in B if k not in D]
+    out += [f"{said(B[k])} is now {said(D[k])}" for k in D if k in B and B[k] != D[k]]
+    return out
 
 
 def _ids(doc: dict) -> set[str]:
@@ -198,6 +216,31 @@ class _Merge:
             return s if self.conflict(f"{where}, bars {_fmt_bars(both)}", kind, "both changed these bars") else d
         merged = D - (B - S) + (S - B)
         return sorted((json.loads(e) for e in merged.elements()), key=lambda e: e.get("at", 0))
+
+    def hits(self, b: list, s: list, d: list, fps: float) -> list | None:
+        """Hit points, one by one: a hit is the frame it marks, so two sides adding different hits keep both, and
+        only the same frame changed (renamed, softened, moved away) on both sides differently is a conflict."""
+        b, s, d = b or [], s or [], d or []
+        if s == b or s == d:
+            return d or None
+        if d == b:
+            return s or None
+        B, S, D = (_by_frame(x, fps) for x in (b, s, d))
+        out = []
+        for k in dict.fromkeys([*D, *S, *B]):
+            hb, hs, hd = B.get(k), S.get(k), D.get(k)
+            if hs == hb or hs == hd:
+                v = hd
+            elif hd == hb:
+                v = hs
+            else:
+                h = hs or hd
+                why = ("both added a hit at this frame" if hb is None else "both changed this hit" if hs and hd
+                       else "hit removed on one side, changed on the other")
+                v = hs if self.conflict(f"hit '{h['name']}' at {h['t']:.2f} s", roles.FORM, why, hs, hd) else hd
+            if v is not None:
+                out.append(v)
+        return sorted(out, key=lambda h: h["t"]) or None
 
     # -- clips and tracks --
 
@@ -307,6 +350,7 @@ def merge(base: dict, src: dict, dst: dict, prefer: str | None = None, remap: st
                                 lambda e: (e.get("at", 0), e.get("at", 0)))
     out["chord_track"] = m.timeline("chord track", roles.FORM, base.get("chord_track"), src.get("chord_track"),
                                     dst.get("chord_track"), lambda e: (e.get("at", 0), e.get("at", 0) + e.get("len", 0)))
+    _set(out, "hits", m.hits(base.get("hits"), src.get("hits"), dst.get("hits"), _fps(out, dst, src)))
 
     by_id = lambda doc: {t["id"]: t for t in doc.get("tracks", [])}  # noqa: E731
     bt, st, dt = by_id(base), by_id(src), by_id(dst)
@@ -382,6 +426,8 @@ def changes(base: dict, doc: dict) -> list[dict]:
     for k in FORM_FIELDS:
         if base.get(k) != doc.get(k):
             add(roles.FORM, k, f"{_brief(base.get(k))} -> {_brief(doc.get(k))}")
+    for line in _hit_changes(base.get("hits"), doc.get("hits"), _fps(doc, base)):
+        add(roles.FORM, "hits", line)
     for k, kind in [(k, roles.BRIEF) for k in BRIEF_FIELDS] + [(k, roles.MASTER) for k in MASTER_FIELDS]:
         if base.get(k) != doc.get(k):
             add(kind, k, f"{_brief(base.get(k))} -> {_brief(doc.get(k))}")

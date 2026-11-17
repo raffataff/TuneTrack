@@ -61,6 +61,7 @@ function tempoPts() {
 }
 function beatToSec(b) { const pts = tempoPts(); let p = pts[0]; for (const q of pts) if (q.b <= b) p = q; return p.s + (b - p.b) * 60 / p.bpm; }
 function secToBeat(s) { const pts = tempoPts(); let p = pts[0]; for (const q of pts) if (q.s <= s) p = q; return p.b + (s - p.s) * p.bpm / 60; }
+function tempoAt(b) { const pts = tempoPts(); let p = pts[0]; for (const q of pts) if (q.b <= b) p = q; return p.bpm; }
 function fmtPos(b) { const bar = Math.floor(b / bpb()) + 1; return `${bar}:${(b - (bar - 1) * bpb() + 1).toFixed(2)}`; }
 const snapB = (b, snap = S.snap) => snap > 0 ? Math.round(b / snap) * snap : b;
 const floorB = (b, snap = S.snap) => snap > 0 ? Math.floor(b / snap + 1e-9) * snap : b;
@@ -447,6 +448,18 @@ function drawRuler() {
     if (bar % every === 0) { g.fillStyle = "#8f897c"; g.fillText(bar + 1, x + 3, H - 12); }
   }
   for (const m of S.doc.markers) { const x = m.at * S.zoom - sx; g.fillStyle = "#ffb000"; g.fillRect(x, 6, 2, H - 6); g.fillText(m.name, x + 4, 16); }
+  // tempo changes (a fit to picture hits makes many): a cyan tick at each, its bpm along the bottom where it fits
+  const tempos = tempoChanges();
+  if (tempos.length > 1) {
+    g.font = "9px Cascadia Mono, Consolas, ui-monospace, monospace"; let room = -1e9;
+    for (const [b, bpm] of tempos) {
+      const x = b * S.zoom - sx; if (x > W) break;
+      g.fillStyle = "rgba(92,200,255,.8)"; g.fillRect(Math.round(x), H - 9, 1, 9);
+      const label = String(+bpm.toFixed(1)), w = g.measureText(label).width + 6;
+      if (x >= room && x + w > 0) { g.fillStyle = "#5cc8ff"; g.fillText(label, x + 3, H - 1); room = x + w; }
+    }
+    g.font = "11px Segoe UI, system-ui, sans-serif";
+  }
   const px = S.playhead * S.zoom - sx; g.fillStyle = "#ff4a3a";
   g.beginPath(); g.moveTo(px - 5, H - 9); g.lineTo(px + 5, H - 9); g.lineTo(px, H); g.fill();
   drawChords(); window.Picture?.draw(); window.Picture?.sync();
@@ -681,9 +694,25 @@ function rulerDrag(e) {
   if (S.drag.loop) { S.drag.b1 = snapB(b, S.snap || 1); S.doc.loop = { start: Math.min(S.drag.b0, S.drag.b1), end: Math.max(S.drag.b0, S.drag.b1) }; drawArrangement(); }
   else setPlayhead(snapB(b));
 }
+// [[beat, bpm], ...] from the start, each a real change (the first is the song's tempo)
+function tempoChanges() {
+  const out = [];
+  for (const p of tempoPts()) if (!out.length || Math.abs(p.bpm - out[out.length - 1][1]) > 1e-6) out.push([p.b, p.bpm]);
+  return out;
+}
 ruler.addEventListener("contextmenu", (e) => {
   e.preventDefault(); const b = snapB((e.offsetX + lanesWrap.scrollLeft) / S.zoom, bpb());
+  const changes = S.doc.tempo_changes || [], near = changes.find((c) => Math.abs(c[0] * S.zoom - (e.offsetX + lanesWrap.scrollLeft)) <= 5);
+  const tb = snapB((e.offsetX + lanesWrap.scrollLeft) / S.zoom, S.snap || 1);  // a tempo change sits on a beat, not only a bar
+  const setChanges = (list) => act("project_set", { tempo_changes: list.sort((x, y) => x[0] - y[0]) });
   menu(e, [
+    [`Tempo change at ${fmtPos(tb)}…`, () => {
+      const v = prompt(`Tempo from ${fmtPos(tb)} on (bpm)`, String(+tempoAt(tb).toFixed(2))); if (!v) return;
+      const bpm = +v; if (!(bpm >= 20 && bpm <= 400)) { toast("A tempo between 20 and 400 bpm"); return; }
+      if (tb <= 0) act("project_set", { tempo: bpm }); else setChanges([...changes.filter((c) => Math.abs(c[0] - tb) > 1e-6), [tb, bpm]]);
+    }],
+    ...(near ? [[`Remove the tempo change at ${fmtPos(near[0])} (${+near[1].toFixed(2)} bpm)`, () => setChanges(changes.filter((c) => c !== near))]] : []),
+    ...(changes.length ? [[`Clear all ${changes.length} tempo change${changes.length === 1 ? "" : "s"} (steady ${+S.doc.tempo.toFixed(2)} bpm)`, () => setChanges([])]] : []),
     ["Add marker here…", () => { const n = prompt("Marker name"); if (n) act("markers", { add: [{ at: b, name: n }] }); }],
     ["Set loop start here", () => act("project_set", { loop: { start: b, end: Math.max(b + bpb(), S.doc.loop ? S.doc.loop.end : b + 8 * bpb()) } })],
     ["Set loop end here", () => act("project_set", { loop: { start: S.doc.loop ? Math.min(S.doc.loop.start, b - bpb()) : 0, end: b } })],
@@ -956,7 +985,7 @@ function liveState(st) {
   $("#liveBtn").classList.toggle("hidden", !st.available); $("#liveBtn").classList.toggle("on", L.on);
   if (L.hold) st.playing = false;  // frames sent before our live_stop landed
   if (flip) renderAll();
-  window.Tracking?.sync();
+  window.Tracking?.sync(); window.Picture?.guideSync();
   if (!liveMode()) return;
   $("#playBtn").classList.toggle("on", !!st.playing || L.busy);
   audioTag(); liveMeters();
@@ -1160,10 +1189,14 @@ function renderReport() {
 
 function renderBrief() {
   const box = $("#brief"); if (!S.doc) { box.innerHTML = ""; return; }
-  const br = S.doc.brief || {}, keys = Array.from(new Set(["genre", "mood", "use", "game", "references", "notes", ...Object.keys(br)]));
+  const br = S.doc.brief || {}, keys = Array.from(new Set(["genre", "mood", "use", "game", "references", "notes", ...Object.keys(br)])).filter((k) => k !== "stills");
+  // screenshots kept as mood references (picture(file=<image>)): shown, not typed into
+  const still = (s, i) => `/api/picture?kind=still&n=${i}${S.take ? "&take=" + encodeURIComponent(S.take) : ""}&v=${encodeURIComponent(s.file || "")}`;
+  const stills = (br.stills || []).map((s, i) => `<figure><a href="${still(s, i)}" target="_blank" rel="noopener" title="Open the full image"><img loading="lazy" src="${still(s, i)}" alt="${esc(s.note || s.file || "")}"></a><figcaption>${esc(s.note || String(s.file || "").split("/").pop())}<button class="mini" data-still-rm="${i + 1}" title="Take this screenshot out of the brief">×</button></figcaption></figure>`).join("");
   box.innerHTML = `<div class="card"><h3>Brief (what the music is for)</h3><div class="grid2">
     ${keys.map((k) => `<span>${esc(k)}</span>${k === "notes" ? `<textarea data-b="${k}" rows="3">${esc(br[k] || "")}</textarea>` : `<input data-b="${k}" value="${esc(typeof br[k] === "string" ? br[k] : JSON.stringify(br[k] ?? ""))}">`}`).join("")}
   </div></div>
+  ${stills ? `<div class="card"><h3>Stills (screenshots for the mood)</h3><div class="stillsB">${stills}</div></div>` : ""}
   <div class="card"><h3>Delivery</h3><div class="grid2">
     <span>Loop region</span><span>${S.doc.loop ? `${fmtPos(S.doc.loop.start)} → ${fmtPos(S.doc.loop.end)}` : "none (shift-drag on the ruler to set)"}</span>
     <span>Target loudness</span><input id="lufsIn" type="number" step="0.5" value="${S.doc.master.target_lufs}">
@@ -1171,6 +1204,7 @@ function renderBrief() {
     <span>Tail seconds</span><input id="tailIn" type="number" step="0.5" value="${S.doc.tail}">
   </div></div>`;
   box.querySelectorAll("[data-b]").forEach((el) => el.onchange = () => act("project_set", { brief: { [el.dataset.b]: el.value } }));
+  box.querySelectorAll("[data-still-rm]").forEach((el) => el.onclick = () => act("picture", { remove_still: el.dataset.stillRm }).catch(() => {}));
   $("#lufsIn").onchange = (e) => act("project_set", { target_lufs: +e.target.value });
   $("#ceilIn").onchange = (e) => act("project_set", { ceiling_db: +e.target.value });
   $("#tailIn").onchange = (e) => act("project_set", { tail: +e.target.value });

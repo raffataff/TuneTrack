@@ -14,14 +14,16 @@ Nothing here edits anything. Editing a take is the Desk's job (or the seat's own
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 
 from . import harmony, roles, studio, takes
+from . import picture as pic
 from .model import Project
 
 # How each seat reads the work.
-VIEW = {"producer": "plan", "spotting": "plan", "composer": "notes", "arranger": "notes", "rhythm": "notes",
+VIEW = {"producer": "plan", "spotting": "picture", "composer": "notes", "arranger": "notes", "rhythm": "notes",
         "tracking": "notes", "sound": "sound", "mix": "mix", "review": "report"}
 MIX_FIELDS = ("volume_db", "pan", "mute", "solo", "output", "sends", "fx", "automation")
 _MIX_DEFAULT = {"volume_db": 0.0, "pan": 0.0, "mute": False, "solo": False, "output": "master", "sends": [],
@@ -112,6 +114,58 @@ def _render(d: Path) -> dict | None:
             "stale": _mtime(d / "project.json") > _mtime(last)}
 
 
+def _picture(doc: dict, d: Path, base: dict | None) -> dict:
+    """Spotting's bench: the picture, its cuts and loud sound, the bars over it, the cue sheet and the stills. Only
+    what the scan file already holds: the bench is polled, so no ffmpeg and no image work here."""
+    p = Project.from_json(doc, d)
+    tm, info = p.tempo_map(), dict(p.picture or {})
+    start, fps = pic.start_of(p), pic._fps(p)
+    at = lambda t: p.fmt_pos(round(tm.beat(t + start), 2)) if t + start >= 0 else "before the music"  # noqa: E731
+    out: dict = {"picture": None, "cuts": [], "loud": [], "peaks": [], "strip": None}
+    scan = {}
+    if info.get("file"):
+        out["picture"] = {"file": Path(info["file"]).name, "duration": float(info.get("duration") or 0), "fps": fps,
+                          "size": info.get("size"), "start": start, "audio": bool(info.get("audio")),
+                          # the first frame's timecode as the picture counts it (drop-frame: HH:MM:SS;FF)
+                          "tc": pic.timecode(0.0, *pic.tc_args(p)) if info.get("tc") else None}
+        try:
+            scan = json.loads(pic._side(p, ".scan.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            scan = {}
+        out["picture"]["mark"] = scan.get("mark")  # size and time of the video: a frame URL changes with the file
+        last = -1.0
+        for t, score in scan.get("scores", []):  # the cut rule picture.view() uses
+            if score >= pic.CUT and t - last >= 0.25:
+                out["cuts"].append([t, at(t)])
+                last = t
+        sound = scan.get("sound") or {}
+        out["loud"], out["peaks"] = pic._loud(sound.get("level") or []), sound.get("peaks") or []
+        out["strip"] = scan.get("strip") if pic._side(p, ".strip.jpg").exists() else None
+    rows = pic.hit_rows(p, tm=tm)
+    near = 0.5 / fps + 1e-6
+    if base is not None:  # what the take did to the cue sheet, by moment (a renamed hit is the same hit)
+        was = [float(h["t"]) for h in base.get("hits") or []]
+        now = [float(h["t"]) for h in p.hits]
+        for r in rows:
+            if not any(abs(r["t"] - w) <= near for w in was):
+                r["new"] = True
+        gone = [h for h in base.get("hits") or [] if not any(abs(float(h["t"]) - n) <= near for n in now)]
+        out["gone"] = pic.hit_rows(p, hits=[dict(h) for h in gone], tm=tm) if gone else []
+    out["hits"] = rows
+    # bar lines over the span shown (the picture, else the hits), in picture seconds: the page has no tempo map
+    span = out["picture"]["duration"] if out["picture"] else max([h["t"] for h in rows] + [0.0]) + 2.0
+    bpb, bars = p.beats_per_bar, []
+    if span > 0:
+        b0, b1 = tm.beat(max(0.0, start)), tm.beat(max(0.0, start + span))
+        b = math.ceil(b0 / bpb - 1e-9) * bpb
+        while b <= b1 + 1e-9 and len(bars) < 2000:
+            bars.append([round(tm.sec(b) - start, 4), int(round(b / bpb)) + 1])
+            b += bpb
+    out.update(span=span, bars=bars, stills=[{"n": i, "file": Path(s.get("file", "")).name, "note": s.get("note", "")}
+                                             for i, s in enumerate(p.brief.get("stills") or [])])
+    return out
+
+
 def seat_bench(seat: str, take: str | None = None, have: str | None = None, session: str | None = None) -> dict:
     """What a seat's workstation shows: its take in progress (else its handed-in take, else the session) as form,
     tracks, mix and - for the seats that write notes - every note, each marked with what the take changed.
@@ -122,6 +176,8 @@ def seat_bench(seat: str, take: str | None = None, have: str | None = None, sess
     path = studio.session_path(session)
     d, meta, mine = _source(path, role.id, take)
     files = [d / "project.json", d / "base.json", d / "take.json", d / "renders" / "last.json"]
+    if VIEW[role.id] == "picture":
+        files.append(path / "picture")  # a scan landing beside the video (the folder's time moves when a file is added)
     version = f"{d.name if meta else 'session'}:" + ":".join(str(_mtime(f)) for f in files) + f":{len(mine)}"
     if have and have == version:
         return {"unchanged": True, "version": version}
@@ -181,6 +237,8 @@ def seat_bench(seat: str, take: str | None = None, have: str | None = None, sess
            "master": {**{k: (doc.get("master") or {}).get(k) for k in ("volume_db", "target_lufs", "ceiling_db")},
                       "fx": [_fx(f) for f in (doc.get("master") or {}).get("fx") or []]},
            "render": render}
+    if view == "picture":
+        out["picture"] = _picture(doc, d, base)
     if base is not None:
         out["removed"] = [b["name"] for i, b in was.items() if i not in names]
         out["changes"] = len(takes.changes(base, doc))
