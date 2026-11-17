@@ -14,6 +14,7 @@ Needs ffmpeg and ffprobe on PATH.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import math
@@ -79,34 +80,53 @@ def probe(file: str | Path) -> dict:
            "codec": v.get("codec_name"), "audio": any(s.get("codec_type") == "audio" for s in d.get("streams", []))}
     if tc:
         out["tc"] = tc.replace(";", ":")
+    if _drop(fps):  # NTSC rates: drop-frame when the file says so (";"), and when it has no timecode at all
+        out["df"] = ";" in tc if tc else True
     return out
 
 
 # ---- time -----------------------------------------------------------------------------------------------------------
 
-def _tc_frames(tc: str, fps: float) -> int:
+def _drop(fps: float) -> int:
+    """Frame numbers drop-frame timecode skips at each minute but every tenth: 2 at 29.97, 4 at 59.94, else 0."""
+    return 2 if abs(fps - 29.97) < 0.01 else 4 if abs(fps - 59.94) < 0.02 else 0
+
+
+def _tc_frames(tc: str, fps: float, df: bool = False) -> int:
     h, m, s, f = (int(x) for x in re.split(r"[:;]", tc))
-    return ((h * 60 + m) * 60 + s) * max(1, round(fps)) + f
+    n = ((h * 60 + m) * 60 + s) * max(1, round(fps)) + f
+    if df and (d := _drop(fps)):
+        mins = h * 60 + m
+        n -= d * (mins - mins // 10)
+    return n
 
 
-def timecode(t: float, fps: float, tc_start: str | None = None) -> str:
-    """Picture seconds as HH:MM:SS:FF (non-drop: frames counted at the rounded rate)."""
-    base = max(1, round(fps or 25))
-    n = int(round(t * (fps or 25))) + (_tc_frames(tc_start, fps) if tc_start else 0)
+def timecode(t: float, fps: float, tc_start: str | None = None, df: bool = False) -> str:
+    """Picture seconds as HH:MM:SS:FF, or HH:MM:SS;FF in drop-frame (29.97 and 59.94: the labels skip frame
+    numbers so the timecode keeps up with the clock; frames themselves are never dropped)."""
+    fps = fps or 25.0
+    base, d = max(1, round(fps)), (_drop(fps) if df else 0)
+    n = int(round(t * fps)) + (_tc_frames(tc_start, fps, df) if tc_start else 0)
     sign, n = ("-" if n < 0 else ""), abs(n)
-    return f"{sign}{n // (base * 3600):02d}:{n // (base * 60) % 60:02d}:{n // base % 60:02d}:{n % base:02d}"
+    if d:
+        tens, r = divmod(n, base * 600 - d * 9)
+        n += d * 9 * tens + (d * ((r - d) // (base * 60 - d)) if r > d else 0)
+    sep = ";" if d else ":"
+    return f"{sign}{n // (base * 3600):02d}:{n // (base * 60) % 60:02d}:{n // base % 60:02d}{sep}{n % base:02d}"
 
 
-def parse_time(v, fps: float = 25.0, tc_start: str | None = None) -> float:
+def parse_time(v, fps: float = 25.0, tc_start: str | None = None, df: bool = False) -> float:
     """A moment of the picture in seconds from its first frame. Accepts seconds (12.4), "m:ss.s" ("1:02.5"),
-    and timecode "HH:MM:SS:FF" (measured from the file's start timecode when it has one)."""
+    and timecode "HH:MM:SS:FF" (measured from the file's start timecode when it has one; "HH:MM:SS;FF" or a
+    drop-frame picture reads it as drop-frame)."""
     if isinstance(v, (int, float)):
         return float(v)
     s = str(v).strip().lower().removesuffix("s").strip()
     if re.fullmatch(r"-?\d+(\.\d+)?", s):
         return float(s)
     if re.fullmatch(r"\d+[:;]\d+[:;]\d+[:;]\d+", s):
-        return (_tc_frames(s, fps) - (_tc_frames(tc_start, fps) if tc_start else 0)) / (fps or 25.0)
+        df = bool(_drop(fps)) and (df or ";" in s)
+        return (_tc_frames(s, fps, df) - (_tc_frames(tc_start, fps, df) if tc_start else 0)) / (fps or 25.0)
     m = re.fullmatch(r"(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)", s)
     if m:
         return int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
@@ -123,6 +143,12 @@ def song_sec(p: Project, t: float) -> float:
 
 def _fps(p: Project) -> float:
     return float((p.picture or {}).get("fps") or 25.0)
+
+
+def tc_args(p: Project) -> tuple[float, str | None, bool]:
+    """(fps, start timecode, drop-frame) of the project's picture: what timecode() and parse_time() take."""
+    pic = p.picture or {}
+    return _fps(p), pic.get("tc"), bool(pic.get("df"))
 
 
 # ---- files ----------------------------------------------------------------------------------------------------------
@@ -188,6 +214,21 @@ def add_still(p: Project, file: str | Path, note: str = "") -> dict:
     stills.append({"file": rel, **({"note": note} if note else {})})
     p.brief["stills"] = stills
     return stills[-1]
+
+
+def remove_still(p: Project, which: str | int) -> None:
+    """Take a screenshot out of the brief: its number (from 1) or its file. The file stays in the session folder
+    (a take may still show it)."""
+    stills = list(p.brief.get("stills", []))
+    s = str(which).strip()
+    i = int(s) - 1 if s.isdigit() else next((k for k, x in enumerate(stills) if x["file"] == s or Path(x["file"]).name == s), -1)
+    if not 0 <= i < len(stills):
+        raise ValueError(f"No screenshot {which!r}: there are {len(stills)}")
+    del stills[i]
+    if stills:
+        p.brief["stills"] = stills
+    else:
+        p.brief.pop("stills", None)
 
 
 # ---- reading the picture ------------------------------------------------------------------------------------------
@@ -337,7 +378,7 @@ def sheet(p: Project, times: list[float], out: Path, cols: int = 4, width: int =
     video = video_file(p, web=True)
     if not video or not video.exists():
         raise ValueError("this project has no picture: set one with picture(file=...)")
-    fps, tc0, tm = _fps(p), (p.picture or {}).get("tc"), p.tempo_map()
+    (fps, tc0, df), tm = tc_args(p), p.tempo_map()
     tiles, listed = [], []
     for t in times:
         data = frame_jpeg(video, t, width)
@@ -346,7 +387,7 @@ def sheet(p: Project, times: list[float], out: Path, cols: int = 4, width: int =
         s = song_sec(p, t)
         at = p.fmt_pos(round(tm.beat(s), 2)) if s >= 0 else "before the music"
         listed.append({"n": len(tiles) + 1, "t": round(t, 2), "at": at})
-        tiles.append((f"{len(tiles) + 1}  {timecode(t, fps, tc0)}  {at}", Image.open(io.BytesIO(data)).convert("RGB")))
+        tiles.append((f"{len(tiles) + 1}  {timecode(t, fps, tc0, df)}  {at}", Image.open(io.BytesIO(data)).convert("RGB")))
     if not tiles:
         raise RuntimeError("no frames could be read from the picture")
     _tile(tiles, out, cols, width)
@@ -374,12 +415,12 @@ def hit_rows(p: Project, hits: list[dict] | None = None, tm=None) -> list[dict]:
     """Each hit with where it falls in the music: bar:beat, and how far it is from the nearest beat (ms; + = the
     hit comes after the beat). `on`: "bar" or "beat" when it is within half a frame of one."""
     tm = tm or p.tempo_map()
-    fps, tc0, bpb = _fps(p), (p.picture or {}).get("tc"), p.beats_per_bar
+    (fps, tc0, df), bpb = tc_args(p), p.beats_per_bar
     near = 0.5 / fps + 1e-6
     rows = []
     for h in sorted(hits if hits is not None else p.hits, key=lambda h: h["t"]):
         s = song_sec(p, h["t"])
-        row = {"name": h["name"], "t": round(h["t"], 3), **({"tc": timecode(h["t"], fps, tc0)} if p.picture else {})}
+        row = {"name": h["name"], "t": round(h["t"], 3), **({"tc": timecode(h["t"], fps, tc0, df)} if p.picture else {})}
         if h.get("soft"):
             row["soft"] = True
         if s < 0:
@@ -397,12 +438,12 @@ def hit_rows(p: Project, hits: list[dict] | None = None, tm=None) -> list[dict]:
 
 
 def edit_hits(p: Project, add: list | None = None, remove: list | None = None, clear: bool = False) -> None:
-    fps, tc0 = _fps(p), (p.picture or {}).get("tc")
+    fps, tc0, df = tc_args(p)
     if clear:
         p.hits = []
     for r in remove or []:
         try:
-            t = parse_time(r, fps, tc0)
+            t = parse_time(r, fps, tc0, df)
         except ValueError:
             t = None
         name = str(r).strip().lower()
@@ -411,7 +452,7 @@ def edit_hits(p: Project, add: list | None = None, remove: list | None = None, c
         if "at" in a:  # a place in the music: the picture moment that is there now
             t = p.tempo_map().sec(p.pos(a["at"])) - start_of(p)
         else:
-            t = parse_time(a.get("t", a.get("time")), fps, tc0)
+            t = parse_time(a.get("t", a.get("time")), fps, tc0, df)
         name = str(a.get("name") or f"Hit {len(p.hits) + 1}")
         p.hits = [h for h in p.hits if abs(h["t"] - t) > 0.5 / fps]
         p.hits.append({"t": round(t, 4), "name": name, **({"soft": True} if a.get("soft") else {})})
@@ -425,16 +466,37 @@ def _errors(secs: np.ndarray, bpm: float, grid: float) -> np.ndarray:
     return (beats - np.round(beats / grid) * grid) * 60.0 / bpm
 
 
-def fit_constant(p: Project, low: float, high: float, grid: float = 1.0, top: int = 5) -> list[dict]:
-    """Steady tempos, best first: the ones at which the hits fall nearest a beat (soft hits count a third)."""
+def _shift(secs: np.ndarray, w: np.ndarray, bpm: float, grid: float, start: float) -> float:
+    """How far to move the music against the picture (seconds; + = the picture's first frame later in the song) so
+    the hits sit best on the grid: the weighted circular mean of where they fall in a beat. Under half a beat
+    either way, except that a picture starting at or after the music is not pushed before it."""
+    period = grid * 60.0 / bpm
+    z = np.sum(w * np.exp(2j * np.pi * secs / period))
+    d = -float(np.angle(z)) / (2 * np.pi) * period if abs(z) > 1e-9 else 0.0
+    return d + period if start >= 0 and start + d < 0 else d
+
+
+def fit_constant(p: Project, low: float, high: float, grid: float = 1.0, top: int = 5,
+                 free_start: bool = False) -> list[dict]:
+    """Steady tempos, best first: the ones at which the hits fall nearest a beat (soft hits count a third).
+    free_start: the picture's first frame may move too (by under a beat), so where the music enters is chosen with
+    the tempo; each candidate then says the `start` it needs."""
+    if free_start and not p.picture:
+        raise ValueError("a free start moves the picture against the music: set a picture first")
     hits = [h for h in p.hits if song_sec(p, h["t"]) > 0]
     if not hits:
         raise ValueError("no hit points after the start of the music: add them with hits(add=[...])")
     secs = np.array([song_sec(p, h["t"]) for h in hits])
     w = np.array([1 / 3 if h.get("soft") else 1.0 for h in hits])
+    start = start_of(p)
+    shift = (lambda b: _shift(secs, w, b, grid, start)) if free_start else (lambda b: 0.0)  # noqa: E731
+
+    def cost(b: float) -> float:
+        return float(np.sum(w * _errors(secs + shift(b), b, grid) ** 2))
+
     bpms = np.arange(low, high + 1e-9, 0.05)
-    cost = np.array([math.sqrt(float(np.sum(w * _errors(secs, b, grid) ** 2) / w.sum())) for b in bpms])
-    order, picked = np.argsort(cost), []
+    costs = np.array([cost(b) for b in bpms])
+    order, picked = np.argsort(costs), []
     for i in order:
         if all(abs(bpms[i] - bpms[j]) >= 1.5 for j in picked):
             picked.append(i)
@@ -444,13 +506,26 @@ def fit_constant(p: Project, low: float, high: float, grid: float = 1.0, top: in
     for i in picked:
         # refine around the candidate: the grid search steps 0.05 bpm, a late hit moves more than a frame in that
         fine = np.arange(bpms[i] - 0.05, bpms[i] + 0.05, 0.002)
-        fc = [float(np.sum(w * _errors(secs, b, grid) ** 2)) for b in fine]
-        bpm = round(float(fine[int(np.argmin(fc))]), 3)
-        err = _errors(secs, bpm, grid) * 1000
-        out.append({"tempo": bpm, "rms_ms": round(math.sqrt(float(np.sum(w * err ** 2) / w.sum())), 1),
-                    "worst_ms": round(float(np.max(np.abs(err)))),
-                    "hits": {h["name"]: round(float(e)) for h, e in zip(hits, err)}})
+        bpm = round(float(fine[int(np.argmin([cost(b) for b in fine]))]), 3)
+        d = shift(bpm)
+        err = _errors(secs + d, bpm, grid) * 1000
+        c = {"tempo": bpm, "rms_ms": round(math.sqrt(float(np.sum(w * err ** 2) / w.sum())), 1),
+             "worst_ms": round(float(np.max(np.abs(err)))),
+             "hits": {h["name"]: round(float(e)) for h, e in zip(hits, err)}}
+        if free_start:
+            c.update(start=round(start + d, 4), shift_ms=round(d * 1000))
+        out.append(c)
     return sorted(out, key=lambda c: c["rms_ms"])
+
+
+def best_start(p: Project, bpm: float, grid: float = 1.0) -> float:
+    """The picture start at which the hits sit best on the grid of a steady `bpm` (see fit_constant)."""
+    hits = [h for h in p.hits if song_sec(p, h["t"]) > 0]
+    if not hits:
+        return start_of(p)
+    secs = np.array([song_sec(p, h["t"]) for h in hits])
+    w = np.array([1 / 3 if h.get("soft") else 1.0 for h in hits])
+    return round(start_of(p) + _shift(secs, w, bpm, grid, start_of(p)), 4)
 
 
 def fit_map(p: Project, tempo: float, bend: float = 8.0, on: str = "beat") -> dict:
@@ -487,6 +562,28 @@ def fit_map(p: Project, tempo: float, bend: float = 8.0, on: str = "beat") -> di
     if abs((changes[-1][1] if changes else first) - tempo) > 1e-6:
         changes.append([round(beat, 6), round(float(tempo), 6)])  # after the last hit: back to the tempo asked for
     return {"tempo": round(first, 6), "tempo_changes": changes, "missed": missed}
+
+
+# ---- the guide ------------------------------------------------------------------------------------------------------
+
+def guide_stem(p: Project, sr: int, cache: Path) -> Path:
+    """The picture's own sound as a stereo WAV at the song's rate that starts at song time 0 (silence before the
+    first frame, cut where the picture starts before the music): what the live engine plays as the guide. Made
+    once per video, start and rate, kept in the render cache."""
+    video = p.root / p.picture["file"]
+    st, start = video.stat(), start_of(p)
+    key = hashlib.sha1(f"{video.name}|{st.st_size}|{st.st_mtime_ns}|{start:.6f}|{int(sr)}".encode()).hexdigest()[:16]
+    out = Path(cache) / f"guide-{key}.wav"
+    if out.exists():
+        return out
+    n = int(round(start * sr))
+    place = f",adelay=delays={n}S:all=1" if n > 0 else f",atrim=start_sample={-n},asetpts=PTS-STARTPTS" if n < 0 else ""
+    part = out.with_name(out.stem + ".part.wav")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _ffmpeg("-y", "-i", video, "-vn", "-af", f"aresample={int(sr)}{place}", "-ac", "2", "-ar", int(sr),
+            "-c:a", "pcm_f32le", "-f", "wav", part)
+    part.replace(out)
+    return out
 
 
 # ---- delivery -------------------------------------------------------------------------------------------------------

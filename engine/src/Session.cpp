@@ -879,6 +879,14 @@ juce::var Session::apply (const juce::var& spec)
             continue;
         if (r.to.isEmpty())
             continue;  // a bus the mixer leaves out (caught in a routing loop): it goes nowhere
+        if (r.to == "direct")
+        {
+            // past the master, straight to the output (the picture's own sound as a guide: never in a file, and the
+            // master's inserts and fader leave it alone). The graph delays it to line up with the master's latency.
+            if (! r.send && outNode != nullptr)
+                link (from.fader.get(), outNode.get());
+            continue;
+        }
         auto target = master.head;
         if (auto it = strips.find (r.to); r.to != "master" && it != strips.end() && it->second.head != nullptr)
             target = it->second.head;

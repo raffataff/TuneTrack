@@ -246,14 +246,16 @@ def markers(add: list[dict] | None = None, remove: list[str] | None = None, clea
 
 @tool
 def picture(file: str | None = None, start: float | None = None, clear: bool = False, note: str | None = None,
-            threshold: float = 0.3, project: str | None = None) -> dict:
+            threshold: float = 0.3, drop_frame: bool | None = None, remove_still: str | None = None,
+            project: str | None = None) -> dict:
     """The video the music is written to. No arguments: what is there - duration, frame rate, cuts as
     [picture seconds, bar:beat], sound.loud ([from, to, dB]: dialogue or effects the music must leave room for),
     sound.peaks ([seconds, dB]: sudden loud moments, likely hit points), screenshots, hits.
     file: a video becomes the picture (copied into the session); an image is kept as a screenshot with `note`.
     start: song time in seconds at which the video's first frame plays (negative: the music enters later).
-    threshold: how big a change counts as a cut (lower finds more). Look at it with picture_frames()."""
-    return api.picture(file, start, clear, note, threshold, project)
+    threshold: how big a change counts as a cut (lower finds more). drop_frame: timecode counted drop-frame
+    (29.97/59.94). remove_still: a screenshot's number or file. Look at it with picture_frames()."""
+    return api.picture(file, start, clear, note, threshold, drop_frame, remove_still, project)
 
 
 @tool
@@ -283,15 +285,17 @@ def hits(add: list[dict] | None = None, remove: list[str] | None = None, clear: 
 @tool
 def tempo_fit(mode: str = "steady", low: float | None = None, high: float | None = None, tempo: float | None = None,
               bend: float = 8.0, on: str = "beat", grid: float = 1.0, apply: bool = False,
-              project: str | None = None) -> dict:
+              free_start: bool = False, project: str | None = None) -> dict:
     """Choose the tempo so the hit points land on beats.
     mode="steady": the five constant tempos between low and high bpm that catch the hits best, each with rms_ms and
     the miss per hit in ms (grid: 1 = beats, 0.5 = eighths). Under about 40 ms a hit reads as on the beat.
+    free_start=True: the picture may also move by under a beat against the music (where the music enters); each
+    candidate gives the start it needs, and apply writes it.
     mode="map": a tempo map around `tempo` that puts every hard hit exactly on a beat (on="bar": on a bar line) by
     nudging the tempo between hits by at most `bend` percent; hits it cannot reach are listed in missed.
     Nothing is written without apply=True (steady: writes `tempo`, or the best candidate). Notes already written
     keep their bars, so fit the tempo before the parts are written."""
-    return api.tempo_fit(mode, low, high, tempo, bend, on, grid, apply, project)
+    return api.tempo_fit(mode, low, high, tempo, bend, on, grid, apply, free_start, project)
 
 
 @tool

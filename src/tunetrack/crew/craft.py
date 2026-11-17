@@ -77,8 +77,9 @@ SPOTTING = """Craft: what you decide.
 - With a picture, in this order: picture() for the cuts and where the production sound is loud;
   picture_frames(at="cuts") to see every shot (a second call with start/end where you need to look closer);
   hits(add=[...]) for the moments the music must mark: few and chosen, three to six a minute, not every cut;
-  tempo_fit() for the tempo that catches them, then tempo_fit(mode="map") only if a hard hit still misses by more
-  than 40 ms, and apply the one you choose; then the markers.
+  tempo_fit() for the tempo that catches them (free_start=True when the music need not enter on the first
+  frame), then tempo_fit(mode="map") only if a hard hit still misses by more than 40 ms, and apply the one you
+  choose; then the markers.
 - Without a picture (a game loop, or screenshots only: picture_frames(at="stills")), the mood and the lengths
   below are your work; skip the hits.
 - The cue sheet is markers: one per section, named for what happens there, on a bar line. Say in the task result

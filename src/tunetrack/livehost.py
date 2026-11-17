@@ -30,6 +30,7 @@ _inputs: dict = {}            # what the engine last said can be recorded: {"aud
 _rec: dict | None = None      # the recording in progress
 _done: dict = {"n": 0}        # the last recording that ended by itself (a punch out): {"n", "recorded" | "record_error"}
 _click = False
+_guide: float | None = None   # dB of the picture's own sound under the music (None: off); kept across takes
 _note: str | None = None      # said once the engine is up: the chosen device was not there
 
 
@@ -87,7 +88,8 @@ def _ensure(path: Path) -> live.Player:
         if _player is None:
             _status.update(loading=True, error=None, warnings=[])
             try:
-                _player = live.Player(path, no_device=NO_DEVICE, device=None if NO_DEVICE else _pref("live_device"))
+                _player = live.Player(path, no_device=NO_DEVICE, device=None if NO_DEVICE else _pref("live_device"),
+                                      guide=_guide)
                 _note = None
                 if _player.engine.ready.get("device_problem") and not NO_DEVICE and _pref("live_device"):
                     # the chosen interface is not there today: whatever the engine picks by itself
@@ -141,7 +143,7 @@ def state() -> dict:
         tk, dev = p.engine.tick, p.engine.ready
         out.update(playing=bool(tk.get("playing")), beat=tk.get("beat", 0.0), looping=bool(tk.get("looping")),
                    peaks=tk.get("peaks", {}), cpu=tk.get("cpu", 0.0), dropouts=tk.get("xruns", 0), rev=p.rev,
-                   recording=_rec is not None, click=_click, armed={k: dict(v) for k, v in _armed.items()},
+                   recording=_rec is not None, click=_click, guide=_guide, armed={k: dict(v) for k, v in _armed.items()},
                    ins=tk.get("ins", []), inputs=_inputs, done=dict(_done),
                    punch=[_rec["punch"], _rec["until"]] if _rec else None,
                    device={k: dev.get(k) for k in ("type", "name", "sr", "block", "rate", "converted")}
@@ -310,6 +312,23 @@ def arm(path: Path, track: str, arm: bool | None = None, monitor: bool | None = 
         else:
             _armed.pop(t.id, None)
         p.track(_tracking())
+    return state()
+
+
+def guide(path: Path, db: float | None) -> dict:
+    """The picture's own sound under the music at `db` (None: off), played by the engine past the master: the
+    browser cannot play it while the engine holds the audio driver. Does not start the engine; the level is kept
+    for when it starts."""
+    global _guide
+    with _lock:
+        _guide = None if db is None else round(max(-60.0, min(12.0, float(db))), 1)
+        if _player is not None and _player.engine.alive():
+            try:
+                res = _player.set_guide(_guide)
+                if res is not None:
+                    _status.update(warnings=list(res.get("warnings", [])), error=None)
+            except live.EngineError as e:
+                _status["error"] = str(e)
     return state()
 
 

@@ -10,10 +10,12 @@ text, the take fixes below, and stage 3's first cut), a dependency bump (PR #6),
 the take-path fix, `listen()` for a bar range, lean MCP instructions, batched auditions, open tasks for the seats
 that add tasks), `offline-engine` (PR #8, 880e673: stage 3.2, offline rendering through the engine), and
 `engine-lanes` (PR #9: stage 3.3, strips on several cores, sample-rate conversion, the mono sidechain key, SFZ
-through sfizz; and stage 3.4, automation of any device setting, tempo-synced effects, time-stretch of audio clips).
-On branch `picture`, not committed: stage 5's first cut (the picture, hit points, tempo fitting) and stage 4
-(tracking: recording, passes, comping, punch, keyboards, devices; all built, nothing recorded through the
-interface yet); both in section 6.
+through sfizz; and stage 3.4, automation of any device setting, tempo-synced effects, time-stretch of audio clips),
+and `picture` (PR #10, 59bf871: stage 5's first cut, the picture, hit points, tempo fitting; and stage 4, tracking:
+recording, passes, comping, punch, keyboards, devices, nothing recorded through the interface yet). On branch
+`picture-2`, not committed: stage 5's second cut (the Spotting bench, stills, dragging in the picture lane, tempo
+changes on the ruler, the guide sound through the engine, drop-frame, a free start, hits merged one by one); all in
+section 6.
 
 ---
 
@@ -120,7 +122,7 @@ On `main`.
 | `src/tunetrack/server.py` | `/api/events` (server-sent events: project version + board activity, and with `?take=` the version of the take the Desk has open), board and crew functions callable from the editor (`STUDIO`), `board` and `crew` in `/api/state`, `studio_view()` for cheap redraws. A take on the Desk: `/api/state?take=tk3` and `/api/version?take=tk3`, a `take` field on `/api/call` that points the Desk's own calls at that take, and `take_cut()`. Stops hosted crews on exit. |
 | `src/tunetrack/web/` | The studio UI. `index.html` (one header, two rooms), `style.css` (the rack look; all drawn in CSS, no fonts or images fetched), `studio.js` (Studio room: rack, seat workstations, Needs You, monitor/talkback, A/B audition), `app.js` (Desk room: arrangement / piano roll / mixer, and the take bar that says whether the Desk is editing the session or a take). |
 | `src/tunetrack/cli.py` | `tunetrack crew detect / status / run [--brief] [--parallel] [--max-runs]`; `tunetrack takes clean [--project] [--days N] [--yes]`; `call` and `functions` now reach `studio` and `takes` too. |
-| `src/tunetrack/picture.py` | Stage 5: the video the music is written to (`set_video`, `probe`, `scan` for cuts and production sound, `sheet` for frames, `mux`), hit points (`edit_hits`, `hit_rows`) and the tempo that catches them (`fit_constant`, `fit_map`). `web/picture.js` is its lane and video window on the Desk. |
+| `src/tunetrack/picture.py` | Stage 5: the video the music is written to (`set_video`, `probe`, `scan` for cuts and production sound, `sheet` for frames, `mux`), hit points (`edit_hits`, `hit_rows`), the tempo that catches them (`fit_constant`, `fit_map`, `best_start`), timecode (`timecode`, `parse_time`, `tc_args`: drop-frame too) and the guide (`guide_stem`). `web/picture.js` is its lane and video window on the Desk; `bench._picture` and `studio.js workPicture` the Spotting seat's CUES. |
 | `src/tunetrack/tracking.py` | Stage 4: what a recording becomes (`passes`, `place_audio`, `place_midi`, `commit`) and comping (`comp`, `split_clip`). `livehost.py` holds what is armed and runs `record` / `record_stop`; `web/tracking.js` is the Desk's side. |
 | `src/tunetrack/model.py`, `engine.py`, `api.py` | Small changes, below. |
 
@@ -296,8 +298,10 @@ On `crew-usage` (2026-11-16, merged in PR #7):
   Tracking: every part on one piano roll over markers and the chord track, notes the take added lit, removed ones
   outlined, a chip per part to hide it), CONSOLE (Mix: a strip per track with fader, pan, mute/solo, inserts and
   sends, the last render's level, and a dashed outline where each moved fader was; master strip with band balance
-  and LUFS), SOUNDS (Sound: one slot per instrument, what it was, AUDITION), PLAN (Producer, Spotting: form,
-  chords, the arrangement, every task and what it waits on), REPORT (Review: the last render as measured). It
+  and LUFS), SOUNDS (Sound: one slot per instrument, what it was, AUDITION), PLAN (Producer: form,
+  chords, the arrangement, every task and what it waits on), CUES (Spotting: the picture's timeline with cuts, loud
+  production sound, bars and hits; the cue sheet with a frame per hit, what the take added or removed; cuts and
+  stills), REPORT (Review: the last render as measured). It
   follows the seat's take live while an agent works, switches between the seat's takes and the session, and
   OPEN ON DESK lands on the matching Desk panel. ROLL, SOUNDS, PLAN and REPORT are read-only: editing is the Desk's
   job.
@@ -787,7 +791,7 @@ Left, in order:
    Not done: no UI to draw or edit automation (agents and the API only); VST3 automation is per block, not sample
    accurate; nobody has heard any of it.
 
-### Stage 4: tracking (built 2026-11-17 in two cuts, branch `picture`, not committed)
+### Stage 4: tracking (built 2026-11-17 in two cuts, merged in PR #10)
 
 The one idea: **a recording is passes, and a pass is an ordinary clip.** Each time round the loop while recording,
 and each new recording over old material, is a pass. `Clip.lane` is the pass number (0 = not recorded); the passes
@@ -883,7 +887,7 @@ Left:
    recording); with a punch the loop is off (one pass); input monitoring through the engine needs the device at
    the project's rate.
 
-### Stage 5: picture and game (first cut built 2026-11-16, branch `picture`, not committed)
+### Stage 5: picture and game (first cut 2026-11-16, PR #10; second cut 2026-11-17, branch `picture-2`, not committed)
 
 Stage 4 was skipped at first at the owner's word and built the day after; nothing here depends on it.
 
@@ -930,17 +934,49 @@ Built (`src/tunetrack/picture.py`, `web/picture.js`, `tests/test_picture.py`):
 Checked in the browser on a synthetic 20 s video (scratch library): the lane, scrub, play and stop, past the end,
 a hit by key, the fit dialog, an exact map applied. 11 tests (337 in all pass); the video ones skip without ffmpeg.
 
-Left, in order:
+Second cut (2026-11-17, branch `picture-2`):
+
+- **The Spotting seat's bench, CUES** (`bench._picture`, `studio.js workPicture`): the picture's timeline (strip,
+  cuts, loud production sound, bars, hits with their miss), the cue sheet with a frame per hit (`/api/picture
+  ?kind=frame&t=&w=`, cut once into `picture/frames/` and cached by the browser for good), hits the take added
+  (NEW) or removed, the cuts and the stills. Read-only and polled like the other benches: it reads the scan file,
+  never ffmpeg. Stills (`kind=still&n=`) also show on the Desk's Brief panel, each with × to take it out
+  (`picture(remove_still=n)`).
+- **Dragging in the picture lane** (`picture.js`): a hit moves frame by frame and the video window shows the frame
+  it is on; the picture's first frame (its left edge, or Shift anywhere on it) slides the whole picture against
+  the music, onto the grid or anywhere with Alt, before the music too. One `hits` / `picture` call on release;
+  Escape cancels.
+- **Tempo changes on the ruler**: a cyan tick at each and its bpm along the bottom where it fits; right-click
+  adds one on a beat, removes the one under the pointer, or clears them all.
+- **The guide through the engine**: on LIVE the video is muted and `live_guide(db)` puts the picture's sound
+  (`picture.guide_stem`: the video's audio at the song's rate, placed by `start`, cached) on a strip of its own
+  (`live.GUIDE`, `"out": "direct"`: the engine links it past the master to the output, so the master's inserts and
+  fader leave it alone and the graph lines it up with the master's latency). The GUIDE level sets it, for as long as
+  the video window is open; `livehost` keeps the level across takes and engine restarts. Offline renders never ask
+  for it.
+- **Drop-frame timecode** (29.97 / 59.94): `probe` notes it from the file (";" in its timecode, or none at all),
+  `picture(drop_frame=)` switches it, and every timecode read or written (hit rows, sheets, typed times, the
+  video window) counts it. Typing "HH:MM:SS;FF" reads as drop-frame on its own.
+- **A free start for the steady fit**: `tempo_fit(free_start=True)` lets the picture slide by under a beat
+  (weighted circular mean of where the hits fall in a beat; a picture at or after the music is never pushed before
+  it). Each candidate gives `start` and `shift_ms`; apply writes both. The Fit dialog's MOVE THE PICTURE TOO.
+- **Hits merged one by one in takes** (`takes._Merge.hits`): a hit is the frame it marks, so two seats adding
+  different hits keep both, a moved hit is the old frame gone and a new one there, and only one frame changed two
+  ways (or changed and removed, or two hits added within half a frame) is a conflict. `take_diff` lists each hit
+  added, removed or changed.
+
+Checked: 368 tests pass (9 new). In the browser on the scratch library: a hit and the picture dragged (on the grid
+and off it with Alt), the ruler's tempo menu, the Fit dialog with a free start, the CUES bench and its frame and
+still endpoints (bad input refused), and LIVE with no device: the guide at -6 dB on a `direct` strip, the video
+muted, off again when the window closed. The engine test pulls the guide with the master at -40 dB: heard at
+-6 dB, in time with its stem, silent when turned off. Not checked: anything drawn (the pane would not take
+screenshots that day), and GUIDE through the SSL 2.
+
+Left:
 
 1. **The owner's eyes on it with a real video**, and one real spotting run (Spotting on a model that reads images).
-2. The Spotting seat's bench (the cue sheet and frames in its workstation; it still opens on PLAN), and stills
-   shown somewhere in the UI.
-3. Dragging a hit and the picture's start in the lane; tempo changes drawn on the ruler.
-4. Guide sound under LIVE: the browser plays it on the Windows output while the engine holds the ASIO driver;
-   untested on the SSL 2. Putting it through the engine as a track that renders leave out would fix it.
-5. Drop-frame timecode; a free start for the steady fit (shifting where the music enters); hits merged one by one
-   in takes.
-6. The game side: an agent reading or playing the game itself.
+   GUIDE on LIVE through the SSL 2.
+2. The game side: an agent reading or playing the game itself.
 
 ### Stage 6: polish
 
@@ -957,7 +993,7 @@ browser that auditions live, genre style sheets as per-seat skills.
 | Stage 3 | Done 2026-11-14: Build Tools, CMake and JUCE 9 are installed. Done 2026-11-16: Smart App Control switched off (it blocked a fresh engine build, and with it LIVE). Left: choose the repo's licence (below). |
 | Orchestral palette | `BBC Symphony Orchestra (64 Bit).vst3` is in the VST3 folder as of 2026-11-16 (not scanned or tried yet); Spitfire LABS is not. Then `tunetrack scan` and capture patches. |
 | SFZ in the engine | Done 2026-11-16: sfizz's source is in `engine/third_party/sfizz/`. Left: hear an SFZ track on LIVE (real-time streaming is not checked). |
-| Stage 5 | Done: `ffmpeg` 9.0.2 is on PATH. Left: try the picture lane with a real video. |
+| Stage 5 | Done: `ffmpeg` 9.0.2 is on PATH. Left: try the picture lane with a real video, and GUIDE on LIVE through the SSL 2 (in time with the picture? loud enough against the music?). |
 | Stage 4 | Record through the SSL 2: LIVE on, choose a track's input, R, ●. Say how far off the beat a clap against the click lands (that sets `record_offset_ms`), and whether monitoring through the engine is usable or the interface's direct monitoring is better. Close Cubase first (one ASIO client at a time). |
 | New tools in their own apps | Restart Claude so the MCP server reloads (it runs from this checkout). |
 
