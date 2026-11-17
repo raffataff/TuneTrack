@@ -16,8 +16,9 @@ import shutil
 import time
 from pathlib import Path
 
-from . import analysis, config, edit, engine, eqmap, generators, notation, plugins, synths, theory
+from . import analysis, config, edit, engine, eqmap, generators, notation, plugins, synths, theory, tracking
 from . import harmony as harm
+from . import picture as pic
 from .model import Clip, Device, Note, Project, Track, project_lock, redo as _redo, session_root, undo as _undo
 
 STATE_FILE = config.HOME / "state.json"
@@ -363,7 +364,8 @@ def project_info(project: str | None = None, clips: bool = True) -> dict:
         if clips:
             d["clips"] = [{"id": c.id, "name": c.name, "start": p.fmt_pos(c.start), "bars": round(c.length / bpb, 3),
                            **({"notes": len(c.notes)} if c.kind == "midi" else {"file": c.file}),
-                           **({"cc": list(c.cc)} if c.cc else {}), **({"muted": True} if c.muted else {})}
+                           **({"cc": list(c.cc)} if c.cc else {}), **({"muted": True} if c.muted else {}),
+                           **({"pass": c.lane} if c.lane else {})}
                           for c in sorted(t.clips, key=lambda c: c.start)]
         tracks.append(d)
     return {
@@ -376,8 +378,123 @@ def project_info(project: str | None = None, clips: bool = True) -> dict:
         "master": {k: (v if k != "fx" else [_fx_label(p, f) for f in v]) for k, v in p.master.items()},
         "eq_engine": p.eq_engine,
         **({"tempo_changes": p.tempo_changes} if p.tempo_changes else {}),
+        **({"picture": _picture_line(p)} if p.picture else {}),
+        **({"hits": [{k: r[k] for k in ("name", "at", "off_ms", "on", "soft") if k in r}
+                     for r in pic.hit_rows(p)]} if p.hits else {}),
         "tracks": tracks,
     }
+
+
+def _picture_line(p: Project) -> dict:
+    d = p.picture
+    return {"file": d["file"], "duration_s": d.get("duration"), "fps": d.get("fps"), "start_s": d.get("start", 0.0),
+            **({"tc": d["tc"]} if d.get("tc") else {})}
+
+
+# ---- picture ----------------------------------------------------------------------------------------------------
+
+def picture(file: str | None = None, start: float | None = None, clear: bool = False, note: str | None = None,
+            threshold: float = pic.CUT, project: str | None = None) -> dict:
+    """The video the music is written to, and screenshots. file: a video (copied into the session, becomes the
+    picture) or an image (kept as a screenshot with `note`). start: the song time in seconds at which the video's
+    first frame plays. No arguments: what is there - the cuts, where the production sound is loud, the hits."""
+    if file or start is not None or clear:
+        with _Edit(project) as p:
+            if clear:
+                p.picture = None
+            if file and Path(file).suffix.lower() in pic.IMAGE_EXT:
+                pic.add_still(p, file, note or "")
+            elif file:
+                pic.set_video(p, file, float(start or 0.0))
+            elif start is not None:
+                if not p.picture:
+                    raise ValueError("no picture to move: set one with picture(file=...)")
+                p.picture = {**p.picture, "start": round(float(start), 4)}
+    p = load(project)
+    out: dict = {"picture": None}
+    if p.picture:
+        sc, tm, fps, tc0 = pic.scan(p), p.tempo_map(), p.picture.get("fps") or 25.0, p.picture.get("tc")
+        where = lambda t: p.fmt_pos(round(tm.beat(pic.song_sec(p, t)), 2)) if pic.song_sec(p, t) >= 0 else None  # noqa: E731
+        end = float(p.picture.get("duration") or 0)
+        out["picture"] = {**_picture_line(p), "size": p.picture.get("size"), "ends_at": where(end),
+                          "ends_tc": pic.timecode(end, fps, tc0)}
+        out["cuts"] = [[t, where(t)] for t in pic.cuts(p, float(threshold))]
+        snd = sc.get("sound") or {}
+        if snd:
+            out["sound"] = {"loud": pic._loud(snd.get("level") or []), "peaks": snd.get("peaks") or []}
+    if p.brief.get("stills"):
+        out["stills"] = p.brief["stills"]
+    if p.hits:
+        out["hits"] = pic.hit_rows(p)
+    return out
+
+
+def picture_frames(at=None, start=None, end=None, count: int = 12, project: str | None = None) -> dict:
+    """Frames of the picture on one image (a contact sheet), each labelled with its number, timecode and bar:beat.
+    at: a list of picture times, "cuts" (the first frame of every shot), "hits", or "stills" (the screenshots).
+    Without it: `count` frames spread evenly from start to end (picture seconds; default the whole video)."""
+    p = load(project)
+    out = pic.folder(p) / "sheets" / f"sheet-{os.getpid()}.jpg"
+    if at == "stills":
+        return pic.stills_sheet(p, out)
+    if not p.picture:
+        raise ValueError("this project has no picture: set one with picture(file=...)")
+    fps, tc0, dur = p.picture.get("fps") or 25.0, p.picture.get("tc"), float(p.picture.get("duration") or 0)
+    a = pic.parse_time(start, fps, tc0) if start is not None else 0.0
+    b = pic.parse_time(end, fps, tc0) if end is not None else dur
+    if at == "cuts":
+        times = [0.0] + [t + 2 / fps for t in pic.cuts(p)]
+    elif at == "hits":
+        times = [h["t"] for h in p.hits]
+    elif at:
+        times = [pic.parse_time(t, fps, tc0) for t in (at if isinstance(at, (list, tuple)) else [at])]
+    else:
+        n = max(1, min(int(count), 24))
+        times = [a + (b - a) * (i + 0.5) / n for i in range(n)]
+    times = [t for t in times if max(a, 0.0) - 1e-6 <= t <= min(b, dur)]
+    if not times:
+        raise ValueError("no frames in that range")
+    rep = pic.sheet(p, times[:24], out)
+    if len(times) > 24:
+        rep["more"] = f"{len(times) - 24} more after {round(times[23], 1)} s: pass start= for the rest"
+    return rep
+
+
+def hits(add: list | None = None, remove: list | None = None, clear: bool = False, project: str | None = None) -> dict:
+    """Hit points: moments of the picture the music should mark. add: [{"t": 12.4 | "1:02.5" | "01:00:12:10",
+    "name": "door slams" [, "soft": true]}] (t = picture time; or "at": "9:1" for what is at that bar now).
+    remove: names or times. Each hit comes back with its bar:beat and its distance from the nearest beat."""
+    if add or remove or clear:
+        with _Edit(project) as p:
+            pic.edit_hits(p, add, remove, clear)
+    p = load(project)
+    return {"hits": pic.hit_rows(p)}
+
+
+def tempo_fit(mode: str = "steady", low: float | None = None, high: float | None = None, tempo: float | None = None,
+              bend: float = 8.0, on: str = "beat", grid: float = 1.0, apply: bool = False,
+              project: str | None = None) -> dict:
+    """Find the tempo that puts the hit points on beats. mode "steady": the best constant tempos between low and
+    high. mode "map": around `tempo`, a tempo map that lands every hard hit exactly (see picture.fit_map).
+    apply=True writes the result (steady: `tempo`, else the best candidate)."""
+    p = load(project)
+    if not p.hits:
+        raise ValueError("no hit points yet: add them with hits(add=[...])")
+    if mode == "map":
+        from .model import TempoMap
+        fit = pic.fit_map(p, float(tempo or p.tempo), float(bend), on)
+        res = {**fit, "hits": pic.hit_rows(p, tm=TempoMap(fit["tempo"], fit["tempo_changes"]))}
+        new = (fit["tempo"], fit["tempo_changes"])
+    else:
+        lo, hi = float(low or max(40.0, p.tempo * 0.75)), float(high or min(240.0, p.tempo * 1.25))
+        cands = pic.fit_constant(p, lo, hi, float(grid))
+        res = {"candidates": cands}
+        new = (float(tempo) if tempo else cands[0]["tempo"], [])
+    if apply:
+        with _Edit(project) as q:
+            q.tempo, q.tempo_changes = new[0], [list(c) for c in new[1]]
+        res.update(applied=True, tempo=new[0], hits=pic.hit_rows(load(project)))
+    return res
 
 
 def project_set(project: str | None = None, name: str | None = None, tempo: float | None = None,
@@ -535,12 +652,18 @@ def track_update(track: str, project: str | None = None, name: str | None = None
                  volume_db: float | None = None, pan: float | None = None, mute: bool | None = None,
                  solo: bool | None = None, output: str | None = None, sends: list | None = None,
                  role: str | None = None, layer: str | None = None, color: str | None = None,
-                 instrument_params: dict | None = None) -> dict:
-    """sends: [{"to": "Reverb", "db": -12}] replaces the send list. instrument_params merges into the instrument."""
+                 instrument_params: dict | None = None, input: list | int | None = None) -> dict:
+    """sends: [{"to": "Reverb", "db": -12}] replaces the send list. instrument_params merges into the instrument.
+    input (audio tracks): the interface input it records, from 1 (2, or [1, 2] for a stereo pair; 0 = none)."""
     with _Edit(project) as p:
         t = p.track(track)
         if name:
             t.name = name
+        if input is not None:
+            if t.kind != "audio":
+                raise ValueError(f"'{t.name}' is not an audio track: only audio tracks record an interface input")
+            chans = [int(c) for c in (input if isinstance(input, (list, tuple)) else [input]) if int(c) > 0][:2]
+            t.input = chans or None
         if instrument is not None:
             t.instrument = parse_device(instrument)
         if instrument_params:
@@ -1112,24 +1235,7 @@ def clip_edit(clip: str, op: str, project: str | None = None, to=None, track: st
         elif op == "resize":
             c.length = p.dur(length)
         elif op == "split":
-            cut = p.pos(at) - c.start
-            if not 0 < cut < c.length:
-                raise ValueError("split point must be inside the clip")
-            src_cut = (cut * 60 / c.bpm if c.bpm
-                       else p.tempo_map().sec(c.start + cut) - p.tempo_map().sec(c.start))  # source seconds
-            right = Clip(id=p.new_id("c"), kind=c.kind, name=c.name, start=c.start + cut, length=c.length - cut,
-                         file=c.file, offset=c.offset + src_cut, gain_db=c.gain_db, fade_out=c.fade_out,
-                         bpm=c.bpm, pitch=c.pitch)
-            right.notes = [Note(n.pitch, n.start - cut, n.dur, n.vel) for n in c.notes if n.start >= cut]
-            right.cc = {k: [[b - cut, v] for b, v in pts if b >= cut] for k, pts in c.cc.items()}
-            c.notes = [n for n in c.notes if n.start < cut]
-            for n in c.notes:
-                n.dur = min(n.dur, cut - n.start)
-            c.cc = {k: [pt for pt in pts if pt[0] < cut] for k, pts in c.cc.items()}
-            c.length = cut
-            c.fade_out = 0
-            t.clips.append(right)
-            res["created"] = right.id
+            res["created"] = tracking.split_clip(p, t, c, p.pos(at)).id
         elif op == "delete":
             t.clips.remove(c)
         elif op == "rename":
@@ -1153,6 +1259,23 @@ def clip_edit(clip: str, op: str, project: str | None = None, to=None, track: st
         else:
             raise ValueError(f"Unknown clip op {op!r}")
     return res
+
+
+def comp(track: str, start, end, use: int, project: str | None = None, group: bool = False) -> dict:
+    """Choose which recording pass is heard on a track between two positions (comping). Each time round a loop
+    while recording, and each new recording over old material, is a pass (`pass` in project_info's clips; 0 = what
+    was there before any recording). use: the pass to hear from start to end; every other clip in that stretch is
+    muted, cut at the edges where it runs past them. Nothing is deleted: comp again to change your mind.
+    group: the audio tracks recorded together with that pass (the mics of a drum kit) follow, each to its own
+    pass of the same time round."""
+    with _Edit(project) as p:
+        t = p.track(track)
+        a, b = p.pos(start), p.pos(end)
+        also = tracking.mates(p, t, a, b, int(use)) if group else []
+        res = tracking.comp(p, t, a, b, int(use))
+        if also:
+            res["with"] = {o.name: tracking.comp(p, o, a, b, lane)["heard"] for o, lane in also}
+    return {"track": t.id, **res}
 
 
 def arrange(op: str, start, end, to=None, tracks: list | None = None, project: str | None = None,
@@ -1688,13 +1811,21 @@ def render(project: str | None = None, out: str | None = None, format: str = "wa
            loop: str = "auto", normalize: bool = True, stems: bool = False, layers: bool = False,
            midi: bool = False) -> dict:
     """Render the mix. out = a folder or a file path (extension picks the format); a relative out is inside the
-    project's folder (the session's, for a take). Returns files + analysis."""
+    project's folder (the session's, for a take). out="cue.mp4" (.mov, .webm): the picture with the music on it.
+    Returns files + analysis."""
     p = load(project)
     if out and not Path(out).is_absolute():
         out = str(session_root(p.path) / out)  # not wherever the calling process happens to run
     t0 = time.time()
+    film = Path(out) if out and Path(out).suffix.lower() in pic.VIDEO_EXT else None
+    if film:  # the picture with the music on it: render the mix one-shot, then put it under the video
+        if not p.picture:
+            raise ValueError("this project has no picture to export with: set one with picture(file=...)")
+        out, loop = str(p.path / "renders" / f"{film.stem}.wav"), "off"
     rep = engine.render_project(p, out, format, int(bits), loop, normalize, stems, layers, midi)
     rep.pop("renderer", None)
+    if film:
+        rep["files"] = [pic.mux(p, rep["files"][0], film)] + list(rep["files"])
     rep["seconds"] = round(time.time() - t0, 1)
     if out and session_root(p.path) == p.path:
         _takes_left_out(p.path, rep)

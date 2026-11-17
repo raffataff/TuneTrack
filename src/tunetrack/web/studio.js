@@ -373,7 +373,12 @@ function workRoll(box, d, B, s) {
   lo = Math.max(0, lo - 2); hi = Math.min(127, hi + 2);
   if (hi - lo < 23) { const p = Math.ceil((23 - (hi - lo)) / 2); lo = Math.max(0, lo - p); hi = Math.min(127, hi + p); }
   const rows = hi - lo + 1, rh = Math.max(3, Math.min(9, Math.floor(240 / rows))), GUT = 34, TOP = 36;
-  const end = Math.max(f.end, f.bpb * 4), W = Math.max(wrap.clientWidth - 2, GUT + end * 6), H = TOP + rows * rh + 6;
+  // Tracking: under the roll, each recorded track's passes (clips are [start, length, kind, pass, muted]), one thin
+  // row a pass, heard bright and muted dim. Read-only.
+  const PR = 9, passT = s.seat !== "tracking" ? [] : vis.filter(({ t }) => (t.clips || []).some((c) => c[3] > 0))
+    .map((x) => ({ ...x, ps: [...new Set(x.t.clips.map((c) => c[3] || 0))].sort((a, b) => a - b) }));
+  const passH = passT.reduce((a, x) => a + 13 + x.ps.length * PR, passT.length ? 6 : 0);
+  const end = Math.max(f.end, f.bpb * 4), W = Math.max(wrap.clientWidth - 2, GUT + end * 6), H = TOP + rows * rh + 6 + passH;
   const g = fitCanvas(cv, W, H), X = (b) => GUT + b * (W - GUT - 6) / end, Y = (p) => TOP + (hi - p) * rh;
   g.fillStyle = "#07090a"; g.fillRect(0, 0, W, H);
   for (let p = lo; p <= hi; p++) {
@@ -400,7 +405,20 @@ function workRoll(box, d, B, s) {
     for (const n of t.gone || []) g.strokeRect(X(n[1]) + 0.5, Y(n[0]) + 0.5, Math.max(2, X(n[1] + n[2]) - X(n[1]) - 1), Math.max(2, rh - 1));
     g.setLineDash([]); g.globalAlpha = 1;
   }
-  if (!vis.some((x) => (x.t.notes || []).length)) { g.fillStyle = "#5a564d"; g.font = "12px 'Segoe UI', sans-serif"; g.fillText(parts.length ? "Nothing written yet." : "No tracks yet.", GUT + 14, TOP + 26); }
+  let py = TOP + rows * rh + 10;
+  for (const { t, col, ps } of passT) {
+    g.fillStyle = "#1e2422"; g.fillRect(GUT, py - 2, W - GUT, 1);
+    g.fillStyle = "#8f897c"; g.font = "9px Bahnschrift, 'Segoe UI', sans-serif"; g.fillText(String(t.name).toUpperCase() + " · PASSES", GUT + 2, py + 8);
+    py += 11; g.font = "8px Consolas, monospace";
+    for (const p of ps) {
+      g.fillStyle = "#5a564d"; g.fillText("P" + p, 6, py + PR - 1);
+      g.fillStyle = col;
+      for (const c of t.clips) if ((c[3] || 0) === p) { g.globalAlpha = c[4] ? 0.28 : 0.95; g.fillRect(X(c[0]), py + 1, Math.max(2, X(c[0] + c[1]) - X(c[0]) - 1), PR - 2); }
+      g.globalAlpha = 1; py += PR;
+    }
+    py += 2;
+  }
+  if (!vis.some((x) => (x.t.notes || []).length) && !passT.length) { g.fillStyle = "#5a564d"; g.font = "12px 'Segoe UI', sans-serif"; g.fillText(parts.length ? "Nothing written yet." : "No tracks yet.", GUT + 14, TOP + 26); }
 }
 // Mix: the console. Every moved fader stands next to a dashed outline of where it was, and the controls work:
 // drag a fader or the pan strip (Shift: fine), double-click to reset, click the readout to type a level, M and S,

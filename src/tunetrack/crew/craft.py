@@ -74,11 +74,18 @@ Delivery: render(out="<path>.<ogg|wav>", loop="auto"). Godot .ogg; Unity .ogg or
 (bits=16); web .ogg and .mp3. stems=True or layers=True for adaptive systems."""
 
 SPOTTING = """Craft: what you decide.
-- The cue sheet is markers: one per section, named for what happens there, on a bar line. A hit point lands on a
-  beat by choosing the tempo, or with tempo_changes in project_set; say in the task result which hits are exact
-  and which are within a beat.
+- With a picture, in this order: picture() for the cuts and where the production sound is loud;
+  picture_frames(at="cuts") to see every shot (a second call with start/end where you need to look closer);
+  hits(add=[...]) for the moments the music must mark: few and chosen, three to six a minute, not every cut;
+  tempo_fit() for the tempo that catches them, then tempo_fit(mode="map") only if a hard hit still misses by more
+  than 40 ms, and apply the one you choose; then the markers.
+- Without a picture (a game loop, or screenshots only: picture_frames(at="stills")), the mood and the lengths
+  below are your work; skip the hits.
+- The cue sheet is markers: one per section, named for what happens there, on a bar line. Say in the task result
+  which hits are exact and which are within a beat, and the tempo you chose over which others.
 - Per section give the Producer and Composer what they cannot see: what happens, the mood in two or three words,
-  how full the music may be under dialogue or sound effects, and where it has to get out of the way.
+  how full the music may be under dialogue or sound effects, and where it has to get out of the way. It goes in
+  the brief: project_set(brief={"spotting": "..."}).
 - Lengths: a menu loop 45-120 s, exploration 1.5-3 min, battle 60-120 s, a stinger 2-8 s as a one-shot. A loop is
   a whole number of bars and its last bar leads back into its first."""
 
@@ -105,7 +112,9 @@ COMPOSER = """Craft, in the order you work:
    copy: a new counterline, another octave, a reharmonised cadence.
 8. A loop's last bar leads into its first (the dominant, or a pickup into the first melody note), and no note
    crosses the loop end unless you mean it to.
-9. Shape each phrase: notes_edit(op="velocity", ramp_from=.., ramp_to=..), > for accents. A patch with a dynamics
+9. Music to picture: project_info lists "hits" with their bar:beat. Each one gets something a viewer hears
+   there: a new section, an accent, a chord change, or silence. The tempo is not yours to move.
+10. Shape each phrase: notes_edit(op="velocity", ramp_from=.., ramp_to=..), > for accents. A patch with a dynamics
    CC takes its loudness from cc(), not from velocity.
 
 Checking: score(section="A") lines the chord on each beat up with every part. Fix each "!" line or know why it
@@ -199,8 +208,11 @@ heard against the rest. Brightness in audition() is for comparing candidates, no
 """ + GENRES
 
 TRACKING = """Craft: recorded audio.
-- audio_import places a recording on an audio track; clip_edit trims, moves and fades it; arrange moves whole
-  sections. Keep takes of one part on one track and say in your summary which take is used where.
+- Recording is done by a person on the Desk (arm, REC). Each time round the loop, and each new recording over
+  old material, is a pass on the same track: the `pass` number on its clips in project_info, muted where another
+  pass is heard. comp(track, start, end, use=<pass>) chooses the pass heard over a stretch; nothing is deleted.
+  Comp at phrase ends or rests, never inside a held note, and say in your summary which pass is used where.
+- audio_import places a file on an audio track; clip_edit trims, moves and fades it; arrange moves whole sections.
 - Recordings set the tempo and tuning the other seats work to: when a take drifts from the grid or the key, say
   where (bars) and by how much instead of bending the other parts around it without telling anyone.
 - render() and listen() after placing: levels against the rest, and bars where the clip is silent or clipped."""

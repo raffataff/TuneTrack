@@ -37,6 +37,14 @@ Before writing a note, find out what the music is for:
 
 ## 3. Plan the form (before the notes)
 
+**Music to picture** (a cutscene, a trailer, recorded gameplay): spot it before anything else. `picture(file=...)`
+reads the video (cuts, where its own sound is loud), `picture_frames(at="cuts")` shows every shot. Mark the few moments
+the music must catch with `hits(add=[{"t": 12.4, "name": "door slams"}])`: three to six a minute, not every cut. Then
+`tempo_fit()` for the steady tempo that puts them on beats (under about 40 ms reads as on the beat), and
+`tempo_fit(mode="map", tempo=..., apply=True)` only when a hard hit still misses. Fit the tempo before writing: notes
+keep their bars when it moves. Give every hit something a viewer hears there (a new section, an accent, a chord
+change, silence), keep the music thin where `sound.loud` shows dialogue, and deliver with `render(out="cue.mp4")`.
+
 Set `markers()` for sections and `project_set(loop="5:1-21:1")` for the loop region, then put each section's harmony on
 the chord track (section 4). Typical forms:
 

@@ -717,8 +717,10 @@ juce::var Session::apply (const juce::var& spec)
                     prev = strip.head = s->node;
                 strip.tap = buildChain (id, t["fx"], prev);
             }
-            else if (const auto src = t["source"]; src.isObject())
+            else if (const auto src = t["source"], live = t["input"]; src.isObject() || live.isObject())
             {
+                // "input": {"ch": [left, right?], "monitor": bool}: the interface's input joins the strip before
+                // its inserts (heard while monitoring). A strip may have an input and nothing recorded yet.
                 const auto type = str (src, "type");
                 std::shared_ptr<Lane> lane;
                 if (! listens (t["fx"]))
@@ -741,9 +743,11 @@ juce::var Session::apply (const juce::var& spec)
                     wiring = &laneWires[id];
                     wiring->clear();
                 }
-                if (auto* s = device (id, id + "/inst", src, true, false))
+                if (auto* s = src.isObject() ? device (id, id + "/inst", src, true, false) : nullptr)
                 {
                     prev = s->node;
+                    if (auto* stem = dynamic_cast<StemNode*> (s->node->getProcessor()))
+                        stem->duck = flag (src, "duck", false);
                     const auto instKey = s->key;
                     Graph::Node::Ptr meter;
                     if (type == "vst3")
@@ -770,11 +774,15 @@ juce::var Session::apply (const juce::var& spec)
                                 }
                             }
                             const auto sig = juce::String (hash) + ":" + juce::String ((int) seq->size());
+                            auto* source = static_cast<MidiSourceNode*> (m->node->getProcessor());
                             if (m->applied != sig)
                             {
-                                static_cast<MidiSourceNode*> (m->node->getProcessor())->seq.set (seq);
+                                source->seq.set (seq);
                                 m->applied = sig;
                             }
+                            source->thruChannel = (int) num (src, "channel", 0) + 1;
+                            source->thru = flag (src, "thru", false);
+                            source->thruFrom = (int) num (src, "thru_from", 0);
                             wiring->push_back ({ { m->node->nodeID, Graph::midiChannelIndex }, { s->node->nodeID, Graph::midiChannelIndex } });
                             if (meter != nullptr)
                             {
@@ -791,6 +799,22 @@ juce::var Session::apply (const juce::var& spec)
                             }
                         }
                 }
+                if (live.isObject())
+                    if (auto* in = take (id, "input", id + "/input", [this] (juce::String&) -> std::unique_ptr<juce::AudioProcessor>
+                                         { return std::make_unique<InputNode> (transport); }))
+                    {
+                        auto* node = static_cast<InputNode*> (in->node->getProcessor());
+                        auto* ch = live["ch"].getArray();
+                        node->left = ch != nullptr && ch->size() > 0 ? (int) (*ch)[0] : 0;
+                        node->right = ch != nullptr && ch->size() > 1 ? (int) (*ch)[1] : -1;
+                        node->monitor = flag (live, "monitor", false);
+                        if (auto* sum = take (id, "insum", id + "/insum", gainNode))  // what is recorded + what comes in
+                        {
+                            link (prev.get(), sum->node.get());
+                            link (in->node.get(), sum->node.get());
+                            prev = sum->node;
+                        }
+                    }
                 prev = buildChain (id, t["fx"], prev);
                 if (lane != nullptr)
                 {
@@ -842,6 +866,10 @@ juce::var Session::apply (const juce::var& spec)
         link (master.tap.get(), f->node.get());
         link (f->node.get(), outNode.get());
     }
+    // the metronome: after the master, never in a file (Transport::click is off outside live playback)
+    if (auto* c = take ("master", "click", "master/click", [this] (juce::String&) -> std::unique_ptr<juce::AudioProcessor>
+                        { return std::make_unique<ClickNode> (transport); }))
+        link (c->node.get(), outNode.get());
 
     // ---- routing, sends, sidechain keys ----
     for (auto& r : routes)

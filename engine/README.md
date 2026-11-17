@@ -36,7 +36,7 @@ tunetrack live <project> --null-test render with both engines and report the dif
 Directly:
 
 ```
-tunetrack-engine [--no-device] [--device <name part>] [--per-sample] [--threads <n>]
+tunetrack-engine [--no-device] [--device <name part>] [--inputs] [--per-sample] [--threads <n>]
 tunetrack-engine --render <spec.json> <out.wav> [--per-sample] [--threads <n>]
 tunetrack-engine --devices
 ```
@@ -92,8 +92,29 @@ core but one, at most 8).
 - **What it does not host.** Audio clips, and SFZ instruments in a build without sfizz, arrive as audio files
   ("stems") that the offline worker renders dry and caches; their inserts still run live. Time-stretched and transposed
   clips are stretched there too (Rubber Band through pedalboard, `engine._stretched_clip`, cached per clip).
+- **Tracking** (src/Recorder.h). `device` with `"inputs": true` (or `--inputs`) opens the interface's inputs;
+  `inputs` lists them and opens every MIDI keyboard. A strip with `"input": {"ch": [left, right?], "monitor": bool}`
+  gets the input before its inserts, heard only while monitoring. `record` (`{"audio": {strip id: {"file", "ch"}},
+  "from": sample, "count_until": sample}`) plays and writes each file as the input arrives, plus the keyboard's
+  events; `record_stop` answers with `marks` (flat [samples into the recording, song position], one at the start
+  and one per loop wrap), `midi` (flat [samples into the recording, status, d1, d2]), `samples`, `dropped` and
+  `comp` (`graph`, `out`, `in`: the latencies the Python side moves the result earlier by). A source with
+  `"thru": true` is played by the keyboard on `"channel"`. `click` switches the metronome (after the master, never
+  offline). Positions before sample 0 are allowed (a count-in). `record` also takes `"punch": [in, out?]` (a
+  stem source with `"duck": true`, an armed audio track, is silent between them while recording) and `"stop_at"`
+  (the transport stops there by itself; `recording` stays true in the ticks until `record_stop`).
+  Keyboards are numbered in the order they were opened (`inputs` lists them in that order; 0 is what the `midi`
+  op sends): `midi_src` in the answer says which each event came from, and a source's `"thru_from": n` lets only
+  keyboard n (and 0) play it. `devices` lists outputs and `inputs`; `device` takes `"input"` (the device to
+  record from) and `"pick": true` (choose the output as at start-up).
+  A device that is not at the project's rate: its input is not heard through the engine, and is recorded as it
+  arrives at the device's rate (`file_sr`; marks, events and `samples` are then in device samples, song positions
+  still in the project's), the keyboard plays at the start of the next session block. `pull` takes `input` (a
+  file as the device's input), `midi` ([[device sample, status, d1, d2 [, keyboard]]]) and `hold` (leave the
+  transport alone), and `record` without a device takes `device_sr`, which is how the tests record.
 - **Protocol.** One JSON object per line on stdin (`{"op": "load", "path": ...}`, `play`, `stop`, `seek`, `loop`,
-  `render`, `editor`, `save_state`, `devices`, `device`, `status`, `ticks`, `quit`), each answered with a line
+  `render`, `editor`, `save_state`, `devices`, `device`, `inputs`, `record`, `record_stop`, `click`, `midi`,
+  `status`, `ticks`, `quit`), each answered with a line
   starting `@@ ` that repeats the command's `id` as `re`. `ticks` turns on position and meter events.
 - **Offline renders.** `render` writes the master to `out` (leave it empty for none) and, for each strip named in
   `taps` (`{strip id: wav path}`), the strip's audio before its fader: 32-bit float, from song position 0, lined

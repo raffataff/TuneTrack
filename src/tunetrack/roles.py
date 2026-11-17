@@ -17,6 +17,9 @@ READ = {"status", "project_info", "project_list", "notes_read", "score", "analyz
 HEAR = {"render", "listen", "audition"}
 WRITE = {"write", "add_notes", "chords", "pattern", "drums", "cc", "notes_edit", "clip_edit", "arrange", "midi_import"}
 SHAPE = {"project_set", "markers", "harmony"}
+# The picture: PICTURE reads it and decides (Spotting); LOOK is for a seat that only needs to see it.
+PICTURE = {"picture", "picture_frames", "hits", "tempo_fit"}
+LOOK = {"picture", "picture_frames"}
 TRACK = {"track_add", "track_update", "track_remove", "track_duplicate"}
 MIXING = {"track_update", "fx_add", "fx_update", "fx_remove", "automation"}
 AUDIO = {"audio_import"}
@@ -52,12 +55,12 @@ ROLES: dict[str, Role] = {r.id: r for r in [
     _role("producer", "Producer", "Control desk",
           "Turns the brief into a plan: form, tempo, key, who does what and in which order. Hands out tasks, "
           "listens to what comes back, accepts or returns takes, and decides when the cue is finished.",
-          {FORM, BRIEF, TRACKS}, HEAR | SHAPE | TRACK | LEAD | HISTORY,
+          {FORM, BRIEF, TRACKS}, HEAR | SHAPE | TRACK | LEAD | HISTORY | LOOK,
           tier="top", hands=("spotting", "composer", "rhythm", "sound", "mix", "review")),
     _role("spotting", "Spotting", "Screening room",
           "Reads the picture or the game: scenes, cuts, hit points, mood per section. Produces the cue sheet and "
           "the tempo map and markers that make the hits land on beats.",
-          {FORM, BRIEF}, SHAPE, optional=True, tier="high", hands=("producer", "composer")),
+          {FORM, BRIEF}, SHAPE | PICTURE, optional=True, tier="high", hands=("producer", "composer")),
     _role("composer", "Composer", "Writing room",
           "Themes, harmony and structure: the melody people remember, the chord track, how sections contrast.",
           {NOTES, FORM, TRACKS}, HEAR | WRITE | SHAPE | TRACK | HISTORY,
@@ -77,9 +80,9 @@ ROLES: dict[str, Role] = {r.id: r for r in [
           {SOUND, TRACKS}, HEAR | {"track_update", "track_add"} | LIBRARY | HISTORY, tier="mid",
           hands=("arranger", "mix")),
     _role("tracking", "Tracking", "Live room",
-          "Recorded audio - guitar, voice, anything through the interface: takes, comping, placing and cleaning "
+          "Recorded audio - guitar, voice, anything through the interface: passes, comping, placing and cleaning "
           "the audio clips.",
-          {NOTES, TRACKS}, HEAR | AUDIO | {"clip_edit", "arrange", "track_add", "track_update"} | HISTORY,
+          {NOTES, TRACKS}, HEAR | AUDIO | {"clip_edit", "arrange", "comp", "track_add", "track_update"} | HISTORY,
           optional=True, tier="mid", hands=("mix",)),
     _role("mix", "Mix", "Mixing console",
           "Balance, panning, EQ, dynamics, space and automation, then the master chain and loudness target.",

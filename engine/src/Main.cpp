@@ -4,10 +4,11 @@
 // through the audio interface or renders it faster than real time. The Python side drives it with one JSON
 // command per line on stdin; replies and events come back on stdout as lines starting with "@@ ".
 //
-//   tunetrack-engine [--no-device] [--device <name part>] [--per-sample] [--threads <n>]
+//   tunetrack-engine [--no-device] [--device <name part>] [--inputs] [--per-sample] [--threads <n>]
 //   tunetrack-engine --render <spec.json> <out.wav> [--per-sample] [--threads <n>]
 //   tunetrack-engine --devices
 //   tunetrack-engine --describe <plugin.vst3> <out.xml>   (used by the engine itself)
+#include "Recorder.h"
 #include "Resampler.h"
 #include "Session.h"
 
@@ -86,7 +87,7 @@ static LONG WINAPI crashFilter (EXCEPTION_POINTERS* info)
 
 namespace tt
 {
-class EngineApp : private juce::AudioIODeviceCallback, private juce::Timer
+class EngineApp : private juce::AudioIODeviceCallback, private juce::Timer, private juce::MidiInputCallback
 {
 public:
     EngineApp() : session (transport) {}
@@ -97,6 +98,49 @@ public:
         deviceManager.removeAudioCallback (this);
         deviceManager.closeAudioDevice();
         session.closeEditors();
+    }
+
+    // ---- inputs: the interface's input channels and the MIDI keyboards ----
+    // MIDI thread: stamped with the time it arrived, handed to the audio thread through `keys`.
+    void handleIncomingMidiMessage (juce::MidiInput* from, const juce::MidiMessage& m) override
+    {
+        if (m.isActiveSense() || m.isMidiClock())
+            return;
+        for (size_t k = 0; k < keyboardIs.size(); ++k)
+            if (keyboardIs[k].load (std::memory_order_acquire) == from)
+                return keys[k + 1].addMessageToQueue (m);
+    }
+
+    // Opens every MIDI input not open yet (a keyboard plugged in since); returns the names of those open, in
+    // order: the first is source 1 of LiveIn::midi (0 is what the `midi` op sends).
+    juce::var openKeyboards()
+    {
+        for (auto& d : juce::MidiInput::getAvailableDevices())
+        {
+            bool have = false;
+            for (auto& k : keyboards)
+                have = have || k->getIdentifier() == d.identifier;
+            if (! have && keyboards.size() < keyboardIs.size())
+                if (auto in = juce::MidiInput::openDevice (d.identifier, this))
+                {
+                    keyboardIs[keyboards.size()].store (in.get(), std::memory_order_release);
+                    in->start();
+                    keyboards.push_back (std::move (in));
+                }
+        }
+        juce::Array<juce::var> names;
+        for (auto& k : keyboards)
+            names.add (k->getName());
+        return names;
+    }
+
+    juce::var inputNames()
+    {
+        juce::Array<juce::var> out;
+        if (auto* d = deviceManager.getCurrentAudioDevice())
+            for (auto& n : d->getInputChannelNames())
+                out.add (n);
+        return out;
     }
 
     // ---- output ----
@@ -125,13 +169,13 @@ public:
     }
 
     // ---- audio device ----
-    juce::var listDevices()
+    juce::var listDevices (bool inputs = false)
     {
         juce::Array<juce::var> out;
         for (auto* type : deviceManager.getAvailableDeviceTypes())
         {
             type->scanForDevices();
-            for (auto& name : type->getDeviceNames (false))
+            for (auto& name : type->getDeviceNames (inputs))
                 out.add (juce::var (object ({ { "type", type->getTypeName() }, { "name", name } }).get()));
         }
         return out;
@@ -174,7 +218,27 @@ public:
             setup.useDefaultInputChannels = false;
             setup.inputChannels.clear();
             setup.useDefaultOutputChannels = true;
-            const auto err = deviceManager.setAudioDeviceSetup (setup, true);
+            auto err = juce::String ("no inputs asked for");
+            inputProblem = {};
+            if (wantInputs)
+            {
+                // an ASIO driver is one device both ways; elsewhere the system's default input
+                auto withIn = setup;
+                if (auto* type = deviceManager.getCurrentDeviceTypeObject())
+                {
+                    const auto ins = type->getDeviceNames (true);
+                    // the input device asked for, else the same device (an ASIO driver is one both ways), else
+                    // the system's
+                    withIn.inputDeviceName = wantedInput.isNotEmpty() && ins.contains (wantedInput) ? wantedInput
+                                             : ins.contains (c.name) ? c.name : ins[juce::jmax (0, type->getDefaultDeviceIndex (true))];
+                }
+                withIn.inputChannels.setRange (0, 64, true);
+                err = withIn.inputDeviceName.isEmpty() ? juce::String ("no input device") : deviceManager.setAudioDeviceSetup (withIn, true);
+                if (err.isNotEmpty())
+                    inputProblem = "inputs could not be opened (" + err + ")";
+            }
+            if (err.isNotEmpty())
+                err = deviceManager.setAudioDeviceSetup (setup, true);
             if (err.isEmpty() && deviceManager.getCurrentAudioDevice() != nullptr)
             {
                 deviceManager.addAudioCallback (this);
@@ -193,6 +257,9 @@ public:
             return object ({ { "type", d->getTypeName() }, { "name", d->getName() }, { "sr", d->getCurrentSampleRate() },
                              { "block", d->getCurrentBufferSizeSamples() },
                              { "out_latency", d->getOutputLatencyInSamples() },
+                             { "in_latency", d->getInputLatencyInSamples() },
+                             { "ins", d->getActiveInputChannels().countNumberOfSetBits() },
+                             { "input_problem", inputProblem },
                              { "rate", transport.sampleRate },           // the session's; converted when it differs
                              { "converted", ratio != 1.0 } });
         return object ({});
@@ -204,7 +271,7 @@ public:
         int done = 0;
         while (done < n)
         {
-            if (const auto s = transport.seekRequest.exchange (-1); s >= 0)
+            if (const auto s = transport.seekRequest.exchange (Transport::noSeek); s != Transport::noSeek)
                 pos = s;
             const bool playing = transport.playing.load();
             const bool loop = transport.looping.load();
@@ -216,6 +283,14 @@ public:
             transport.blockLen = chunk;
             transport.blockPlaying = playing;
             transport.tempoNow = transport.tempo.get();
+            transport.in.offset = done;
+            if (playing && recorder != nullptr)
+            {
+                if (! recorder->deviceTime)
+                    recorder->capture (transport.in, done, chunk, pos);
+                else  // heard once what is waiting in the converter has gone out
+                    recorder->mark (pos, chunk, recBase + (int64) std::llround ((ahead + done) / ratio));
+            }
             float* chans[2] = { work.getWritePointer (0, done), work.getWritePointer (1, done) };
             juce::AudioBuffer<float> view (chans, 2, chunk);
             view.clear();
@@ -228,8 +303,10 @@ public:
                 const int64 end = transport.endSample.load();
                 if (loop && le > ls && pos == le)
                     pos = ls;
-                else if (stopAtEnd && end > 0 && pos >= end)
+                else if (stopAtEnd && recorder == nullptr && end > 0 && pos >= end)
                     transport.playing = false;
+                else if (recorder != nullptr && pos >= stopAt.load (std::memory_order_relaxed))
+                    transport.playing = false;  // past the punch out: the Python side sees it and stops the recording
             }
             done += chunk;
         }
@@ -269,7 +346,9 @@ public:
                 converted.clear();
                 return;
             }
+            ahead = fifoCount - resampler.halfWidth();
             renderBlock (k);
+            transport.in.clearMidi();  // the keyboard was heard at the start of that block
             for (int c = 0; c < 2; ++c)
                 fifo.copyFrom (c, fifoCount, work, c, 0, k);
             fifoCount += k;
@@ -285,7 +364,51 @@ public:
         fifoCount -= drop;
     }
 
-    void audioDeviceIOCallbackWithContext (const float* const*, int, float* const* out, int numOut, int n,
+    // One device block: what came in (`in`, and the keyboards' events in `devMidi`) is there for the graph to read
+    // and the recorder to write while it runs.
+    // With sample-rate conversion the session's blocks are not the device's. The input is then not heard through
+    // the engine, and is recorded as it arrives, at the device's rate; the keyboard plays at the start of the
+    // next session block (a few ms of jitter) and is recorded at the time it was played.
+    void liveBlock (const float* const* in, int numIn, int n)
+    {
+        const juce::SpinLock::ScopedTryLockType held (recLock);
+        recorder = held.isLocked() ? recording.get() : nullptr;
+        for (int c = 0; c < juce::jmin (numIn, (int) inPeak.size()); ++c)
+            if (in[c] != nullptr)
+            {
+                const auto range = juce::FloatVectorOperations::findMinAndMax (in[c], n);
+                const float m = juce::jmax (-range.getStart(), range.getEnd());
+                if (m > inPeak[(size_t) c].load (std::memory_order_relaxed))
+                    inPeak[(size_t) c].store (m, std::memory_order_relaxed);
+            }
+        if (ratio == 1.0)
+        {
+            transport.in.audio = numIn > 0 ? in : nullptr;
+            transport.in.channels = numIn;
+            for (size_t s = 0; s < devMidi.size(); ++s)
+                transport.in.midi[s].swapWith (devMidi[s]);
+            renderBlock (n);
+            transport.in.clearMidi();
+        }
+        else
+        {
+            transport.in.audio = nullptr;
+            for (size_t s = 0; s < devMidi.size(); ++s)
+                for (const auto meta : devMidi[s])
+                    transport.in.midi[s].addEvent (meta.data, meta.numBytes, 0);
+            const bool was = transport.playing.load();
+            recBase = recorder != nullptr ? recorder->written : 0;
+            pullConverted (n);
+            if (recorder != nullptr && recorder->deviceTime && (was || transport.playing.load()))
+                recorder->write (numIn > 0 ? in : nullptr, numIn, devMidi, 0, n);
+        }
+        for (auto& m : devMidi)
+            m.clear();
+        transport.in.audio = nullptr;
+        recorder = nullptr;
+    }
+
+    void audioDeviceIOCallbackWithContext (const float* const* in, int numIn, float* const* out, int numOut, int n,
                                            const juce::AudioIODeviceCallbackContext&) override
     {
         const juce::ScopedNoDenormals noDenormals;
@@ -297,10 +420,9 @@ public:
                     juce::FloatVectorOperations::clear (out[c], n);
             return;
         }
-        if (ratio == 1.0)
-            renderBlock (n);
-        else
-            pullConverted (n);
+        for (size_t s = 0; s < keys.size(); ++s)
+            keys[s].removeNextBlockOfMessages (devMidi[s], n);
+        liveBlock (in, numIn, n);
         for (int c = 0; c < numOut; ++c)
         {
             if (out[c] == nullptr)
@@ -321,6 +443,8 @@ public:
         work.setSize (2, block);
         session.prepare (rate, block, false);
         setUpConversion (devRate, devBlock);
+        for (auto& k : keys)
+            k.reset (devRate);
     }
 
     void audioDeviceStopped() override {}
@@ -362,6 +486,10 @@ public:
         Offline o { deviceManager.getCurrentAudioDevice() != nullptr, false, session.sampleRate, session.blockSize, session.offline };
         if (o.live)
             deviceManager.removeAudioCallback (this);
+        transport.in.audio = nullptr;
+        transport.in.clearMidi();
+        transport.click = false;  // never in a file
+        transport.countUntil = Transport::noSeek;
         if (o.sr != transport.sampleRate || o.block != offlineBlock || ! o.offline)
         {
             session.prepare (transport.sampleRate, offlineBlock, true);
@@ -533,6 +661,44 @@ public:
             transport.playing = true;
             return reply (cmd, object ({ { "playing", true } }));
         }
+        if (op == "record")
+            return startRecording (cmd);
+        if (op == "record_stop")
+        {
+            if (recording == nullptr)
+                return fail (cmd, "not recording");
+            juce::DynamicObject::Ptr o = stopRecording().getDynamicObject();
+            o->setProperty ("comp", comp());
+            o->setProperty ("sr", transport.sampleRate);
+            return reply (cmd, o);
+        }
+        if (op == "click")
+        {
+            transport.click = (bool) cmd["on"];
+            return reply (cmd, object ({ { "click", transport.click.load() } }));
+        }
+        if (op == "inputs")
+        {
+            // what can be recorded: the open device's input channels (open them with device + "inputs") and the
+            // MIDI keyboards, which are opened here
+            auto o = deviceInfo();
+            o->setProperty ("audio", inputNames());
+            o->setProperty ("midi", openKeyboards());
+            return reply (cmd, o);
+        }
+        if (op == "midi")
+        {
+            // play the armed instrument as a keyboard would: [[status, data1, data2], ...]
+            if (auto* a = cmd["msgs"].getArray())
+                for (auto& m : *a)
+                    if (auto* b = m.getArray(); b != nullptr && b->size() >= 3)
+                    {
+                        juce::MidiMessage msg ((int) (*b)[0], (int) (*b)[1], (int) (*b)[2]);
+                        msg.setTimeStamp (juce::Time::getMillisecondCounterHiRes() * 0.001);
+                        keys[0].addMessageToQueue (msg);
+                    }
+            return reply (cmd, object ({}));
+        }
         if (op == "stop")
         {
             transport.playing = false;
@@ -576,22 +742,48 @@ public:
             const juce::ScopedNoDenormals noDenormals;
             setUpConversion (devRate, devBlock);
             juce::AudioBuffer<float> result (2, (int) total);
-            transport.seekRequest = 0;
-            transport.playing = true;
+            // "input": a file played as the device's input channels; "midi": [[device sample, status, d1, d2
+            // [, which keyboard]], ...] as keyboards' events; "hold": leave the transport as it is (a recording
+            // started before the pull)
+            juce::AudioBuffer<float> input;
+            if (const auto path = cmd["input"].toString(); path.isNotEmpty())
+            {
+                juce::AudioFormatManager fm;
+                fm.registerBasicFormats();
+                std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (juce::File (path)) };
+                if (r == nullptr)
+                    return fail (cmd, "cannot read " + path);
+                input.setSize ((int) r->numChannels, (int) juce::jmax<int64> (total, r->lengthInSamples));
+                input.clear();
+                r->read (&input, 0, (int) r->lengthInSamples, 0, true, true);
+            }
+            const bool hold = (bool) cmd["hold"];
+            if (! hold)
+            {
+                transport.seekRequest = 0;
+                transport.playing = true;
+            }
             stopAtEnd = false;
+            std::vector<const float*> ins ((size_t) input.getNumChannels());
             for (int64 done = 0; done < total;)
             {
                 const int most = ratio == 1.0 ? juce::jmin (devBlock, work.getNumSamples()) : devBlock;
                 const int k = (int) juce::jmin<int64> (most, total - done);
-                if (ratio == 1.0)
-                    renderBlock (k);
-                else
-                    pullConverted (k);
+                for (size_t c = 0; c < ins.size(); ++c)
+                    ins[c] = input.getReadPointer ((int) c, (int) done);
+                if (auto* a = cmd["midi"].getArray())
+                    for (auto& m : *a)
+                        if (auto* b = m.getArray(); b != nullptr && b->size() >= 4)
+                            if (const auto at = (int64) (double) (*b)[0]; at >= done && at < done + k)
+                                devMidi[(size_t) juce::jlimit (0, LiveIn::sources - 1, b->size() > 4 ? (int) (*b)[4] : 0)]
+                                    .addEvent (juce::MidiMessage ((int) (*b)[1], (int) (*b)[2], (int) (*b)[3]), (int) (at - done));
+                liveBlock (ins.data(), (int) ins.size(), k);
                 for (int c = 0; c < 2; ++c)
                     result.copyFrom (c, (int) done, ratio == 1.0 ? work : converted, c, 0, k);
                 done += k;
             }
-            transport.playing = false;
+            if (! hold)
+                transport.playing = false;
             stopAtEnd = true;
             setUpConversion (transport.sampleRate, devBlock);
             const juce::File outFile (cmd["out"].toString());
@@ -660,7 +852,8 @@ public:
             return err.isEmpty() ? reply (cmd, object ({})) : fail (cmd, err);
         }
         if (op == "devices")
-            return reply (cmd, object ({ { "devices", listDevices() }, { "current", juce::var (deviceInfo().get()) } }));
+            return reply (cmd, object ({ { "devices", listDevices() }, { "inputs", listDevices (true) },
+                                         { "current", juce::var (deviceInfo().get()) } }));
         if (op == "device")
         {
             if ((bool) cmd["close"])
@@ -669,7 +862,17 @@ public:
                 deviceManager.closeAudioDevice();
                 return reply (cmd, object ({}));
             }
-            const auto err = openDevice (cmd["name"].toString(), cmd["sr"].isVoid() ? transport.sampleRate : (double) cmd["sr"]);
+            if (! cmd["inputs"].isVoid())
+                wantInputs = (bool) cmd["inputs"];
+            // "input": the device to record from ("" = the output device's own inputs, or the system's);
+            // "pick": choose the output as at start-up, whatever is open now
+            if (! cmd["input"].isVoid())
+                wantedInput = cmd["input"].toString();
+            auto name = cmd["name"].toString();
+            if (name.isEmpty() && ! (bool) cmd["pick"])
+                if (auto* d = deviceManager.getCurrentAudioDevice())
+                    name = d->getTypeName() + ": " + d->getName();  // the same device, with or without its inputs
+            const auto err = openDevice (name, cmd["sr"].isVoid() ? transport.sampleRate : (double) cmd["sr"]);
             auto o = deviceInfo();
             if (err.isNotEmpty())
                 o->setProperty ("error", err);
@@ -703,10 +906,13 @@ public:
                 break;
             at = &t;
         }
+        if (at == nullptr && ! beats.empty())
+            at = &beats.front();  // a count-in: before the start, at the first tempo
         if (at != nullptr)
             beat = at->beat + (double) (p - at->sample) / transport.sampleRate * at->bpm / 60.0;
         return object ({ { "pos", p }, { "beat", beat }, { "playing", transport.playing.load() },
-                         { "looping", transport.looping.load() } });
+                         { "looping", transport.looping.load() }, { "recording", transport.recording.load() },
+                         { "click", transport.click.load() } });
     }
 
     void timerCallback() override
@@ -714,13 +920,86 @@ public:
         auto o = status();
         o->setProperty ("ev", "tick");
         o->setProperty ("peaks", session.peaks());
+        juce::Array<juce::var> ins;
+        if (auto* d = deviceManager.getCurrentAudioDevice())
+            for (int c = 0; c < juce::jmin ((int) inPeak.size(), d->getActiveInputChannels().countNumberOfSetBits()); ++c)
+                ins.add (inPeak[(size_t) c].exchange (0.0f));
+        o->setProperty ("ins", juce::var (ins));
         o->setProperty ("cpu", deviceManager.getCpuUsage());
         o->setProperty ("xruns", deviceManager.getXRunCount());
         send (juce::var (o.get()));
     }
 
+    // ---- recording ----
+    juce::var comp()
+    {
+        auto* d = deviceManager.getCurrentAudioDevice();
+        return juce::var (object ({ { "graph", session.latency() }, { "out", d != nullptr ? d->getOutputLatencyInSamples() : 0 },
+                                    { "in", d != nullptr ? d->getInputLatencyInSamples() : 0 } }).get());
+    }
+
+    // {"audio": {track id: {"file": path, "ch": [left, right?]}}, "from": sample (may be before 0: a count-in),
+    //  "punch": [in, out?] (armed audio tracks are silent between them), "stop_at": sample the transport stops at}
+    // Without a device, "device_sr" records as a device at that rate would (the `pull` op then plays it).
+    void startRecording (const juce::var& cmd)
+    {
+        if (recording != nullptr)
+            return fail (cmd, "already recording");
+        auto rec = std::make_unique<Recorder>();
+        rec->patient = deviceManager.getCurrentAudioDevice() == nullptr;
+        if (rec->patient && ! cmd["device_sr"].isVoid())
+            setUpConversion ((double) cmd["device_sr"], 480);
+        rec->deviceTime = ratio != 1.0;
+        rec->fileRate = rec->deviceTime ? deviceRate : transport.sampleRate;
+        if (auto* a = cmd["audio"].getDynamicObject())
+        {
+            for (auto& kv : a->getProperties())
+            {
+                auto* ch = kv.value["ch"].getArray();
+                const auto err = rec->add (kv.name.toString(), juce::File (kv.value["file"].toString()),
+                                           ch != nullptr && ch->size() > 0 ? (int) (*ch)[0] : 0,
+                                           ch != nullptr && ch->size() > 1 ? (int) (*ch)[1] : -1, rec->fileRate);
+                if (err.isNotEmpty())
+                    return fail (cmd, err);
+            }
+        }
+        if (! cmd["from"].isVoid())
+            transport.seekRequest = (int64) (double) cmd["from"];
+        if (! cmd["loop"].isVoid())
+            transport.looping = (bool) cmd["loop"];
+        transport.countUntil = cmd["count_until"].isVoid() ? Transport::noSeek : (int64) (double) cmd["count_until"];
+        const auto never = std::numeric_limits<int64>::max();
+        auto* punch = cmd["punch"].getArray();
+        transport.punchOut = punch != nullptr && punch->size() > 1 ? (int64) (double) (*punch)[1] : never;
+        transport.punchIn = punch != nullptr && punch->size() > 0 ? (int64) (double) (*punch)[0] : never;
+        stopAt = cmd["stop_at"].isVoid() ? never : (int64) (double) cmd["stop_at"];
+        const double fileRate = rec->fileRate;
+        {
+            const juce::SpinLock::ScopedLockType l (recLock);
+            recording = std::move (rec);
+        }
+        transport.recording = true;
+        transport.playing = true;
+        reply (cmd, object ({ { "recording", true }, { "comp", comp() }, { "sr", transport.sampleRate }, { "file_sr", fileRate } }));
+    }
+
+    juce::var stopRecording()
+    {
+        transport.playing = false;
+        transport.recording = false;
+        transport.countUntil = Transport::noSeek;
+        transport.punchIn = transport.punchOut = stopAt = std::numeric_limits<int64>::max();
+        std::unique_ptr<Recorder> rec;
+        {
+            const juce::SpinLock::ScopedLockType l (recLock);
+            rec = std::move (recording);
+        }
+        return rec != nullptr ? rec->finish() : juce::var();
+    }
+
     [[noreturn]] void quit()
     {
+        stopRecording();
         stopTimer();
         deviceManager.removeAudioCallback (this);
         deviceManager.closeAudioDevice();
@@ -738,6 +1017,21 @@ public:
     juce::AudioBuffer<float> fifo, converted;
     int fifoCount = 0;
     juce::MidiBuffer midi;
+    // From the MIDI thread to the audio thread, one per source of LiveIn::midi: [0] what the `midi` op sends,
+    // then the keyboards. `devMidi` is the device block's share of each.
+    std::array<juce::MidiMessageCollector, LiveIn::sources> keys;
+    std::array<juce::MidiBuffer, LiveIn::sources> devMidi;
+    std::vector<std::unique_ptr<juce::MidiInput>> keyboards;  // message thread
+    std::array<std::atomic<juce::MidiInput*>, LiveIn::sources - 1> keyboardIs {};  // the same, for the MIDI thread
+    std::atomic<int64> stopAt { std::numeric_limits<int64>::max() };  // while recording: the transport stops here
+    int64 recBase = 0;  // device-rate recording: where in the recording the device block being computed starts
+    int ahead = 0;      // ... and how many session samples wait in the converter before the block being rendered
+    std::array<std::atomic<float>, 32> inPeak {};          // per input channel since the last tick
+    std::unique_ptr<Recorder> recording;                   // message thread; the audio thread reads it under recLock
+    Recorder* recorder = nullptr;                          // audio thread: `recording` for the block being computed
+    juce::SpinLock recLock;
+    juce::String inputProblem, wantedInput;
+    bool wantInputs = false;
     std::vector<TempoPt> beats;
     int64 pos = 0;
     double probeSince = 0.0;  // when the ready probe of the render being handled started
@@ -814,6 +1108,7 @@ int main (int argc, char* argv[])
     if (! args.contains ("--no-device"))
     {
         const int d = args.indexOf ("--device");
+        app->wantInputs = args.contains ("--inputs");
         const auto err = app->openDevice (d >= 0 && d + 1 < args.size() ? args[d + 1] : juce::String(), 48000.0);
         auto ready = app->deviceInfo();
         ready->setProperty ("ev", "ready");

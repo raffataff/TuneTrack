@@ -429,7 +429,7 @@ def test_tools_are_listed_without_schema_labels_and_still_check_their_arguments(
 
     from tunetrack import mcp_server
     tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
-    assert len(tools) == len(mcp_server.TOOLS) == 70
+    assert len(tools) == len(mcp_server.TOOLS) == 75
 
     def labels(o):
         if isinstance(o, dict):
@@ -440,7 +440,7 @@ def test_tools_are_listed_without_schema_labels_and_still_check_their_arguments(
     props = tools["task_add"].input_schema["properties"]
     assert {"seat", "title"} <= set(props) and props["title"] == {"type": "string"}  # a parameter, not a label
     assert tools["track_update"].input_schema["required"] == ["track"]
-    assert sum(len(json.dumps(t.input_schema)) for t in tools.values()) < 27000  # it was 34,500 with the labels
+    assert sum(len(json.dumps(t.input_schema)) for t in tools.values()) < 29100  # it was 34,500 with the labels (70 tools; 74 since the picture tools, 75 with comp)
 
     async def call(name, args):
         return await mcp_server.mcp.call_tool(name, args)

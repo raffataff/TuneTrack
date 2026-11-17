@@ -25,17 +25,17 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import api, bench, config, livehost, studio, takes
+from . import api, bench, config, livehost, picture as pic, studio, takes, tracking
 from .crew import detect, host, scorecard
 
 PORT = 7373
 WEB = Path(__file__).parent / "web"
 # Only what the editor UI uses. Imports, patch deletion, opening files/apps etc. stay agent/CLI-only.
 CALLABLE = {
-    "audition", "clip_create", "clip_edit", "clip_set", "fx_add", "fx_remove", "fx_update", "harmony", "library_status",
-    "markers", "patch_capture", "plugin_params", "preview", "project_list", "project_new", "project_open",
-    "project_set", "redo", "render", "sfz_list", "synths_list", "track_add", "track_duplicate", "track_move",
-    "track_remove", "track_update", "undo",
+    "audition", "clip_create", "clip_edit", "clip_set", "comp", "fx_add", "fx_remove", "fx_update", "harmony", "hits",
+    "library_status", "markers", "patch_capture", "picture", "plugin_params", "preview", "project_list",
+    "project_new", "project_open", "project_set", "redo", "render", "sfz_list", "synths_list", "tempo_fit",
+    "track_add", "track_duplicate", "track_move", "track_remove", "track_update", "undo",
 }
 
 
@@ -105,6 +105,48 @@ def live_window(track: str, slot: str | int = "inst", take: str | None = None) -
     return livehost.window(_live_path(take), track, slot)
 
 
+def live_inputs(take: str | None = None) -> dict:
+    """Open the interface's inputs and the MIDI keyboards; the state then lists them (`inputs`)."""
+    return livehost.inputs(_live_path(take))
+
+
+def live_arm(track: str, arm: bool | None = None, monitor: bool | None = None, take: str | None = None,
+             keyboard: str | None = None) -> dict:
+    """Arm a track of what the Desk shows for recording, and/or monitor its input through its strip. keyboard:
+    the one MIDI keyboard that plays this track (a name from inputs.midi; "" = any)."""
+    return livehost.arm(_live_path(take), track, arm, monitor, keyboard)
+
+
+def live_devices(take: str | None = None) -> dict:
+    """The audio devices to play through and record from, the one in use and the one chosen."""
+    return livehost.devices(_live_path(take))
+
+
+def live_device(name: str | None = None, input: str | None = None, take: str | None = None) -> dict:  # noqa: A002
+    """Change the audio device ("type: name"; "" = pick for me) and/or the input device; kept for next time."""
+    return livehost.device(_live_path(take), name, input)
+
+
+def live_click(on: bool) -> dict:
+    return livehost.click(on)
+
+
+def live_keys(msgs: list) -> dict:
+    return livehost.keys(msgs)
+
+
+def live_record(beat: float = 0.0, count_in: float = 1.0, loop: bool | None = None, take: str | None = None,
+                until: float | None = None, quantise: float = 0.0) -> dict:
+    """Record the armed tracks into what the Desk shows (the session, or the take it has open). until: a punch
+    out in beats (one pass, then it stops by itself; the state's `done` then carries the result); quantise: a
+    grid in beats for the recorded notes' starts (0 = as played)."""
+    return livehost.record(_live_path(take), beat, count_in, loop, until, quantise)
+
+
+def live_record_stop() -> dict:
+    return livehost.record_stop()
+
+
 def live_off() -> dict:
     """Shut the live engine down and give the audio interface back."""
     return livehost.off()
@@ -125,6 +167,7 @@ STUDIO = {f.__name__: f for f in (
     studio_view, bench.seat_bench, studio.report_list, studio.report_read,
     scorecard.crew_scorecard, scorecard.crew_review, scorecard.crew_history,
     live_play, live_stop, live_seek, live_loop, live_window, live_off, live_state,
+    live_inputs, live_arm, live_click, live_keys, live_record, live_record_stop, live_devices, live_device,
 )}
 TOKEN = secrets.token_urlsafe(32)
 _HOSTS = {"127.0.0.1", "localhost", "[::1]"}
@@ -246,6 +289,10 @@ async def state(req: Request):
         except (KeyError, OSError, ValueError) as e:  # not a take of this session: show the session and say so
             d, v, out["take_error"] = cur, out["session_version"], str(e.args[0] if e.args else e)
     last = d / "renders" / "last.json"
+    try:
+        out["picture"] = pic.view(api.load(str(d)))
+    except Exception:  # noqa: BLE001 - the Desk works without its picture lane
+        out["picture"] = None
     out.update(version=v, doc=json.loads((d / "project.json").read_text(encoding="utf-8")),
                last_render=json.loads(last.read_text(encoding="utf-8")) if last.exists() else None,
                board=studio.board(str(cur)), crew=host.crew_state(str(cur)))
@@ -388,9 +435,51 @@ async def audio(req: Request):
     return FileResponse(f, headers={"Cache-Control": "no-store"})
 
 
+async def peaks(req: Request):
+    """An audio file of the open session as the Desk draws it: ?file=<path inside the project, as a clip names
+    it>[&take=<id>]. One byte per 1/200 s or so (the X-Peaks-Per-Sec header says exactly): the loudest sample
+    there, 0-255. A take's clips name files in the take or, when the take has no copy, the session."""
+    cur = _current()
+    rel = req.query_params.get("file", "")
+    if not cur or not rel:
+        return Response(status_code=404)
+    try:
+        roots = [_take_dir(cur, req.query_params["take"])] if req.query_params.get("take") else []
+    except KeyError:
+        roots = []
+    for root in [*roots, cur]:
+        f = (root / rel).resolve()
+        if root.resolve() in f.parents and f.is_file():
+            try:
+                pk = await run_in_threadpool(tracking.peaks, f)
+            except Exception:  # noqa: BLE001 - not an audio file we can read: the Desk draws the clip plain
+                return Response(status_code=404)
+            return Response(pk["peaks"], media_type="application/octet-stream",
+                            headers={"X-Peaks-Per-Sec": f"{pk['per_sec']:.6f}", "Cache-Control": "no-store"})
+    return Response(status_code=404)
+
+
+async def picture_file(req: Request):
+    """The open session's video (the browser's copy of it) or its thumbnail strip. Starlette answers Range
+    requests, which is what lets the page seek in the video."""
+    cur = _current()
+    if not cur:
+        return Response(status_code=404)
+    try:
+        d = _take_dir(cur, req.query_params["take"]) if req.query_params.get("take") else cur
+        p = api.load(str(d))
+        f = pic._side(p, ".strip.jpg") if req.query_params.get("kind") == "strip" else pic.video_file(p, web=True)
+    except (KeyError, OSError, ValueError, TypeError):
+        return Response(status_code=404)
+    if not f or not f.is_file() or cur.resolve() not in f.resolve().parents:
+        return Response(status_code=404)
+    return FileResponse(f, headers={"Cache-Control": "no-store"})
+
+
 app = _HostGuard(Starlette(routes=[
     Route("/", index), Route("/web/{name}", static), Route("/api/ping", ping), Route("/api/version", version),
-    Route("/api/state", state), Route("/api/call", call, methods=["POST"]), Route("/api/audio", audio),
+    Route("/api/state", state), Route("/api/call", call, methods=["POST"]), Route("/api/audio", audio), Route("/api/picture", picture_file),
+    Route("/api/peaks", peaks),
     Route("/api/events", events), Route("/api/live", live_events),
 ]))
 

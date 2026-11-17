@@ -3,9 +3,11 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include <array>
 #include <atomic>
 #include <bitset>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <memory>
 #include <vector>
@@ -74,6 +76,25 @@ private:
 
 struct TempoPt { int64 sample; double beat; double bpm; };
 
+// What comes in from outside while a device block is computed: the interface's input channels and the MIDI
+// keyboard. Filled by the device callback before the graph runs; empty offline.
+struct LiveIn
+{
+    const float* const* audio = nullptr;  // the device's input channels for this device block
+    int channels = 0;
+    int offset = 0;                        // where the graph block being computed starts inside the device block
+    // Keyboard events, timed inside the device block, by where they came from: 0 = sent to the engine (the
+    // on-screen keys), 1.. = the MIDI keyboards in the order they were opened.
+    static constexpr int sources = 8;
+    std::array<juce::MidiBuffer, sources> midi;
+
+    void clearMidi()
+    {
+        for (auto& m : midi)
+            m.clear();
+    }
+};
+
 // Song position. The engine fills the block* fields before each graph block; nodes and plugins read them.
 class Transport : public juce::AudioPlayHead
 {
@@ -82,8 +103,21 @@ public:
     int tsNum = 4, tsDen = 4;
 
     std::atomic<int64> pos { 0 };
-    std::atomic<int64> seekRequest { -1 };
+    static constexpr int64 noSeek = std::numeric_limits<int64>::min();  // a count-in plays from before sample 0
+    std::atomic<int64> seekRequest { noSeek };
     std::atomic<bool> playing { false };
+    std::atomic<bool> recording { false };
+    std::atomic<bool> click { false };
+    std::atomic<int64> countUntil { noSeek };  // the click also plays before this position (a count-in)
+    // While recording, what an armed audio track already holds is silent from punchIn to punchOut.
+    std::atomic<int64> punchIn { std::numeric_limits<int64>::max() }, punchOut { std::numeric_limits<int64>::max() };
+
+    bool punched (int64 at) const
+    {
+        return recording.load (std::memory_order_relaxed) && at >= punchIn.load (std::memory_order_relaxed)
+               && at < punchOut.load (std::memory_order_relaxed);
+    }
+    LiveIn in;
     std::atomic<bool> looping { false };
     std::atomic<int64> loopStart { 0 }, loopEnd { 0 }, endSample { 0 };
     Shared<std::vector<TempoPt>> tempo;
@@ -134,7 +168,7 @@ public:
         i.setBarCount ((int64) std::floor (beat / perBar));
         i.setTimeSignature (TimeSignature { tsNum, tsDen });
         i.setIsPlaying (blockPlaying);
-        i.setIsRecording (false);
+        i.setIsRecording (recording.load());
         const bool loop = looping.load();
         i.setIsLooping (loop);
         if (loop)
@@ -205,9 +239,54 @@ public:
         probing = true;
     }
 
+    // The MIDI keyboard plays this strip's instrument (an armed track), on the instrument's channel.
+    std::atomic<bool> thru { false };
+    std::atomic<int> thruChannel { 1 };
+    std::atomic<int> thruFrom { 0 };  // the one keyboard that plays it (LiveIn::midi's number); 0 = all of them
+
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer& midi) override
     {
         midi.clear();
+        sequence (midi);
+        if (! probing)
+            keyboard (midi);
+    }
+
+private:
+    void keyboard (juce::MidiBuffer& midi)
+    {
+        const int ch = juce::jlimit (1, 16, thruChannel.load (std::memory_order_relaxed));
+        if (! thru.load (std::memory_order_relaxed))
+        {
+            for (int k = 0; k < 128 && held.any(); ++k)  // disarmed with keys down
+                if (held.test ((size_t) k))
+                    midi.addEvent (juce::MidiMessage::noteOff (ch, k), 0);
+            held.reset();
+            return;
+        }
+        const int from = transport.in.offset, n = transport.blockLen;
+        const int only = thruFrom.load (std::memory_order_relaxed);
+        for (int src = 0; src < LiveIn::sources; ++src)
+        {
+            if (only > 0 && src > 0 && src != only)
+                continue;  // another keyboard's (what is sent to the engine plays every armed strip)
+            for (const auto meta : transport.in.midi[(size_t) src])
+            {
+                if (meta.samplePosition < from || meta.samplePosition >= from + n)
+                    continue;
+                auto m = meta.getMessage();
+                if (m.isSysEx() || m.getRawDataSize() > 3)
+                    continue;
+                m.setChannel (ch);
+                if (m.isNoteOn())       held.set ((size_t) m.getNoteNumber());
+                else if (m.isNoteOff()) held.reset ((size_t) m.getNoteNumber());
+                midi.addEvent (m, meta.samplePosition - from);
+            }
+        }
+    }
+
+    void sequence (juce::MidiBuffer& midi)
+    {
         const int n = transport.blockLen;
         const int64 pos = transport.blockPos;
         if (probing)
@@ -286,7 +365,6 @@ public:
         wasPlaying = true;
     }
 
-private:
     void silence (juce::MidiBuffer& midi, bool pedals)
     {
         for (size_t k = 0; k < 2048; ++k)
@@ -304,6 +382,7 @@ private:
 
     Transport& transport;
     std::bitset<2048> sounding;
+    std::bitset<128> held;  // keyboard notes passed through and not yet released
     juce::uint32 used = 0;
     size_t index = 0;
     int64 expected = -1;
@@ -370,6 +449,7 @@ public:
     }
 
     bool ok = false;
+    std::atomic<bool> duck { false };  // an armed audio track: silent between the punch points while recording
 
     void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
     {
@@ -377,25 +457,125 @@ public:
         if (! transport.blockPlaying || buf.getNumChannels() < 2)
             return;
         const int n = buf.getNumSamples();
-        const int64 pos = transport.blockPos;
+        const float target = duck.load (std::memory_order_relaxed) && transport.punched (transport.blockPos) ? 0.0f : 1.0f;
+        const float before = gain;
+        gain = target;
+        if (before == 0.0f && target == 0.0f)
+            return;
+        const int skip = (int) juce::jlimit<int64> (0, n, -transport.blockPos);  // a count-in starts before sample 0
+        const int64 pos = transport.blockPos + skip;
+        const int64 len = mapped != nullptr ? mapped->lengthInSamples : memory.getNumSamples();
+        const int k = (int) juce::jmin<int64> (n - skip, len - pos);
+        if (k <= 0)
+            return;
         if (mapped != nullptr)
-        {
-            const int64 len = mapped->lengthInSamples;
-            if (pos < len)
-                mapped->read (&buf, 0, (int) juce::jmin<int64> (n, len - pos), pos, true, true);
-        }
-        else if (pos < memory.getNumSamples())
-        {
-            const int k = (int) juce::jmin<int64> (n, memory.getNumSamples() - pos);
+            mapped->read (&buf, skip, k, pos, true, true);
+        else
             for (int c = 0; c < 2; ++c)
-                buf.copyFrom (c, 0, memory, c, (int) pos, k);
+                buf.copyFrom (c, skip, memory, c, (int) pos, k);
+        if (before != 1.0f || target != 1.0f)
+            buf.applyGainRamp (0, juce::jmin (n, 256), before, target);  // a few ms, no click
+        if (target == 0.0f && n > 256)
+            buf.clear (256, n - 256);
+    }
+
+private:
+    Transport& transport;
+    float gain = 1.0f;
+    std::unique_ptr<juce::MemoryMappedAudioFormatReader> mapped;
+    juce::AudioBuffer<float> memory;
+};
+
+// ---- Input: the interface's input channels, heard through the strip while monitoring ---------------------------
+
+class InputNode : public TtProcessor
+{
+public:
+    explicit InputNode (Transport& t) : TtProcessor ("input", 0, 2), transport (t) {}
+
+    std::atomic<int> left { 0 }, right { -1 };  // device channels; right < 0: one channel on both sides
+    std::atomic<bool> monitor { false };
+
+    void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
+    {
+        buf.clear();
+        const auto& in = transport.in;
+        const int n = buf.getNumSamples();
+        const float target = monitor.load (std::memory_order_relaxed) ? 1.0f : 0.0f;
+        if (in.audio == nullptr || buf.getNumChannels() < 2 || (gain == 0.0f && target == 0.0f))
+        {
+            gain = target;
+            return;
+        }
+        const int l = left.load (std::memory_order_relaxed);
+        int r = right.load (std::memory_order_relaxed);
+        if (r < 0)
+            r = l;
+        const int chans[2] = { l, r };
+        for (int c = 0; c < 2; ++c)
+            if (chans[c] >= 0 && chans[c] < in.channels && in.audio[chans[c]] != nullptr)
+                buf.addFromWithRamp (c, 0, in.audio[chans[c]] + in.offset, n, gain, target);
+        gain = target;
+    }
+
+private:
+    Transport& transport;
+    float gain = 0.0f;
+};
+
+// ---- Click: the metronome, a blip on every beat with the bar's first one higher --------------------------------
+
+class ClickNode : public TtProcessor
+{
+public:
+    explicit ClickNode (Transport& t) : TtProcessor ("click", 0, 2), transport (t) {}
+
+    std::atomic<float> level { 0.35f };
+
+    void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
+    {
+        buf.clear();
+        const int n = buf.getNumSamples();
+        const bool on = transport.click.load (std::memory_order_relaxed)
+                        || transport.blockPos < transport.countUntil.load (std::memory_order_relaxed);
+        if (! on || ! transport.blockPlaying || buf.getNumChannels() < 2 || n == 0)
+        {
+            left = 0;
+            return;
+        }
+        const double sr = transport.sampleRate;
+        const double perBar = juce::jmax (1.0, transport.tsNum * 4.0 / juce::jmax (1, transport.tsDen));
+        const double b0 = transport.beatAt (transport.blockPos), b1 = transport.beatAt (transport.blockPos + n);
+        double next = std::ceil (b0 - 1.0e-9);
+        float* l = buf.getWritePointer (0);
+        float* r = buf.getWritePointer (1);
+        const float g = level.load (std::memory_order_relaxed);
+        for (int i = 0; i < n; ++i)
+        {
+            if (next < b1 && b1 > b0 && i >= (int) ((next - b0) / (b1 - b0) * n))
+            {
+                const double inBar = next - std::floor (next / perBar + 1.0e-9) * perBar;
+                step = juce::MathConstants<double>::twoPi * (std::abs (inBar) < 1.0e-6 ? 1760.0 : 1174.66) / sr;
+                phase = 0.0;
+                total = left = (int) (0.035 * sr);
+                next += 1.0;
+            }
+            if (left > 0)
+            {
+                const float env = (float) left / (float) total;
+                const float v = g * env * env * (float) std::sin (phase);
+                phase += step;
+                --left;
+                l[i] = v;
+                r[i] = v;
+            }
         }
     }
 
 private:
     Transport& transport;
-    std::unique_ptr<juce::MemoryMappedAudioFormatReader> mapped;
-    juce::AudioBuffer<float> memory;
+    double phase = 0.0, step = 0.0;
+    int left = 0, total = 1;
 };
 
 // ---- Fader: volume, balance pan, automation, on/off, peak meter -----------------------------------------------

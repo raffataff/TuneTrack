@@ -14,7 +14,17 @@
   <div class="cluster">
     <button id="playBtn" class="key" title="Render what changed, then play (Space)">▶</button>
     <button id="stopBtn" class="key" title="Stop">■</button>
+    <button id="recBtn" class="key toggle hidden" title="Record the armed tracks from the playhead (LIVE). With the loop on, each time round is another pass.">●</button>
     <button id="loopBtn" class="key toggle" title="Loop the loop region">⟲</button>
+    <button id="clickBtn" class="key toggle hidden" title="Click: a metronome while the live engine plays (never in a file)">CLICK</button>
+    <select id="countIn" class="hidden" title="Count-in before recording starts">
+      <option value="0">no count-in</option><option value="1">1 bar in</option><option value="2">2 bars in</option>
+    </select>
+    <button id="punchBtn" class="key toggle hidden" title="Punch: ● records only the loop region (shift-drag on the ruler to set it), from its start to its end, then stops by itself. The count-in bars play the music before it as the pre-roll.">PUNCH</button>
+    <select id="recQ" class="hidden" title="Quantise on record: recorded notes' starts are moved to this grid; lengths stay">
+      <option value="0">as played</option><option value="1">Q 1/4</option><option value="0.5">Q 1/8</option><option value="0.25">Q 1/16</option><option value="t8">Q 1/8T</option><option value="t16">Q 1/16T</option>
+    </select>
+    <button id="keysBtn" class="key toggle hidden" title="On-screen keys: play the armed MIDI tracks with the mouse or the computer keyboard (A W S E D F T G Y H U J K, Z/X octave)">KEYS</button>
     <button id="liveBtn" class="key toggle hidden" title="LIVE: play through the real-time engine (your plugins, as you edit) instead of a rendered preview">LIVE</button>
     <span id="pos" class="vfd">1:1.00</span>
     <span id="audioState" class="tag" title="Playback is a render of the project, not a live engine. This shows whether the audio you hear matches the current revision.">NO RENDER</span>
@@ -88,16 +98,24 @@
         <button id="addMidi" class="ghost small" title="Add instrument track">+ Inst</button>
         <button id="addAudio" class="ghost small" title="Add audio track">+ Audio</button>
         <button id="addBus" class="ghost small" title="Add bus (shared FX)">+ Bus</button>
+        <button id="addPic" class="ghost small" title="Picture: a video the music is written to, or a screenshot for the crew">+ Pic</button>
       </div>
       <div id="chordCorner" title="The chord track: the harmony every part is checked against. Double-click a bar to write its chord.">
         <span class="legend">CHORDS</span>
         <button id="chordSet" class="ghost small" title="Write a progression over a section, the loop, or from the playhead">Write…</button>
+      </div>
+      <div id="picCorner" class="hidden" title="The picture: the video the music is written to, and its hit points. Double-click the lane or press H to mark a hit.">
+        <span class="legend">PICTURE</span>
+        <span><button id="picView" class="ghost small" title="Show or hide the video">View</button>
+        <button id="picFit" class="ghost small" title="Find the tempo that puts the hit points on beats">Fit…</button>
+        <button id="picSet" class="ghost small" title="Set, move, remove or export the picture">…</button></span>
       </div>
       <div id="trackHeaders"></div>
     </div>
     <div id="timeline">
       <canvas id="ruler"></canvas>
       <div id="chordLane"><canvas id="chords"></canvas><input id="chordEdit" class="hidden" spellcheck="false" autocomplete="off" aria-label="Chord"></div>
+      <div id="picLane"><canvas id="pic"></canvas></div>
       <div id="lanesWrap"><canvas id="lanes"></canvas></div>
     </div>
   </main>
@@ -121,12 +139,27 @@
     <div id="panel-report" class="panel"><div id="report" class="pad"></div></div>
     <div id="panel-brief" class="panel"><div id="brief" class="pad"></div></div>
   </section>
+  <div id="keys" class="hidden" title="On-screen keys: they play every armed MIDI track. Press lower on a key to play it louder.">
+    <span class="legend">KEYS</span>
+    <button id="kDn" class="mini" title="Octave down (Z)">OCT −</button><span id="kRange" class="vfd small"></span><button id="kUp" class="mini" title="Octave up (X)">OCT +</button>
+    <div id="kbd"></div>
+    <span class="legend kHint">A W S E D F T G Y H U J K · Z X octave · lower on a key = louder</span>
+  </div>
 </div>
 
+<div id="picWin" class="hidden">
+  <div id="picBar"><span class="legend">PICTURE</span><span id="picTc" class="vfd small">00:00:00:00</span>
+    <span class="spacer"></span>
+    <label class="legend" title="The video's own sound (dialogue, effects) as a guide. Never part of a render.">GUIDE <input id="picVol" type="range" min="0" max="100" value="0"></label>
+    <button id="picClose" class="mini" title="Hide the video">×</button></div>
+  <video id="picVid" muted playsinline preload="auto"></video>
+</div>
 <div id="modal" class="hidden"><div class="box" id="modalBox"></div></div>
 <div id="menu" class="hidden"></div>
 <div id="toast" class="hidden"></div>
 <script src="/web/app.js"></script>
+<script src="/web/picture.js"></script>
+<script src="/web/tracking.js"></script>
 <script src="/web/studio.js"></script>
 </body>
 </html>

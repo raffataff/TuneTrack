@@ -312,8 +312,12 @@ def spec_head(r: Renderer) -> dict:
             "tempo": [[int(round(tm.sec(b) * sr)), float(b), float(bpm)] for b, bpm in zip(tm.beats, tm.bpms)]}
 
 
-def build_spec(p: Project, progress=None) -> tuple[dict, list[str]]:
-    """(engine spec, warnings) for a project. Renders the stems the engine needs, so the first call can be slow."""
+def build_spec(p: Project, progress=None, tracking: dict | None = None) -> tuple[dict, list[str]]:
+    """(engine spec, warnings) for a project. Renders the stems the engine needs, so the first call can be slow.
+
+    tracking: {track id: {"arm": bool, "monitor": bool}}, what is set up to record (livehost keeps it; it is not
+    part of the project). An audio track with an input gets it on its strip, heard when monitoring; an armed MIDI
+    track's instrument is loaded even with no notes yet and plays the MIDI keyboard."""
     r = Renderer(p, progress)
     sr, tm = r.sr, r.tm
     warnings: list[str] = list(eqmap.warnings(p))
@@ -358,6 +362,13 @@ def build_spec(p: Project, progress=None) -> tuple[dict, list[str]]:
                 except Exception as e:  # noqa: BLE001
                     warnings.append(f"track '{t.name}': {e}")
                     entry["source"], entry["fx"] = None, []
+        tr = (tracking or {}).get(t.id)
+        if tr and audible:
+            try:
+                _tracked(r, t, entry, tr, warnings)
+                has_audio.add(t.id)
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"track '{t.name}': {e}")
         tracks.append((t, entry))
 
     for b in buses.values():
@@ -389,6 +400,29 @@ def build_spec(p: Project, progress=None) -> tuple[dict, list[str]]:
                    "fx": fx_chain(p, [d for d in p.master.get("fx", []) if isinstance(d, Device)], "master", warnings)},
     }
     return spec, warnings
+
+
+def _tracked(r: Renderer, t: Track, entry: dict, tr: dict, warnings: list[str]) -> None:
+    """Add what tracking needs to a strip: the interface input of an audio track, the keyboard on a MIDI track."""
+    p = r.p
+    if t.kind == "audio" and t.input and (tr.get("arm") or tr.get("monitor")):
+        entry["input"] = {"ch": [int(c) - 1 for c in t.input[:2]], "monitor": bool(tr.get("monitor"))}
+        if tr.get("arm") and entry["source"] is not None:
+            entry["source"]["duck"] = True  # silent between the punch points while recording over it
+        if entry["source"] is None:  # nothing recorded yet: the strip is its input and its inserts
+            entry["fx"] = fx_chain(p, t.fx, f"track '{t.name}'", warnings)
+    elif t.kind == "midi" and t.instrument is not None and tr.get("arm"):
+        if entry["source"] is None:  # no notes yet: load the instrument anyway, to be played
+            spec = {**r._base(), "fx": [s for s in (resolve_device(d, p, False) for d in t.fx) if s],
+                    "instrument": resolve_device(t.instrument, p, True), "clips": []}
+            entry.update(strip_source(r, t, spec, warnings))
+        src = entry["source"]
+        if src.get("type") == "stem":
+            warnings.append(f"track '{t.name}': this instrument is not played live by the engine; the keyboard "
+                            f"will not sound")
+            return
+        src["thru"] = True
+        src["thru_from"] = int(tr.get("key") or 0)  # which keyboard (the engine's number for it; 0 = any)
 
 
 def fx_chain(p: Project, devices: list[Device], label: str, warnings: list[str]) -> list[dict]:
@@ -434,7 +468,8 @@ def strip_source(r: Renderer, t: Track, spec: dict, warnings: list[str]) -> dict
                   "events": _events(p, t, tm, sr, 0)}
     else:
         source = {**{k: inst.get(k) for k in ("type", "path", "shell", "state", "params", "name")},
-                  "events": _events(p, t, tm, sr, int(inst.get("channel", 1)) - 1)}
+                  "events": _events(p, t, tm, sr, int(inst.get("channel", 1)) - 1),
+                  "channel": int(inst.get("channel", 1)) - 1}
     if t.kind != "audio" and t.instrument is not None and t.instrument.automation:
         where = f"track '{t.name}' instrument"
         if inst["type"] == "sfz":
@@ -454,7 +489,7 @@ class Engine:
     """A running engine process. Not thread-safe per call id; one caller at a time is the intended use."""
 
     def __init__(self, device: str | None = None, no_device: bool = False, per_sample: bool = False,
-                 on_event=None, threads: int | None = None):
+                 on_event=None, threads: int | None = None, inputs: bool = False):
         """threads: how many threads compute the session's strips side by side (None: one per physical core but
         one, at most 8). Offline renders that run several engines at once share the cores out between them."""
         exe = engine_exe()
@@ -465,6 +500,8 @@ class Engine:
             args.append("--no-device")
         elif device:
             args += ["--device", device]
+        if inputs and not no_device:
+            args.append("--inputs")
         if per_sample:
             args.append("--per-sample")
         if threads:
@@ -542,10 +579,10 @@ class Engine:
             raise EngineError(str(msg["error"]))
         return msg
 
-    def load(self, p: Project, progress=None) -> dict:
+    def load(self, p: Project, progress=None, tracking: dict | None = None) -> dict:
         """Send the project's current state. Devices that did not change keep playing; returns the engine's
         answer with the spec's own warnings added."""
-        spec, warnings = build_spec(p, progress)
+        spec, warnings = build_spec(p, progress, tracking)
         res = self.load_spec(spec, p.root / "cache" / "live-spec.json")
         res["warnings"] = warnings + list(res.get("warnings", []))
         return res
@@ -627,6 +664,7 @@ class Player:
         self.rev = -1
         self.project: Project | None = None
         self.loaded: dict = {}
+        self.tracking: dict = {}  # {track id: {"arm", "monitor"}}: see build_spec
         self.sync(force=True)
 
     def sync(self, force: bool = False) -> dict | None:
@@ -636,8 +674,16 @@ class Player:
             return None
         self.project = Project.load(self.path)
         self.rev = rev
-        self.loaded = self.engine.load(self.project)
+        self.loaded = self.engine.load(self.project, tracking=self.tracking)
         return self.loaded
+
+    def track(self, tracking: dict) -> dict | None:
+        """Set what is armed and monitored; reloads (no device is reloaded for it) when that changed."""
+        tracking = {k: dict(v) for k, v in tracking.items() if v.get("arm") or v.get("monitor")}
+        if tracking == self.tracking:
+            return None
+        self.tracking = tracking
+        return self.sync(force=True)
 
     def point(self, path: str | Path) -> dict:
         """Play another project folder (a take of the session, say) on the same engine."""

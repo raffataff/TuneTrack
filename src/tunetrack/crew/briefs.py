@@ -18,6 +18,10 @@ Planning (your first task):
 - Set the musical contract on the session: project_set (tempo, key, metre, loop, brief), markers for the form
   (Intro, A, B, ... with bar numbers), and the track list with track_add so every seat sees the same plan. Leave
   the chord track to the Composer unless the brief dictates the harmony.
+- Music to picture (project_info shows "picture"): the tempo is chosen from the hit points before anything is
+  written, because notes keep their bars when the tempo moves. With Spotting seated, its task comes first and every
+  writing task depends on it; without, look yourself (picture(), picture_frames(at="cuts")) and ask_human for the
+  hits and tempo if nobody can fit them.
 - Hand out tasks with task_add. One task = one seat, one outcome, small enough to audition in one listen: "A
   theme, Piano, bars 5-12", not "write the song". Say which tracks and bars, what it must fit with, and what done
   sounds like. Use depends= so the order is real: sound choice before the parts that depend on the instrument's

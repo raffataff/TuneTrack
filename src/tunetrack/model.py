@@ -59,6 +59,8 @@ class Clip:
     length: float = 4.0
     muted: bool = False
     color: str | None = None
+    # which recording pass this is on its track (tracking.py): passes share a stretch of time and one is heard
+    lane: int = 0
     # midi
     notes: list[Note] = field(default_factory=list)
     cc: dict[str, list[list[float]]] = field(default_factory=dict)  # "1": [[beat, 0..127]], "bend": [[beat, -1..1]]
@@ -86,6 +88,8 @@ class Clip:
             d["muted"] = True
         if self.color:
             d["color"] = self.color
+        if self.lane:
+            d["lane"] = int(self.lane)
         if self.kind == "midi":
             self.sort()
             d["notes"] = [n.to_json() for n in self.notes]
@@ -103,7 +107,8 @@ class Clip:
     @classmethod
     def from_json(cls, d: dict) -> "Clip":
         c = cls(id=d["id"], kind=d.get("kind", "midi"), name=d.get("name", ""), start=float(d.get("start", 0)),
-                length=float(d.get("length", 4)), muted=bool(d.get("muted", False)), color=d.get("color"))
+                length=float(d.get("length", 4)), muted=bool(d.get("muted", False)), color=d.get("color"),
+                lane=int(d.get("lane") or 0))
         c.notes = [Note.from_json(n) for n in d.get("notes", [])]
         c.cc = {str(k): [[float(b), float(v)] for b, v in pts] for k, pts in d.get("cc", {}).items()}
         c.file = d.get("file")
@@ -192,6 +197,7 @@ class Track:
     layer: str | None = None  # adaptive-music layer tag for layered stem exports
     role: str | None = None  # instrument family for range checks, e.g. "violin", "cello", "bass"
     color: str | None = None
+    input: list[int] | None = None  # audio: the interface inputs it records, from 1 ([1] mono, [1, 2] a stereo pair)
 
     def to_json(self) -> dict:
         d: dict = {"id": self.id, "name": self.name, "kind": self.kind}
@@ -210,7 +216,7 @@ class Track:
             d["fx"] = [f.to_json() for f in self.fx]
         if self.automation:
             d["automation"] = {k: [[_r(b), _r(v)] for b, v in sorted(pts)] for k, pts in self.automation.items()}
-        for k in ("layer", "role", "color"):
+        for k in ("layer", "role", "color", "input"):
             if getattr(self, k):
                 d[k] = getattr(self, k)
         d["clips"] = [c.to_json() for c in sorted(self.clips, key=lambda c: c.start)]
@@ -226,7 +232,8 @@ class Track:
                    mute=bool(d.get("mute", False)), solo=bool(d.get("solo", False)),
                    output=d.get("output", "master"), sends=list(d.get("sends", [])),
                    automation={k: [list(p) for p in v] for k, v in d.get("automation", {}).items()},
-                   layer=d.get("layer"), role=d.get("role"), color=d.get("color"))
+                   layer=d.get("layer"), role=d.get("role"), color=d.get("color"),
+                   input=[int(c) for c in d["input"]] if d.get("input") else None)
 
     @property
     def end(self) -> float:
@@ -276,6 +283,11 @@ class Project:
     tail: float = 4.0  # seconds rendered past the end for release/reverb tails
     tempo_changes: list[list[float]] = field(default_factory=list)
     eq_engine: str = "builtin"  # what builtin:eq inserts run on: builtin | ssl | nova (see eqmap.py)
+    # the video the music is written to (picture.py): {"file", "start": song seconds of its first frame, "duration",
+    # "fps", "size", "codec", "audio", "tc", "proxy"}
+    picture: dict | None = None
+    # hit points: moments of the picture the music should mark. {"t": picture seconds, "name" [, "soft": True]}
+    hits: list[dict] = field(default_factory=list)
     next_id: int = 1
     rev: int = 0  # bumped on every save; lets editors detect that someone else changed the project
     path: Path | None = None  # project folder (not serialised)
@@ -371,6 +383,8 @@ class Project:
             "chord_track": sorted(self.chord_track, key=lambda e: e["at"]),
             "master": {**self.master, "fx": [f.to_json() if isinstance(f, Device) else f for f in self.master.get("fx", [])]},
             **({"eq_engine": self.eq_engine} if self.eq_engine != "builtin" else {}),
+            **({"picture": self.picture} if self.picture else {}),
+            **({"hits": sorted(self.hits, key=lambda h: h["t"])} if self.hits else {}),
             "next_id": self.next_id, "rev": self.rev,
             "tracks": [t.to_json() for t in self.tracks],
         }
@@ -385,6 +399,7 @@ class Project:
                 loop=d.get("loop"), length=d.get("length"),
                 tail=float(d.get("tail", 4.0)), tempo_changes=list(d.get("tempo_changes", [])),
                 eq_engine=d.get("eq_engine") or "builtin",
+                picture=dict(d["picture"]) if d.get("picture") else None, hits=[dict(h) for h in d.get("hits") or []],
                 next_id=int(d.get("next_id", 1)), rev=int(d.get("rev", 0)), path=path)
         m = dict(d.get("master", {}))
         p.master = {"volume_db": 0.0, "target_lufs": -16.0, "ceiling_db": -1.0, **m,
