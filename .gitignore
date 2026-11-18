@@ -43,3 +43,6 @@ output/
 
 # the sfizz source release (50 MB) and the sfizz plugin installer's uninstaller: engine/README.md says how to get it
 engine/third_party/sfizz/
+# the crew's knowledge: notes distilled from the user's own books, and lessons learned from their sessions
+library/knowledge/
+library/lessons/

@@ -1,0 +1,30 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-tuned-percussion",
+ "name": "BBC Tuned Percussion",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "percussion",
+  "tuned-percussion",
+  "mallets",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Tuned Percussion (pitched mallet instruments)",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-tuned-percussion.state",
+ "created": "2026-11-18 16:01",
+ "param_count": 2126,
+ "role": "mallets",
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-tuned-percussion]",
+  "phrase": "chords",
+  "peak_dbfs": -22.4,
+  "rms_dbfs": -42.0,
+  "warnings": [
+   "track 'inst': instrument: made no sound when one of its own notes was tried"
+  ],
+  "silent": false,
+  "brightness_hz": 898,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

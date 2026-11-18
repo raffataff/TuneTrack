@@ -1,0 +1,29 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-trumpets",
+ "name": "BBC Trumpets",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "trumpet",
+  "trumpets",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Trumpets a2, all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-trumpets.state",
+ "created": "2026-11-18 15:43",
+ "param_count": 2126,
+ "role": "brass",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-trumpets]",
+  "phrase": "chords",
+  "peak_dbfs": -6.0,
+  "rms_dbfs": -24.6,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 963,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

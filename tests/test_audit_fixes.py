@@ -371,3 +371,26 @@ def test_documented_accidental_tokens(tok, semis):
 def test_double_accidental_token_is_rejected():
     with pytest.raises(ValueError):
         generators.pattern_notes([(theory.parse_chord("C"), 1.0)], "b7b", rate=1.0)
+
+
+def test_sfz_info_missing_names_close_matches(tmp_path, monkeypatch):
+    from tunetrack import config
+    lib = tmp_path / "lib"
+    (lib / "Piano").mkdir(parents=True)
+    (lib / "Piano" / "grand_piano.sfz").write_text("<region> sample=a.wav")
+    monkeypatch.setattr(config, "load_config", lambda: {"sample_dirs": [str(lib)]})
+    with pytest.raises(FileNotFoundError) as e:
+        api.sfz_info("grand_piano2.sfz")
+    assert "grand_piano.sfz" in str(e.value) and "sfz_list" in str(e.value)
+
+
+def test_audition_bad_phrase_hints_ttn():
+    with pytest.raises(ValueError) as e:
+        api.audition("synth:pad", phrase="C4:q v40 D4")
+    assert "!40" in str(e.value)
+
+
+def test_master_fader_automation_is_refused(proj):
+    with pytest.raises(ValueError) as e:
+        api.automation("Master", points=[[0, -6]])
+    assert "device=" in str(e.value)

@@ -1,0 +1,90 @@
+/* Cables (cables.js): the signal flow as a patch bay. Cards on a dark field, ports on their edges, SVG cables. */
+#cables { display: flex; flex-direction: column; min-height: 0; background: var(--chassis); }
+#cables .cbBar { display: flex; align-items: center; gap: 8px; padding: 0 12px; height: 40px; flex: none; white-space: nowrap; overflow: hidden;
+  border-bottom: 1px solid #000; background: var(--face2); box-shadow: inset 0 1px 0 rgba(255,255,255,.03); }
+#cables .cbBar .legend { color: var(--ink); }
+#cables .cbHint { font-size: 11px; color: var(--dim); margin-left: 8px; }
+#cables .cbHint b { font: 600 9.5px var(--legend); letter-spacing: .12em; color: var(--muted); }
+#cables .cbKey { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px;
+  font: 9.5px var(--legend); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+#cables .cbKey i { width: 20px; height: 0; border-top: 2px solid var(--ink); }
+#cables .cbKey i.s { border-top: 1px dashed var(--ink); }
+#cables .cbKey i.k { border-top: 1px solid var(--cyan); }
+#cables .cbScroll { flex: 1; min-height: 0; overflow: auto; position: relative; }
+#cables .cbStage { position: relative; min-width: 100%; }
+#cables .cbCol { position: absolute; top: 16px; font-size: 9.5px; color: var(--dim); }
+#cables .cbEmpty { padding: 48px; color: var(--muted); }
+#cables .cbNote { position: absolute; padding: 8px; border: 1px dashed var(--line); border-radius: 6px;
+  color: var(--dim); font-size: 11px; line-height: 1.45; }
+
+/* nodes */
+#cables .cbNode { position: absolute; background: var(--face2); border: 1px solid var(--line2); border-radius: 6px;
+  box-shadow: inset 3px 0 0 var(--c), 0 1px 0 rgba(0,0,0,.5); z-index: 2; transition: opacity .12s; user-select: none; }
+#cables .cbNode.io { background: var(--face); }
+#cables .cbNode.master { background: var(--face3); }
+#cables .cbNode.muted .cbName, #cables .cbNode.muted .cbSub { color: var(--dim); }
+#cables .cbNode.faded { opacity: .38; }
+#cables .cbHead { position: relative; padding: 6px 44px 6px 12px; height: 42px; }
+#cables .cbName { font-weight: 600; font-size: 12.5px; line-height: 16px; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
+#cables .cbSub { font-size: 10.5px; line-height: 14px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#cables .tag { font: normal 8.5px/12px var(--legend); letter-spacing: .1em; padding: 0 4px; border: 1px solid var(--line2);
+  border-radius: 3px; color: var(--muted); flex: none; }
+#cables .tag.solo { color: var(--amber); border-color: var(--amber); }
+#cables .tag.key { color: var(--cyan); border-color: var(--cyan); }
+#cables .cbJack { position: absolute; right: 10px; font: 8.5px var(--legend); letter-spacing: .12em; color: var(--dim); line-height: 10px; }
+#cables .cbJack.o { top: 10px; } #cables .cbJack.s { top: 26px; }
+#cables .cbFx { border-top: 1px solid var(--line); padding: 4px 0; }
+#cables .cbRow { position: relative; display: flex; align-items: center; gap: 8px; height: 20px; padding: 0 8px 0 12px; font-size: 11px; color: var(--ink); }
+#cables .cbRow b { font: 9.5px var(--mono); color: var(--dim); width: 10px; flex: none; }
+#cables .cbRow span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#cables .cbRow em { font-style: normal; color: var(--muted); margin-left: 6px; }
+#cables .cbRow.off { color: var(--dim); }
+#cables .cbRow.off span { text-decoration: line-through; text-decoration-color: var(--line2); }
+#cables .cbRow.keyed span { color: var(--ink); }
+#cables .cbRow.keyed { padding-right: 16px; }
+
+/* ports */
+#cables .cbPort { position: absolute; width: 11px; height: 11px; border-radius: 50%; background: var(--chassis);
+  border: 1px solid var(--line2); box-sizing: border-box; --pc: var(--muted); }
+#cables .cbPort.in { left: -6px; top: 10px; }
+#cables .cbPort.out { right: -6px; top: 10px; cursor: crosshair; }
+#cables .cbPort.send { right: -6px; top: 26px; cursor: crosshair; width: 9px; height: 9px; right: -5px; top: 27px; }
+#cables .cbPort.key { top: 5px; width: 9px; height: 9px; border-color: var(--cyan); --pc: var(--cyan); }
+#cables .cbPort.key.l { left: -5px; } #cables .cbPort.key.r { right: -5px; }
+#cables .cbPort.on { border-color: var(--pc); background: radial-gradient(circle, var(--pc) 0 2px, var(--chassis) 2.5px); }
+#cables .cbPort.out:hover, #cables .cbPort.send:hover { border-color: var(--amber); background: radial-gradient(circle, var(--amber) 0 2px, var(--chassis) 2.5px); }
+
+/* dragging a cable: the cards it can land on */
+#cables.dragging, #cables.dragging * { cursor: crosshair !important; }
+#cables .cbNode.drop { border-color: var(--line2); }
+#cables .cbNode.drop .cbPort.in { border-color: var(--amber); }
+#cables .cbNode.hot { border-color: var(--amber); box-shadow: inset 3px 0 0 var(--c), 0 0 0 1px var(--amber); }
+#cables.dragging .cbNode:not(.drop) { opacity: .45; }
+
+/* cables */
+#cables .cbWires { position: absolute; left: 0; top: 0; z-index: 1; pointer-events: none; overflow: visible; }
+#cables .cb path { fill: none; }
+#cables .cb .hit { stroke: transparent; stroke-width: 10; pointer-events: stroke; cursor: pointer; }
+#cables .cb .wire { stroke-width: 2; stroke-linecap: round; transition: opacity .12s, stroke-width .12s; }
+#cables .cb.send .wire { stroke-width: 1.25; stroke-dasharray: 5 4; }
+#cables .cb.key .wire { stroke-width: 1.25; stroke: var(--cyan); }
+#cables .cb.in .wire { stroke-width: 1.5; opacity: .7; }
+#cables .cb.dimmed .wire, #cables .cbLab.dimmed { opacity: .28; }
+#cables .cb.hover .wire, #cables .cb.lit .wire { stroke-width: 2.75; }
+#cables .cb.send.hover .wire, #cables .cb.send.lit .wire, #cables .cb.key.hover .wire, #cables .cb.key.lit .wire { stroke-width: 2; }
+#cables .cbWires.focus .cb:not(.lit) .wire, #cables .cbWires.focus .cbLab:not(.lit) { opacity: .1; }
+#cables .cbLab { pointer-events: all; cursor: pointer; }
+#cables .cbLab rect { fill: var(--face); stroke: var(--line2); }
+#cables .cbLab text { font: 10px var(--mono); fill: var(--vfd); }
+#cables .cbLab.hover rect { stroke: var(--amber); }
+#cables .ghost { fill: none; stroke-width: 2; stroke-dasharray: 2 4; opacity: .9; }
+#cables .ghost.send { stroke-width: 1.25; }
+
+/* LIVE: a slow flow along each cable, as bright as its source is loud */
+#cables .cb .flow { stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round; stroke-dasharray: 1.5 13.5; opacity: 0; display: none; }
+#cables.flowing .cb .flow { display: inline; animation: cbFlow 3s linear infinite; }
+#cables.flowing.still .cb .flow { animation: none; }
+#cables .cb.key .flow { stroke: var(--cyan); }
+@keyframes cbFlow { to { stroke-dashoffset: -60; } }
+@media (prefers-reduced-motion: reduce) { #cables .cb .flow, #cables .cbNode, #cables .cb .wire { animation: none !important; transition: none !important; } }

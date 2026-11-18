@@ -62,7 +62,7 @@ def test_a_crew_is_proposed_from_a_scripted_session_and_applied_only_by_the_user
     assert (row["accepted"], row["tokens"], row["metered"], row["priced"]) == (1, 42000, 1, 0)
     assert row["tokens_per_take"] == 42000 and "usd_per_take" not in row  # tokens only: the runner gave no dollars
     table = scorecard.as_markdown(scorecard.crew_scorecard())
-    assert "Per take |" in table and "| 42k tok |" in table and "42k tokens." in table
+    assert "Cost per |" in table and "| 42k tok/take |" in table and "42k tokens." in table
 
     [pick] = scorecard.crew_pick()["picks"]
     assert (pick["seat"], pick["runner"], pick["model"], pick["same"]) == ("composer", "script", str(script), True)
@@ -113,5 +113,22 @@ def test_the_review_shows_no_cost_column_when_no_run_reported_usage(song):
     studio.log("run", seat="composer", task="T1", what="start", agent="kilo · free-a")
     studio.log("run", seat="composer", task="T1", what="end", ok=True, tools=0)
     table = scorecard.as_markdown(scorecard.crew_scorecard())
-    assert "Per take" not in table and "Usage reported" not in table
+    assert "Cost per" not in table and "Usage reported" not in table
     assert scorecard.crew_pick()["picks"] == []  # nothing remembered yet
+
+
+def test_rejected_takes_are_counted_and_cost_names_its_unit(song):
+    studio.log("run", seat="composer", task="T1", what="start", agent="kilo · free-a")
+    studio.log("take", id="tk1", state="submitted", seat="composer")
+    studio.log("take", id="tk1", state="accepted", seat="composer")
+    studio.log("take", id="tk2", state="rejected", seat="composer", reason="empty")  # never submitted
+    studio.log("run", seat="composer", task="T1", what="end", ok=True, cost_usd=0.5)
+    studio.log("run", seat="producer", task="T2", what="start", agent="kilo · free-b")
+    studio.log("task", id="T2", seat="producer", state="done", by="producer")
+    studio.log("run", seat="producer", task="T2", what="end", ok=True, cost_usd=0.2)
+    card = scorecard.crew_scorecard()
+    comp = next(r for r in card["rows"] if r["seat"] == "composer")
+    assert (comp["handed_in"], comp["accepted"], comp["rejected"]) == (2, 1, 1)
+    table = scorecard.as_markdown(card)
+    assert "1 of 2 takes accepted (1 first time, 1 rejected)" in table
+    assert "| $0.50/take |" in table and "| $0.20/task |" in table

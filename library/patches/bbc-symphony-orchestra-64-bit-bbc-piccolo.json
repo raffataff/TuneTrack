@@ -1,0 +1,29 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-piccolo",
+ "name": "BBC Piccolo",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "woodwinds",
+  "piccolo",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Piccolo, all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-piccolo.state",
+ "created": "2026-11-18 15:40",
+ "param_count": 2126,
+ "role": "lead",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-piccolo]",
+  "phrase": "chords",
+  "peak_dbfs": -200.0,
+  "rms_dbfs": -200.0,
+  "warnings": [
+   "track 'inst' rendered SILENT though it has notes - instrument loaded no sound (empty plugin slot? capture a patch with a program loaded) or notes out of its range"
+  ],
+  "silent": true,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

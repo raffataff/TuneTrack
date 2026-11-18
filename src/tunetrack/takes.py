@@ -692,6 +692,9 @@ def take_submit(summary: str, take: str | None = None, session: str | None = Non
         raise ValueError("This take changes nothing yet. Did the edits go to another project? "
                          "(project_info shows which one your tools are editing.) If the task needed no change, "
                          "do not hand in an empty take: task_update(task, state=\"done\", result=why).")
+    synced = _catch_up(d, meta, session)
+    if synced:
+        rep = _report(d, _meta(d))
     meta = _meta(d, state="submitted", summary=str(summary).strip(), submitted=round(time.time(), 3))
     with studio._Board(str(session_root(d))) as b:
         if meta.get("task"):
@@ -704,7 +707,33 @@ def take_submit(summary: str, take: str | None = None, session: str | None = Non
                        take=meta["id"])
         b.emit("take", id=meta["id"], state="submitted", seat=meta.get("seat"), task=meta.get("task"),
                summary=meta["summary"][:studio.EVENT_TEXT], changes=len(rep["changes"]))
-    return {**rep, "state": "submitted", "summary": meta["summary"]}
+    out = {**rep, "state": "submitted", "summary": meta["summary"]}
+    if synced:
+        out["synced"] = synced
+    return out
+
+
+def _catch_up(d: Path, meta: dict, session: str | None) -> dict | None:
+    """Before a take is handed in: if the session has moved on since it was cut, bring that into the take. A seat's
+    summary and listen numbers are about the music it heard, so an agent seat is sent back to listen once on the
+    current music (the next submit goes through unless the session moves again). A person's take is synced and
+    handed in. Returns what was brought in (None: nothing had moved)."""
+    cur = _read_json(session_root(d) / "project.json")
+    if int(cur.get("rev", 0)) == int(meta.get("base_rev", -1)):
+        return None
+    since = meta.get("base_rev")
+    res = take_sync(meta["id"], session=session)
+    if not res.get("synced"):
+        raise ValueError(f"The session moved on since your take was cut (rev {since} -> {cur.get('rev')}) and "
+                         f"{len(res['conflicts'])} change(s) clash with yours: take_sync(on_conflict=\"mine\" or "
+                         "\"session\"), listen() again, then hand in.")
+    brought = res.get("brought_in") or []
+    if studio.me() in roles.ROLES and studio.me() != "producer":
+        shown = "; ".join(brought[:6]) + (f" (+{len(brought) - 6} more)" if len(brought) > 6 else "")
+        raise ValueError(f"The session moved on since your take was cut (rev {since} -> {cur.get('rev')}); your take "
+                         f"now has those changes too: {shown}. listen() to check your work on the current music, "
+                         "update your summary, then hand in.")
+    return {"since_rev": since, "now_rev": cur.get("rev"), "brought_in": len(brought)}
 
 
 def take_accept(take: str, on_conflict: str = "fail", session: str | None = None) -> dict:
@@ -725,6 +754,7 @@ def take_accept(take: str, on_conflict: str = "fail", session: str | None = None
     with project_lock(path):
         cur = _read_json(path / "project.json")
         merged, conflicts, notes = merge(base, doc, cur, prefer)
+        behind = int(cur.get("rev", 0)) != int(meta.get("base_rev", -1))
         if conflicts and prefer is None:
             return {"accepted": False, "take": meta["id"], "conflicts": _label(conflicts, "take", "session"),
                     "note": 'Nothing was changed. Accept with on_conflict="take" or "session", or have the seat '
@@ -752,6 +782,9 @@ def take_accept(take: str, on_conflict: str = "fail", session: str | None = None
         out["conflicts_resolved"] = {"winner": on_conflict, "conflicts": _label(conflicts, "take", "session")}
     if notes:
         out["notes"] = notes
+    if behind:  # what the seat heard and wrote in its summary was the older session, not this merge
+        out["listen"] = (f"Merged onto rev {cur.get('rev')}, newer than the take's rev {meta.get('base_rev')}: its "
+                         "summary and numbers predate that. listen() the session before passing it.")
     return out
 
 

@@ -21,7 +21,7 @@ from .. import config
 CACHE_NAME = "agents.json"
 CACHE_TTL = 24 * 3600
 TIMEOUT = 20  # seconds, every subprocess call
-KILO_MODEL_CAP = 40
+KILO_MODEL_CAP = None  # keep every model `kilo models` lists (411 on 2026-11-18); the seat sheet filters them
 
 IS_WINDOWS = sys.platform == "win32"
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -30,11 +30,25 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _VERSION = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+.][0-9A-Za-z.\-]+)?")
 _LOG_PREFIX = re.compile(r"^\s*(INFO|WARN|WARNING|DEBUG|ERROR|TRACE)\b")
 
+def _claude_info(name: str, about: str, p_in: float, p_out: float, p_cache: float) -> dict:
+    return {"name": name, "about": about, "context": 1_000_000, "output": 128_000,
+            "price": {"in": p_in, "out": p_out, "cache": p_cache},  # API rates per 1M tokens (2026-11)
+            "can": ["reasoning", "tools", "images", "pdf"], "released": None, "trains": False}
+
+
 CLAUDE_MODELS = [
-    {"id": "claude-fable-5-2", "label": "Fable 5.2", "tier": "top", "cost": "paid"},
-    {"id": "claude-opus-5-5", "label": "Opus 5.5", "tier": "high", "cost": "paid"},
-    {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5", "tier": "mid", "cost": "paid"},
-    {"id": "claude-haiku-5-5", "label": "Haiku 5.5", "tier": "fast", "cost": "paid"},
+    {"id": "claude-fable-5-2", "label": "Fable 5.2", "tier": "top", "cost": "paid",
+     "info": _claude_info("Claude Fable 5.2", "Anthropic's most capable widely released model, for the hardest "
+                          "reasoning and long agentic work.", 8, 40, 0.2)},
+    {"id": "claude-opus-5-5", "label": "Opus 5.5", "tier": "high", "cost": "paid",
+     "info": _claude_info("Claude Opus 5.5", "The current Opus: strong all-round model for coding and agents.",
+                          4, 20, 0.2)},
+    {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5", "tier": "mid", "cost": "paid",
+     "info": _claude_info("Claude Sonnet 5.5", "Speed and capability for everyday coding and agent work.",
+                          2, 10, 0.1)},
+    {"id": "claude-haiku-5-5", "label": "Haiku 5.5", "tier": "fast", "cost": "paid",
+     "info": _claude_info("Claude Haiku 5.5", "The fastest, cheapest Claude, for simple or high-volume work.",
+                          0.1, 0.5, None)},
 ]
 CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]  # from `claude --help` (--effort)
 
@@ -251,9 +265,15 @@ def codex_models(notes: list[str]) -> tuple[list[dict], list[str]]:
                 levels.append(e)
                 if e not in efforts:
                     efforts.append(e)
+        mods = m.get("input_modalities") if isinstance(m.get("input_modalities"), list) else []
+        info = {"name": str(m.get("display_name") or m["slug"]), "about": _about(m.get("description")),
+                "context": m.get("context_window") if isinstance(m.get("context_window"), int) else None,
+                "output": None, "price": None,  # Codex bills the ChatGPT plan, not per token
+                "can": (["reasoning"] if levels else []) + ["tools"] + (["images"] if "image" in mods else []),
+                "released": None, "trains": None}
         models.append({"id": m["slug"], "label": str(m.get("display_name") or m["slug"]),
                        "tier": _tier_codex(i, m["slug"]), "cost": "paid", "efforts": levels,
-                       "default_effort": m.get("default_reasoning_level")})
+                       "default_effort": m.get("default_reasoning_level"), "info": info})
     return models, efforts
 
 
@@ -268,8 +288,8 @@ def _tier_generic(model_id: str) -> str:
     return "mid"
 
 
-def parse_kilo_models(text: str, cap: int = KILO_MODEL_CAP) -> list[dict]:
-    """`kilo models` prints one provider/model per line (plus log lines/banners). Free models first, capped."""
+def parse_kilo_models(text: str, cap: int | None = KILO_MODEL_CAP) -> list[dict]:
+    """`kilo models` prints one provider/model per line (plus log lines/banners). Free models first; `cap` (None = all) trims the list."""
     seen, free, paid = set(), [], []
     for ln in _clean(text):
         if not ln or _LOG_PREFIX.match(ln) or " " in ln or "/" not in ln:
@@ -282,6 +302,61 @@ def parse_kilo_models(text: str, cap: int = KILO_MODEL_CAP) -> list[dict]:
         row = {"id": ln, "label": ln.split("/", 1)[1], "tier": _tier_generic(ln),
                "cost": "free" if is_free else ("paid" if provider == "kilo" else "unknown")}
         (free if is_free else paid).append(row)
+    return (free + paid)[:cap]
+
+
+_EFFORT_ORDER = ["none", "instant", "minimal", "thinking", "low", "medium", "high", "xhigh", "max"]
+_CAN_ORDER = ["reasoning", "tools", "images", "pdf", "audio", "video"]
+
+
+def _about(text) -> str:
+    """The first paragraph of a model description, at most ~280 characters."""
+    s = str(text or "").strip().split("\n\n")[0].strip()
+    return s if len(s) <= 280 else s[:277].rsplit(" ", 1)[0] + "…"
+
+
+def _kilo_row(full_id: str, o: dict) -> dict:
+    caps = o.get("capabilities") if isinstance(o.get("capabilities"), dict) else {}
+    ins = caps.get("input") if isinstance(caps.get("input"), dict) else {}
+    cost = o.get("cost") if isinstance(o.get("cost"), dict) else {}
+    lim = o.get("limit") if isinstance(o.get("limit"), dict) else {}
+    cache = cost.get("cache") if isinstance(cost.get("cache"), dict) else {}
+    num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None  # noqa: E731
+    can = {"reasoning": caps.get("reasoning"), "tools": caps.get("toolcall"), "images": ins.get("image"),
+           "pdf": ins.get("pdf"), "audio": ins.get("audio"), "video": ins.get("video")}
+    variants = o.get("variants") if isinstance(o.get("variants"), dict) else {}
+    efforts = sorted(variants, key=lambda e: (_EFFORT_ORDER.index(e) if e in _EFFORT_ORDER else 99, e))
+    is_free = bool(o.get("isFree")) or "free" in full_id.lower()
+    price = {"in": num(cost.get("input")), "out": num(cost.get("output")), "cache": num(cache.get("read"))}
+    info = {"name": str(o.get("name") or ""), "about": _about((o.get("options") or {}).get("description")
+                                                               if isinstance(o.get("options"), dict) else ""),
+            "context": lim.get("context") if isinstance(lim.get("context"), int) else None,
+            "output": lim.get("output") if isinstance(lim.get("output"), int) else None,
+            "price": price if price["in"] is not None or price["out"] is not None else None,
+            "can": [k for k in _CAN_ORDER if can[k] is True], "released": o.get("release_date") or None,
+            "trains": o.get("mayTrainOnYourPrompts") if isinstance(o.get("mayTrainOnYourPrompts"), bool) else None}
+    row = {"id": full_id, "label": full_id.split("/", 1)[1], "tier": _tier_generic(full_id),
+           "cost": "free" if is_free else "paid", "info": info}
+    if efforts:
+        row["efforts"] = efforts
+    return row
+
+
+def parse_kilo_verbose(text: str, cap: int | None = KILO_MODEL_CAP) -> list[dict]:
+    """`kilo models --verbose`: each model is its `provider/id` line followed by a JSON object (name, cost per
+    1M tokens, limits, capabilities, variants…). Free models first. [] when no JSON came back."""
+    body = "\n".join(_clean(text))
+    dec, seen, free, paid = json.JSONDecoder(), set(), [], []
+    for m in re.finditer(r"^([A-Za-z0-9._~\-]+(?:/[A-Za-z0-9._~:@+\-]+)+)\n(?=\{)", body, re.M):
+        try:
+            o, _ = dec.raw_decode(body, m.end())
+        except ValueError:
+            continue
+        if not isinstance(o, dict) or m.group(1) in seen or o.get("status") in ("deprecated", "disabled"):
+            continue
+        seen.add(m.group(1))
+        row = _kilo_row(m.group(1), o)
+        (free if row["cost"] == "free" else paid).append(row)
     return (free + paid)[:cap]
 
 
@@ -317,10 +392,13 @@ def _probe(runner: str) -> dict:
                 notes.append("using the CLI bundled in the Codex desktop app; its path changes when the app updates")
         elif runner == "kilo":
             rec["auth"] = _kilo_auth()
-            rc, out, err = _run([exe, "models"])
+            rc, out, err = _run([exe, "models", "--verbose"])  # with metadata; older CLIs: plain list
+            rec["models"] = parse_kilo_verbose(out) if rc is not None else []
+            if not rec["models"]:
+                rc, out, err = _run([exe, "models"])
             if rc is None:
                 notes.append(f"`kilo models` failed: {err}")
-            else:
+            elif not rec["models"]:
                 rec["models"] = parse_kilo_models(out)
                 if not rec["models"]:
                     notes.append("`kilo models` listed no models")

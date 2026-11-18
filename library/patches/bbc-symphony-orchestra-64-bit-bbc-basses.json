@@ -1,0 +1,32 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-basses",
+ "name": "BBC Basses",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "strings",
+  "contrabass",
+  "basses",
+  "double-bass",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Basses (double basses), all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-basses.state",
+ "created": "2026-11-18 15:39",
+ "param_count": 2126,
+ "role": "bass",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-basses]",
+  "phrase": "chords",
+  "peak_dbfs": -6.8,
+  "rms_dbfs": -24.8,
+  "warnings": [
+   "track 'inst': instrument: made no sound when one of its own notes was tried"
+  ],
+  "silent": false,
+  "brightness_hz": 292,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

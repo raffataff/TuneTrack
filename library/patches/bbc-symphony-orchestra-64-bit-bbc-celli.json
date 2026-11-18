@@ -1,0 +1,30 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-celli",
+ "name": "BBC Celli",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "strings",
+  "cello",
+  "celli",
+  "cellos",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Celli, all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-celli.state",
+ "created": "2026-11-18 15:38",
+ "param_count": 2126,
+ "role": "strings",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-celli]",
+  "phrase": "chords",
+  "peak_dbfs": -4.0,
+  "rms_dbfs": -21.6,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 540,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

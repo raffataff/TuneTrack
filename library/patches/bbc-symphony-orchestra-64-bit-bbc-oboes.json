@@ -1,0 +1,31 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-oboes",
+ "name": "BBC Oboes",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "woodwinds",
+  "oboe",
+  "oboes",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Oboes a3, all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-oboes.state",
+ "created": "2026-11-18 15:41",
+ "param_count": 2126,
+ "role": "lead",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-oboes]",
+  "phrase": "chords",
+  "peak_dbfs": -10.3,
+  "rms_dbfs": -28.2,
+  "warnings": [
+   "track 'inst': instrument: made no sound when one of its own notes was tried"
+  ],
+  "silent": false,
+  "brightness_hz": 1150,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

@@ -132,8 +132,9 @@ window.Tracking = (() => {
   }
   function sync() {
     const s = S.eng.st || {}, live = liveMode();
-    for (const el of [recBtn, clickBtn, countIn, punchBtn, recQ, keysBtn]) el.classList.toggle("hidden", !s.available);
-    recBtn.classList.toggle("on", recording()); recBtn.disabled = clickBtn.disabled = punchBtn.disabled = keysBtn.disabled = !live;
+    // the record keys never come and go (the toolbar must not move): without LIVE they are greyed out
+    recBtn.classList.toggle("on", recording()); recBtn.disabled = clickBtn.disabled = punchBtn.disabled = keysBtn.disabled = countIn.disabled = recQ.disabled = !live;
+    document.getElementById("recPop")?.classList.toggle("nolive", !live);
     clickBtn.classList.toggle("on", !!s.click && live);
     punchBtn.classList.toggle("on", punchOn);
     if (keysOn && !live) setKeys(false);

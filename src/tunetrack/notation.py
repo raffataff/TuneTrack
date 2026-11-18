@@ -8,7 +8,7 @@ Tokens (whitespace separated):
     (C4 E4 G4)           chord; modifiers go after the ')'
     :q                   duration, sticky until changed: w h q e s t (whole..32nd), dotted 'q.', triplet 'e3',
                          beats '1.5' or '3/2', sums 'h+e'
-    !mf  !96             velocity, sticky: ppp pp p mp mf f ff fff or 1-127
+    !mf  !96             velocity, sticky: ppp pp p mp mf f ff fff or 1-127; also standalone ('!f D2:w')
     '                    staccato (sounds 50% of its length)
     >                    accent (+16 velocity, this note only)
     ~                    tie into the next note(s) of the same pitch
@@ -133,6 +133,8 @@ def parse(text: str, beats_per_bar: float = 4.0, dur: float = 1.0, vel: int = 90
                 raise ValueError("Unclosed '(' chord")
             flags = _mods(tokens[i][1:], state)
             emit(pitches, flags)
+        elif tok.startswith("!"):
+            state["vel"] = parse_velocity(tok[1:])
         elif tok.startswith("@"):
             cursor = float(Fraction(tok[1:])) if "/" in tok else float(tok[1:])
             bar_start = cursor - (cursor % beats_per_bar)

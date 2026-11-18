@@ -4,62 +4,90 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TuneTrack Studio</title>
+<link rel="icon" href="/web/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/web/icon.ico" sizes="any">
 <link rel="stylesheet" href="/web/style.css">
+<link rel="stylesheet" href="/web/console.css">
+<link rel="stylesheet" href="/web/cables.css">
+<link rel="stylesheet" href="/web/crewlinks.css">
+<link rel="stylesheet" href="/web/review.css">
+<link rel="stylesheet" href="/web/sheet.css">
+<script>try { const f = localStorage.getItem("tt.font"); if (f) document.documentElement.dataset.font = f; } catch (e) { /* no storage */ }</script>
 </head>
 <body data-room="studio">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M4.5 2.8v10.4L13 8z" fill="currentColor"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.2" fill="currentColor"/></symbol>
+  <symbol id="i-rec" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.6" fill="currentColor"/></symbol>
+  <symbol id="i-loop" viewBox="0 0 16 16"><path d="M3 7.2V6.5A2.5 2.5 0 0 1 5.5 4H12m-1.8-2L12 4l-1.8 2M13 8.8v.7A2.5 2.5 0 0 1 10.5 12H4m1.8 2L4 12l1.8-2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 16 16"><path d="M5.5 3.5 2.5 6.5l3 3M2.8 6.5H10a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 16 16"><path d="m10.5 3.5 3 3-3 3M13.2 6.5H6a3.5 3.5 0 0 0 0 7h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-caret" viewBox="0 0 16 16"><path d="m4.5 6.5 3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-studio" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="4" width="17" height="4.5" rx="1"/><rect x="3.5" y="10" width="17" height="4.5" rx="1"/><rect x="3.5" y="16" width="17" height="4.5" rx="1"/></g><g fill="currentColor"><circle cx="6.5" cy="6.25" r="1"/><circle cx="6.5" cy="12.25" r="1"/><circle cx="6.5" cy="18.25" r="1"/></g></symbol>
+  <symbol id="i-desk" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5.5h18M3 18.5h18" opacity=".45"/><rect x="3.5" y="8" width="8" height="3" rx=".8"/><rect x="9.5" y="13" width="11" height="3" rx=".8"/></g><path d="M14.5 3v18" stroke="currentColor" stroke-width="1.5"/></symbol>
+  <symbol id="i-mix" viewBox="0 0 24 24"><g stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 4v16M12 4v16M18 4v16" opacity=".45"/></g><g fill="currentColor"><rect x="3.5" y="12.5" width="5" height="3" rx=".8"/><rect x="9.5" y="6.5" width="5" height="3" rx=".8"/><rect x="15.5" y="10" width="5" height="3" rx=".8"/></g></symbol>
+  <symbol id="i-cables" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="4" width="6" height="5" rx="1"/><rect x="15.5" y="15" width="6" height="5" rx="1"/><path d="M8.5 6.5c6 0 1 11 7 11" stroke-linecap="round"/><path d="M8.5 6.5c4 0 4 2 7 2.5" stroke-linecap="round" opacity=".5"/></g></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></g></symbol>
+  <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+</svg>
+
 <header id="top">
-  <div class="plate" title="TuneTrack Studio"><b>TUNETRACK</b><i>STUDIO</i></div>
-  <button id="projBtn" class="ghost" title="Open / new project"><span id="projName">No project</span> ▾</button>
-  <div class="sep"></div>
-  <div class="cluster">
-    <button id="playBtn" class="key" title="Render what changed, then play (Space)">▶</button>
-    <button id="stopBtn" class="key" title="Stop">■</button>
-    <button id="recBtn" class="key toggle hidden" title="Record the armed tracks from the playhead (LIVE). With the loop on, each time round is another pass.">●</button>
-    <button id="loopBtn" class="key toggle" title="Loop the loop region">⟲</button>
-    <button id="clickBtn" class="key toggle hidden" title="Click: a metronome while the live engine plays (never in a file)">CLICK</button>
-    <select id="countIn" class="hidden" title="Count-in before recording starts">
-      <option value="0">no count-in</option><option value="1">1 bar in</option><option value="2">2 bars in</option>
-    </select>
-    <button id="punchBtn" class="key toggle hidden" title="Punch: ● records only the loop region (shift-drag on the ruler to set it), from its start to its end, then stops by itself. The count-in bars play the music before it as the pre-roll.">PUNCH</button>
-    <select id="recQ" class="hidden" title="Quantise on record: recorded notes' starts are moved to this grid; lengths stay">
-      <option value="0">as played</option><option value="1">Q 1/4</option><option value="0.5">Q 1/8</option><option value="0.25">Q 1/16</option><option value="t8">Q 1/8T</option><option value="t16">Q 1/16T</option>
-    </select>
-    <button id="keysBtn" class="key toggle hidden" title="On-screen keys: play the armed MIDI tracks with the mouse or the computer keyboard (A W S E D F T G Y H U J K, Z/X octave)">KEYS</button>
-    <button id="liveBtn" class="key toggle hidden" title="LIVE: play through the real-time engine (your plugins, as you edit) instead of a rendered preview">LIVE</button>
-    <span id="pos" class="vfd">1:1.00</span>
-    <span id="audioState" class="tag" title="Playback is a render of the project, not a live engine. This shows whether the audio you hear matches the current revision.">NO RENDER</span>
+  <div class="zone zl">
+    <div class="plate" title="TuneTrack Studio"><img src="/web/icon.svg" alt=""><b>TUNETRACK</b></div>
+    <button id="projBtn" class="proj" title="Open / new project"><span id="projName">No project</span><svg><use href="#i-caret"/></svg></button>
+    <div class="grp">
+      <button id="undoBtn" class="key icon" title="Undo (Ctrl+Z)" aria-label="Undo"><svg><use href="#i-undo"/></svg></button><button id="redoBtn" class="key icon" title="Redo (Ctrl+Y)" aria-label="Redo"><svg><use href="#i-redo"/></svg></button>
+    </div>
   </div>
-  <span id="status" class="status"></span>
-  <div class="sep deskonly"></div>
-  <label class="field deskonly">BPM <input id="tempo" type="number" min="20" max="300" step="1"></label>
-  <label class="field deskonly">KEY <input id="key" type="text" size="10"></label>
-  <label class="field deskonly">SIG <input id="sig" type="text" size="4"></label>
-  <label class="field deskonly">SNAP <select id="snap">
-    <option value="4">Bar</option><option value="1" selected>1/4</option><option value="0.5">1/8</option>
-    <option value="0.25">1/16</option><option value="0.3333333">1/8T</option><option value="0.125">1/32</option>
-    <option value="0">Off</option></select></label>
-  <div class="spacer"></div>
-  <div class="cluster crew" title="The crew: the agents you have put in seats">
-    <span class="legend">CREW</span>
-    <button id="crewBtn" class="key switch" title="Let the seated agents work / stop them">RUN</button>
-    <button id="briefBtn" class="key" title="Give the Producer a new brief">BRIEF</button>
-    <span id="crewRead" class="vfd small">STANDBY</span>
+  <div class="zone zc">
+    <div class="grp transport">
+      <button id="playBtn" class="key icon" title="Play (Space). Without LIVE: renders what changed, then plays it." aria-label="Play"><svg><use href="#i-play"/></svg></button><button id="stopBtn" class="key icon" title="Stop" aria-label="Stop"><svg><use href="#i-stop"/></svg></button><button id="recBtn" class="key icon toggle" disabled title="Record the armed tracks from the playhead (LIVE). With the loop on, each time round is another pass." aria-label="Record"><svg><use href="#i-rec"/></svg></button><button id="recOpt" class="key icon caret" title="Recording options: click, count-in, punch, quantise" aria-label="Recording options"><svg><use href="#i-caret"/></svg></button><button id="loopBtn" class="key icon toggle" title="Loop the loop region" aria-label="Loop"><svg><use href="#i-loop"/></svg></button>
+    </div>
+    <button id="liveBtn" class="key toggle live" disabled title="LIVE: play through the real-time engine (your plugins, as you edit) instead of a rendered preview">LIVE</button>
+    <div class="lcd" title="Playhead: bar : beat"><span id="pos">1:1.00</span></div>
+    <div class="grp fields">
+      <label class="field" title="Tempo">BPM<input id="tempo" type="number" min="20" max="300" step="1"></label>
+      <label class="field" title="Key">KEY<input id="key" type="text" size="9"></label>
+      <label class="field" title="Time signature">SIG<input id="sig" type="text" size="3"></label>
+    </div>
   </div>
-  <button id="gearBtn" class="key" title="Gear: every instrument and effect you have, new ones marked. Audition them and put them on a track."><i class="lamp"></i>GEAR <b id="gearCount"></b></button>
-  <button id="needsBtn" class="key needs" title="What is waiting on you"><i class="lamp"></i>NEEDS YOU <b id="needsCount">0</b></button>
-  <nav id="rooms" title="Studio: the crew. Desk: arrangement, piano roll and mixer.">
-    <button data-room="studio" class="active">STUDIO</button><button data-room="desk">DESK</button>
-  </nav>
-  <button id="undoBtn" class="ghost deskonly" title="Undo (Ctrl+Z)">↶</button>
-  <button id="redoBtn" class="ghost deskonly" title="Redo (Ctrl+Y)">↷</button>
-  <button id="exportBtn" class="key" title="Render deliverables">EXPORT</button>
+  <div class="zone zr">
+    <div class="grp crew" title="The crew: the agents you have put in seats">
+      <button id="crewBtn" class="key switch" title="Let the seated agents work / stop them">RUN</button><span id="crewRead" class="vfd small">STANDBY</span><button id="briefBtn" class="key" title="Give the Producer a new brief">BRIEF</button>
+    </div>
+    <button id="needsBtn" class="key needs" title="What is waiting on you"><i class="lamp"></i>NEEDS YOU <b id="needsCount">0</b></button>
+    <button id="gearBtn" class="key" title="Gear: every instrument and effect you have, new ones marked. Audition them and put them on a track."><i class="lamp"></i>GEAR <b id="gearCount"></b></button>
+    <button id="exportBtn" class="key go" title="Render deliverables">EXPORT</button>
+  </div>
 </header>
 
-<main id="studio">
+<div id="recPop" class="pop hidden" role="dialog" aria-label="Recording options">
+  <div class="popH">RECORDING</div>
+  <button id="clickBtn" class="key toggle" disabled title="Click: a metronome while the live engine plays (never in a file)">CLICK</button>
+  <button id="punchBtn" class="key toggle" disabled title="Punch: ● records only the loop region (shift-drag on the ruler to set it), from its start to its end, then stops by itself. The count-in bars play the music before it as the pre-roll.">PUNCH</button>
+  <label class="field">COUNT-IN <select id="countIn" title="Count-in before recording starts">
+    <option value="0">none</option><option value="1">1 bar</option><option value="2">2 bars</option></select></label>
+  <label class="field">QUANTISE <select id="recQ" title="Quantise on record: recorded notes' starts are moved to this grid; lengths stay">
+    <option value="0">as played</option><option value="1">1/4</option><option value="0.5">1/8</option><option value="0.25">1/16</option><option value="t8">1/8T</option><option value="t16">1/16T</option></select></label>
+  <p class="popHint">Recording needs LIVE: switch it on to arm tracks and record.</p>
+</div>
+
+<aside id="rail">
+  <nav id="rooms" aria-label="Rooms">
+    <button data-room="studio" class="active" title="Studio: the crew rack, Needs You and talkback"><svg><use href="#i-studio"/></svg><span>STUDIO</span></button>
+    <button data-room="desk" title="Desk: arrangement and piano roll"><svg><use href="#i-desk"/></svg><span>DESK</span></button>
+    <button data-room="mix" title="Mix: the console"><svg><use href="#i-mix"/></svg><span>MIX</span></button>
+    <button data-room="cables" title="Cables: how the signal flows, and where to patch it"><svg><use href="#i-cables"/></svg><span>CABLES</span></button>
+  </nav>
+  <button id="setBtn" class="railKey" title="Settings: display font"><svg><use href="#i-gear"/></svg><span>SETUP</span></button>
+</aside>
+
+<main id="studio" class="room">
   <section id="rack" aria-label="The crew rack">
     <div class="rail"></div>
     <div id="units"></div>
     <div class="rail"></div>
+    <div id="patch" aria-hidden="true" title="Task cables: one per open task, from whoever handed it out to the seat doing it. They pulse when those two talk."></div>
   </section>
   <aside id="side">
     <section id="needs" class="bay">
@@ -79,37 +107,42 @@
   </aside>
 </main>
 
-<div id="desk">
-  <div id="takeBar" class="hidden" title="What the desk is editing: the session itself, or a take of it">
+<div id="desk" class="room">
+  <div id="takeBar" class="roomBar hidden" title="What the desk is editing: the session itself, or a take of it">
     <span class="legend">EDITING</span>
     <i id="takeLamp" class="lamp green"></i>
     <select id="takeSel" title="Switch between the session and its takes"></select>
     <span id="takeRead" class="vfd small"></span>
     <span id="takeTags"></span>
-    <span class="spacer"></span>
     <button id="takeNew" class="key" title="Work in a private copy of the session and hand it in when it is ready">CUT A TAKE…</button>
     <button id="takeChanges" class="key hidden" title="What this take changes compared with the session it was cut from">CHANGES</button>
     <button id="takeSync" class="key hidden" title="Bring what the session has accepted since this take was cut into the take">SYNC</button>
     <button id="takeSubmit" class="key go hidden" title="Hand the take in to be auditioned and accepted">HAND IN…</button>
     <button id="takeLeave" class="key hidden" title="Leave the take as it is and show the session">BACK TO SESSION</button>
+    <span class="spacer"></span>
+    <label class="field" title="Grid the edits snap to">SNAP <select id="snap">
+      <option value="4">Bar</option><option value="1" selected>1/4</option><option value="0.5">1/8</option>
+      <option value="0.25">1/16</option><option value="0.3333333">1/8T</option><option value="0.125">1/32</option>
+      <option value="0">Off</option></select></label>
+    <button id="keysBtn" class="key toggle" disabled title="On-screen keys: play the armed MIDI tracks with the mouse or the computer keyboard (A W S E D F T G Y H U J K, Z/X octave). Needs LIVE.">KEYS</button>
   </div>
   <main id="arr">
     <div id="headers">
       <div id="rulerCorner">
-        <button id="addMidi" class="ghost small" title="Add instrument track">+ Inst</button>
-        <button id="addAudio" class="ghost small" title="Add audio track">+ Audio</button>
-        <button id="addBus" class="ghost small" title="Add bus (shared FX)">+ Bus</button>
-        <button id="addPic" class="ghost small" title="Picture: a video the music is written to, or a screenshot for the crew">+ Pic</button>
+        <span class="legend">ADD</span>
+        <div class="seg">
+          <button id="addMidi" title="Add an instrument track">INST</button><button id="addAudio" title="Add an audio track">AUDIO</button><button id="addBus" title="Add a bus (shared effects)">BUS</button><button id="addPic" title="Picture: a video the music is written to, or a screenshot for the crew">PIC</button>
+        </div>
       </div>
       <div id="chordCorner" title="The chord track: the harmony every part is checked against. Double-click a bar to write its chord.">
         <span class="legend">CHORDS</span>
-        <button id="chordSet" class="ghost small" title="Write a progression over a section, the loop, or from the playhead">Write…</button>
+        <button id="chordSet" class="mini" title="Write a progression over a section, the loop, or from the playhead">WRITE…</button>
       </div>
       <div id="picCorner" class="hidden" title="The picture: the video the music is written to, and its hit points. Double-click the lane or press H to mark a hit.">
         <span class="legend">PICTURE</span>
-        <span><button id="picView" class="ghost small" title="Show or hide the video">View</button>
-        <button id="picFit" class="ghost small" title="Find the tempo that puts the hit points on beats">Fit…</button>
-        <button id="picSet" class="ghost small" title="Set, move, remove or export the picture">…</button></span>
+        <span><button id="picView" class="mini" title="Show or hide the video">VIEW</button>
+        <button id="picFit" class="mini" title="Find the tempo that puts the hit points on beats">FIT…</button>
+        <button id="picSet" class="mini" title="Set, move, remove or export the picture">…</button></span>
       </div>
       <div id="trackHeaders"></div>
     </div>
@@ -148,6 +181,29 @@
   </div>
 </div>
 
+<section id="mixroom" class="room" aria-label="The mixing console">
+  <div class="roomBar">
+    <span class="legend">MIX</span>
+    <span id="mixSrc" class="vfd small" title="What the console shows: the session, or the take the Desk has open"></span>
+    <span class="seg" id="mixShow" title="Sections of every strip">
+      <button data-sec="ins" class="on" title="Inserts: each strip's effects">INSERTS</button><button data-sec="snd" class="on" title="Sends to the buses">SENDS</button><button data-sec="io" class="on" title="Where each strip's output goes">OUTPUT</button>
+    </span>
+    <span class="seg" id="mixWidth" title="Strip width"><button data-w="n">NARROW</button><button data-w="w" class="on">WIDE</button></span>
+    <span class="spacer"></span>
+    <span id="mixRead" class="mixRead"></span>
+  </div>
+  <div id="mixBody"></div>
+</section>
+
+<section id="cables" class="room" aria-label="Signal flow"></section>
+
+<footer id="statusbar">
+  <span id="status" class="status"></span>
+  <span class="spacer"></span>
+  <span id="audioState" class="tag" title="Playback is a render of the project, not a live engine. This shows whether the audio you hear matches the current revision.">NO RENDER</span>
+  <span id="statRight" class="statR"></span>
+</footer>
+
 <div id="picWin" class="hidden">
   <div id="picBar"><span class="legend">PICTURE</span><span id="picTc" class="vfd small">00:00:00:00</span>
     <span class="spacer"></span>
@@ -159,11 +215,17 @@
 <div id="menu" class="hidden"></div>
 <div id="toast" class="hidden"></div>
 <script src="/web/app.js"></script>
+<script src="/web/sheet.js"></script>
+<script src="/web/cables.js"></script>
 <script src="/web/picture.js"></script>
 <script src="/web/automation.js"></script>
 <script src="/web/tracking.js"></script>
+<script src="/web/console.js"></script>
+<script src="/web/crewlinks.js"></script>
+<script src="/web/review.js"></script>
 <script src="/web/studio.js"></script>
 <script src="/web/voice.js"></script>
 <script src="/web/gear.js"></script>
+<script src="/web/shell.js"></script>
 </body>
 </html>

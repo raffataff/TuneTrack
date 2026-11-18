@@ -1,0 +1,29 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-clarinets",
+ "name": "BBC Clarinets",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "woodwinds",
+  "clarinet",
+  "clarinets",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Clarinets a3, all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-clarinets.state",
+ "created": "2026-11-18 15:42",
+ "param_count": 2126,
+ "role": "lead",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-clarinets]",
+  "phrase": "chords",
+  "peak_dbfs": -11.8,
+  "rms_dbfs": -28.4,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 441,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

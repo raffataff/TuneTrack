@@ -12,6 +12,7 @@ from pathlib import Path
 from . import config
 
 SHORTCUT_NAME = "TuneTrack Studio.lnk"
+ICON = Path(__file__).parent / "web" / "icon.ico"  # the shortcut's icon; the page uses icon.svg beside it
 
 
 def find_browser() -> str | None:
@@ -70,6 +71,7 @@ def make_shortcut(folder: str | Path | None = None) -> Path:
               f"$s.Arguments = {_ps('-m tunetrack.cli app')}; "
               f"$s.WorkingDirectory = {_ps(config.ROOT)}; "
               f"$s.Description = {_ps('TuneTrack Studio')}; "
+              f"$s.IconLocation = {_ps(str(ICON) + ',0')}; "
               "$s.Save()")
     folder.mkdir(parents=True, exist_ok=True)
     subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True, capture_output=True, text=True)

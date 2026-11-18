@@ -4,7 +4,7 @@ Read this first if you are picking up the studio work in a new session. It is se
 wants, what was decided and why, what exists, what is verified, what to build next, and what only the owner can
 unblock. Keep it current: when a stage lands or a decision changes, edit this file in the same change.
 
-Last updated: 2026-11-17. Merged to `main`: `studio-core` (PR #4), `desk-takes` (PR #5, 47e445a: takes on the
+Last updated: 2026-11-18. Merged to `main`: `studio-core` (PR #4), `desk-takes` (PR #5, 47e445a: takes on the
 Desk, benches, Needs You per situation, reports and scorecard, the usage cuts, the Mix console, per-seat craft
 text, the take fixes below, and stage 3's first cut), a dependency bump (PR #6), `crew-usage` (PR #7, 826a36e:
 the take-path fix, `listen()` for a bar range, lean MCP instructions, batched auditions, open tasks for the seats
@@ -13,10 +13,11 @@ that add tasks), `offline-engine` (PR #8, 880e673: stage 3.2, offline rendering 
 through sfizz; and stage 3.4, automation of any device setting, tempo-synced effects, time-stretch of audio clips),
 and `picture` (PR #10, 59bf871: stage 5's first cut, the picture, hit points, tempo fitting; and stage 4, tracking:
 recording, passes, comping, punch, keyboards, devices, nothing recorded through the interface yet), and
-`picture-2` (PR #11, be0a55d: stage 5's second cut). Uncommitted on `main` (2026-11-17): live faders, the Desk's
-automation lanes, console effect settings, crew audition model and pick-a-crew, MIDI group comp, and stage 6's
-first cut (gear browser, genre style sheets, desktop app, movable modules, voice talkback); all in section 6.
-Also uncommitted: an AGPL-3.0 `LICENSE` and a licence section in the README.
+`picture-2` (PR #11, be0a55d: stage 5's second cut), and `studio-stage-6` (PR #12, 07bf87b: live faders, the
+Desk's automation lanes, console effect settings, crew audition model and pick-a-crew, MIDI group comp, stage 6's
+first cut, the AGPL-3.0 `LICENSE`). Uncommitted on `main` (2026-11-17, later): stage 6's second cut, the redesign
+(new shell, MIX room, CABLES room, GEAR grouping, icon, display font); see stage 6 in section 6. Also uncommitted
+(2026-11-18): the review sheet, for a person in the Review seat (stage 6, "A person's review").
 
 ---
 
@@ -117,12 +118,13 @@ On `main`.
 | `src/tunetrack/crew/briefs.py` | What a launched agent is told: seat instructions, the Producer playbook, the Mix stopping rule, the seat's craft text, and the task message. |
 | `src/tunetrack/crew/craft.py` | How each seat does good work, written per seat (2026-11-14) instead of cut from `skill/SKILL.md`: the Composer gets melody, harmony and the notation; Mix gets levels, EQ engines, sidechain and loudness; and so on. A test keeps each text to the tools that seat has. Briefs went from 5,500-15,500 characters to 3,500-12,000 (Composer 14,700 to 6,100). |
 | `src/tunetrack/crew/floor.py` | The floor manager: `Floor(session).run()` starts agents on ready tasks, logs their activity, routes handed-in takes, handles failure. `kickoff(brief)` gives the Producer its first task. Holds the one-manager lock (`FloorBusy`, `managed()`), skips seats on hold, `stop()` / `stop_seat()` requeue without counting the attempt, and `_recover()` requeues tasks a dead manager left "working". |
+| `src/tunetrack/review.py` | A person's review from the Review seat. `review_send(verdict, findings, notes, task, again, checked)` files it as a report (kind "review", by "review") with its findings kept as data in `studio/reviews/R<n>.json`, gives each seat one task with all its findings (Mix's waits for the others), gives the Producer one task for the findings left to it (or a note alone), closes the review task with a result, and queues a second listen (`recheck`) that waits on every fix. `review_draft(task, draft)` keeps the sheet's draft in `studio/drafts/`. Both are editor calls (`server.STUDIO`), not MCP tools: an agent in Review still uses `report_write` and `task_add`. |
 | `src/tunetrack/crew/host.py` | The crew hosted in a long-lived process (the editor's server): `crew_start(brief)`, `crew_stop()`, `crew_state()`, `seat_hold(seat)`. Runs `Floor.run(keep_alive=True)` in a thread per session. |
 | `src/tunetrack/bench.py` | `seat_bench(seat)`: a read-only snapshot of a seat's work (its take in progress, else its handed-in take, else the session) with what the take changed marked: notes added and removed, each mix value next to what it was, instruments, form, last render. What the seat's first workstation tab draws. The Mix console's controls edit through the Desk's own calls, not through this module. |
 | `src/tunetrack/crew/scorecard.py` | `crew_scorecard()` counts each seat and agent from the activity log (runs and how they ended, tool calls, minutes, takes handed in / accepted / first time / returned, asks). `crew_review()` files it as a report and tasks the Producer with the written review. `remember()` / `crew_history(seat)` keep it across sessions in `<library>/crew_history.json`; the seat picker shows it per model. |
 | `src/tunetrack/mcp_server.py` | 20 new tools (70 total; `report_write / report_list / report_read` for every seat, `take_discard` for the Producer). `apply_seat()` strips a seated agent's server down to its seat's tools; seated agents also get seat instructions. |
 | `src/tunetrack/server.py` | `/api/events` (server-sent events: project version + board activity, and with `?take=` the version of the take the Desk has open), board and crew functions callable from the editor (`STUDIO`), `board` and `crew` in `/api/state`, `studio_view()` for cheap redraws. A take on the Desk: `/api/state?take=tk3` and `/api/version?take=tk3`, a `take` field on `/api/call` that points the Desk's own calls at that take, and `take_cut()`. Stops hosted crews on exit. |
-| `src/tunetrack/web/` | The studio UI. `index.html` (one header, two rooms), `style.css` (the rack look; all drawn in CSS, no fonts or images fetched), `studio.js` (Studio room: rack, seat workstations, Needs You, monitor/talkback, A/B audition), `app.js` (Desk room: arrangement / piano roll / mixer, and the take bar that says whether the Desk is editing the session or a take). |
+| `src/tunetrack/web/` | The studio UI. `index.html` (the shell: one fixed top bar, a rail of four rooms, a status bar), `style.css` (the design tokens and every part; no fonts or images fetched; the display font is a setting that uses fonts installed on the computer), `shell.js` (record options, SETUP font menu, status bar, `?room=` links), `studio.js` (Studio room: rack, seat workstations, Needs You, monitor/talkback, A/B audition), `app.js` (Desk room: arrangement / piano roll, and the take bar that says whether the Desk is editing the session or a take), `console.js` + `console.css` (the one mixing console: MIX room, the Desk's Mixer tab, the Mix seat's bench), `cables.js` + `cables.css` (CABLES room: the signal flow, patchable), `crewlinks.js` + `crewlinks.css` (the task cables between the rack's units, and the lights that run along them when seats talk), `icon.svg` / `icon.ico`. |
 | `src/tunetrack/cli.py` | `tunetrack crew detect / status / run [--brief] [--parallel] [--max-runs]`; `tunetrack takes clean [--project] [--days N] [--yes]`; `call` and `functions` now reach `studio` and `takes` too. |
 | `src/tunetrack/picture.py` | Stage 5: the video the music is written to (`set_video`, `probe`, `scan` for cuts and production sound, `sheet` for frames, `mux`), hit points (`edit_hits`, `hit_rows`), the tempo that catches them (`fit_constant`, `fit_map`, `best_start`), timecode (`timecode`, `parse_time`, `tc_args`: drop-frame too) and the guide (`guide_stem`). `web/picture.js` is its lane and video window on the Desk; `bench._picture` and `studio.js workPicture` the Spotting seat's CUES. |
 | `src/tunetrack/tracking.py` | Stage 4: what a recording becomes (`passes`, `place_audio`, `place_midi`, `commit`) and comping (`comp`, `split_clip`). `livehost.py` holds what is armed and runs `record` / `record_stop`; `web/tracking.js` is the Desk's side. |
@@ -306,10 +308,21 @@ On `crew-usage` (2026-11-16, merged in PR #7):
   and LUFS), SOUNDS (Sound: one slot per instrument, what it was, AUDITION), PLAN (Producer: form,
   chords, the arrangement, every task and what it waits on), CUES (Spotting: the picture's timeline with cuts, loud
   production sound, bars and hits; the cue sheet with a frame per hit, what the take added or removed; cuts and
-  stills), REPORT (Review: the last render as measured). It
+  stills), REPORT (Review with an agent in it: the last render as measured, and its last review), REVIEW (Review
+  with you in it: the review sheet, below). It
   follows the seat's take live while an agent works, switches between the seat's takes and the session, and
   OPEN ON DESK lands on the matching Desk panel. ROLL, SOUNDS, PLAN and REPORT are read-only: editing is the Desk's
   job.
+- **The review sheet** (`web/review.js`, `web/review.css`; you in the Review seat). A strip of the form (sections,
+  bars, the loop, a red playhead, every finding as an amber flag) under PLAY and a BAR · TIME readout. PLAY, the
+  top bar's transport and Space are one transport while the Desk is on the session; with a take on the Desk, PLAY
+  plays the session through the A/B player. Click the strip to play from a bar, drag across bars to note a finding
+  there, M notes one at the bar you are hearing, Esc leaves a text box. A finding: bars, the time it was noted (a
+  key plays from there), tracks, the text, and FOR (Producer decides, or a filled seat). OVERALL, then IT'S READY or
+  NEEDS WORK, HEAR IT AGAIN AFTER THE FIXES, and a line saying what SEND will do (or what stops it). Beside it the
+  last render as measured. On a second listen the earlier findings are listed with FIXED / STILL OFF (STILL OFF
+  copies one into this review). The draft is saved as you type. After sending: a SENT strip with the report and
+  the tasks it made, and what comes next for you. The task card's MARK DONE is WRITE THE REVIEW in this seat.
 - **The CONSOLE works.** Drag a fader or the pan strip (the drag is relative, so a stray click moves nothing; Shift
   is fine steps), double-click for 0 dB or centre, arrow keys / PageUp / PageDown / Home on a focused fader or pan,
   click the dB readout to type a level, click a send to type its level, M and S, click an effect to bypass it, a
@@ -1006,8 +1019,11 @@ Left:
 Desktop packaging, movable rack modules, voice talkback, watched plugin folders with auto-scan and a gear
 browser that auditions live, genre style sheets as per-seat skills.
 
-First cut built 2026-11-17, uncommitted on `main` on top of the other uncommitted work of that day (section 6,
-stages 2c and 3). 458 tests pass.
+First cut built 2026-11-17 and merged in PR #12 (458 tests). The owner tried it the same day: the Start menu
+shortcut works, GEAR works, the rack rearranges. Their asks: an icon and favicon, GEAR separated by company and
+effect type, the cable view, and a big graphical update ("looks like it was made by a child AI"), above all the
+Desk, with toolbar keys that stay put between views and a real mixer. They tested Cyber Astra and Nexaro (both
+installed for their user) as display fonts. All of that is the second cut, below the first cut's notes.
 
 - **Movable rack modules** (`studio.js` "movable modules" section; drag a unit by its ears, fold it to 1U, a LAYOUT
   menu with hide-empty-optional, fold all, side left/right and reset; the bays swap and resize). It is saved
@@ -1067,12 +1083,106 @@ Not checked: anything heard (the engine had no device), the drawer at phone widt
 the watcher runs, the shortcut and the app window themselves (not run from Claude's tools: AppData writes are
 virtualised there), voice talkback (needs a microphone and the browser's speech service).
 
+**Second cut (2026-11-17, uncommitted on `main`): the redesign.**
+
+- **The shell** (`index.html`, `style.css`, `shell.js`). One top bar that is the same in every room and never
+  wraps: project and undo on the left; transport (SVG keys), a caret with the recording options (CLICK, PUNCH,
+  count-in, quantise), LIVE, the position readout and BPM / KEY / SIG in the middle; the crew, NEEDS YOU, GEAR and
+  EXPORT on the right. Keys that need LIVE are greyed out, never hidden, so nothing moves. Narrow windows drop
+  labels in steps (1540, 1400, 1260 px). Rooms are a rail on the left (STUDIO, DESK, MIX, CABLES, SETUP at the
+  foot); each room's own tools are a bar along its top (the Desk's: take, SNAP, KEYS). A status bar holds the
+  status line, the render state and the engine readout. `/?room=mix` (and `&tab=mixer`) opens a room.
+- **The look**: new tokens (graphite surfaces, hairline borders, one amber accent, VFD readouts), crisper keys,
+  segmented groups, restyled rack, bays, tickets, modals, menus and the gear drawer. The Desk's canvases share a
+  palette (`CV` in app.js): rounded clips with a title band, phrase shading, beat lines, a ruler with the loop on
+  top, section flags and bar numbers that do not collide, a VFD chord lane, a piano roll with real keys and
+  rounded notes, a velocity lane with stems, a centred empty state.
+- **Display font** (SETUP): Bahnschrift (built in), Cyber Astra or Nexaro Display, loaded with CSS `local()` from
+  the owner's installed fonts: the font files are never in the repo (no licence text in them; the repo is public).
+  The choice is `display_font` in ui_prefs, so the app window and every browser agree.
+- **Icon**: `web/icon.svg` (favicon) and `web/icon.ico` (16 to 256 px); `desktop.make_shortcut` sets it.
+- **The console** (`console.js`, `console.css`): one component for the MIX room (full height), the Desk's Mixer
+  tab (compact: pan, fader, M/S; a strip's summary opens it in MIX) and the Mix seat's bench (take ghosts). It
+  draws `seat_bench("mix")` for what the Desk is editing. Strips: colour cap, inserts with an in/out lamp, sends
+  with a level bar, output, a pan knob, a long fader on a dB scale beside a stereo meter with peak hold and a clip
+  lamp, readouts, M/S, a name plate; insert and send sections are as tall on every strip so the faders line up;
+  buses after a BUSES divider; the master pinned on the right with band balance, LUFS and true peak. An effect's
+  settings open on the right in MIX. The old Desk mixer (`renderMixer`) and studio.js's `workConsole` body are gone.
+- **GEAR grouping** (built by an Opus subagent, reviewed): a GROUP BY switch, MAKER or TYPE (TYPE by default for
+  EFFECTS); `gear.catalog()` items carry `maker` and `type` (VST3 sub-categories when a scan stores them, else
+  name and tag keywords). 59 gear tests.
+- **CABLES room** (`cables.js`, `cables.css`; built by an Opus subagent, reviewed): columns INPUTS, TRACKS,
+  BUSES (a bus feeding a bus gets its own column), MASTER, OUTPUT; cables in the source's colour, sends dashed with
+  their level, sidechain keys cyan; drag OUT or SEND onto a bus or the master to route, click a cable for levels or
+  to remove it; animated flow while LIVE plays.
+- **Task cables on the rack** (`crewlinks.js`, `crewlinks.css`, asked for by the owner 2026-11-17): a patch gutter
+  beside the rack (it moves to the other side with the side column) and a jack on each unit's ear. One cable per
+  open task, from whoever handed it out (the board's `by`) to the seat doing it; several tasks between two seats
+  share a cable with a count. Colour is the task's state (queued dim cyan, working cyan, handed in green, waiting
+  on you red). A new cable draws itself in; a closed one fades out. A task from You comes in over the gutter's
+  outer edge. A cable nests outside the shorter cables it spans, so cables don't cross. Live events only (not the
+  replayed history): talkback runs an amber light along the two seats' cable, or along a faint dashed cable for
+  the moment when they share no task; a take handed in or accepted is a green box; a Needs You question goes out
+  over the edge with a red light and flashes that bay; a message to everyone flashes every jack. Click a cable to
+  open that seat on its tasks. With reduced motion, jacks flash and nothing moves. Checked on a scratch crew
+  (`output/_preview/links_check.py` port 7393, then `links_drive.py` makes them talk): every pulse kind, the
+  plug-in and unplug, fold, an open bench, the side column on the left, the click. While the pane is hidden the page
+  paints no frames, so lights wait until it shows.
+
+Checked in the browser on a scratch project (`output/_preview/ui_check.py`, port 7392, no audio device): every
+room at 1600 px, the top bar fitting, a fader drag and mute saving, an effect's panel opening on the right, the pan
+knob saving, the record options, the font menu finding both installed fonts and saving the choice. Screenshots by
+headless Edge (`--timeout` at 11 s or more: the console's first read lands after the page). Not checked: the cable
+drags by hand, anything heard, the app window itself.
+
+**A person's review** (2026-11-18, uncommitted). The owner sat in Review on What Am I Thinking, listened after the
+mix and had nowhere to put the review: the task card offered only MARK DONE (one line in a prompt) and nothing
+reached the Producer. Built: `review.py` and the review sheet (section 4: code map and UI). How the findings travel,
+and why:
+- One task per seat holding all its findings, not one per finding: each task is a run and an audition.
+- Mix's task waits on the other seats' and the Producer's from the same review: a mix made before notes change is
+  made twice.
+- "Producer decides" is the default FOR when a Producer is seated, since the owner thinks of a review as going back
+  to the Producer; naming a seat skips that run. A note with no findings goes to the Producer.
+- `studio._review_links`: while the Producer works on its review task (`from_review`), every task it adds, or
+  rewrites with `task_update(detail=)`, is added to the depends of the queued tasks that wait on its task (Mix's
+  fixes, the second listen), unless that would make a cycle. The Producer is told so in its task and sets no
+  depends itself (`task_update` replaces the whole list, which an agent gets wrong).
+- The second listen (`recheck`) waits on every fix task and opens on the sheet with the earlier findings to tick.
+- Also: the seat lamp said YOUR MOVE for a person's task that was still waiting on other tasks; it now says WAITS ON.
+  `bench._form` carries `tempo_changes`, so the sheet maps time to bars by the session's own tempo map.
+Checked in the browser on a scratch copy of that crew (`output/_preview/review_check.py`, port 7391, no audio
+device, no crew launched): drag across bars 17-24 made a finding there; typing, tracks and FOR saved and survived a
+reload; clicking bar 5 played from bar 5 with the readout, section and playhead following; M noted bar 12 while it
+played; Esc then Space stopped it; SEND filed R1, closed the review task, gave Composer T3 and Mix T4 (after T3), and
+queued the second listen T5 after both; marking T3 and T4 done opened T5 with FIXED / STILL OFF; narrow widths
+stack the measurements under the sheet. 14 tests in `tests/test_review.py`. Not checked: a real crew acting on a
+review, anything heard.
+
+**Fixes from the What Am I Thinking session review** (2026-11-18, uncommitted). A Haiku read of the logs said the
+cue was passed as ready with bar 32 silent and a fading ending. Wrong: it measured tk11's copy. The session at rev 41
+had both fixes (bar 32 -17 LUFS, the ending rising to -10). What really went wrong: Mix's tk11 was cut at rev 39 in
+the 2 s before T29 got its depends on T28, and the resumed run mixed and summarised that stale copy. Built:
+- `crew/floor._launch` syncs a reused open take; `takes._catch_up` on `take_submit` syncs a take whose session
+  moved and sends an agent seat back once to listen (a person's take is synced and handed in); `take_accept` onto a
+  newer rev returns `listen` (re-listen before passing it).
+- `review.review_check` (on picking IT'S READY: silent bars, an ending falling > 3 LU under the 8 bars before, each
+  earlier finding's bars beside their neighbours, takes not in) and `review.finalize` (a ready verdict with nothing
+  left for the crew renders `renders/<name>_final.wav` + `.json` in a background thread and files a "final" report;
+  `final_status` for the sheet's banner).
+- `listening.verify_track` hears each note for its own length (at least 0.3 s): a humanised pickup 22 ms before a
+  barline read as "notes but no sound" and cost a run and an empty take (tk9).
+- Subagents: standalone `!f` in TTN; clearer `sfz_info` / `audition` / `automation` (master) / `cc` errors;
+  scorecard counts rejected takes and shows `$x/take` or `$x/task`; `cleanup.py` + MCP tool `cleanup` (prunes
+  cache renders no live project uses; dry run on that session: 5.2 GB of 5.3 GB). 511 tests.
+Not checked in the browser: the sheet's MEASURED NOW block and final-mix banner.
+
 Left:
 
-1. **The owner's turn**: run `tunetrack app --shortcut` from their own terminal, open the studio from the Start
-   menu, try the gear drawer with LIVE through the SSL 2, drag the rack around, hold TALK.
+1. **The owner's look** at the redesign, and their font pick (SETUP). Run `tunetrack app --shortcut` again from
+   their own terminal so the Start menu entry gets the new icon.
 2. Desktop packaging beyond the app window (an installer, a tray icon) only if the owner wants it.
-3. The game side of stage 5 (an agent reading or playing the game) is still open.
+3. The crew's "workflow" cable view (seats, tasks, takes) was not built; only the audio routing.
 
 ---
 
@@ -1086,7 +1196,7 @@ Left:
 | SFZ in the engine | Done 2026-11-16: sfizz's source is in `engine/third_party/sfizz/`. Left: hear an SFZ track on LIVE (real-time streaming is not checked). |
 | Stage 5 | Done: `ffmpeg` 9.0.2 is on PATH. Left: try the picture lane with a real video, and GUIDE on LIVE through the SSL 2 (in time with the picture? loud enough against the music?). |
 | Stage 4 | Record through the SSL 2: LIVE on, choose a track's input, R, ●. Say how far off the beat a clap against the click lands (that sets `record_offset_ms`), and whether monitoring through the engine is usable or the interface's direct monitoring is better. Close Cubase first (one ASIO client at a time). |
-| Stage 6 | Run `uv run python -m tunetrack.cli app --shortcut` in their own terminal (from Claude's tools the Start menu write is virtualised), then open TuneTrack Studio from the Start menu. Try GEAR with LIVE on through the SSL 2. |
+| Stage 6 | Done 2026-11-17: the shortcut works. Left: run `uv run python -m tunetrack.cli app --shortcut` again in their own terminal (from Claude's tools the Start menu write is virtualised) to get the new icon; look at the redesign and pick a display font (SETUP); try GEAR with LIVE on through the SSL 2. |
 | New tools in their own apps | Restart Claude so the MCP server reloads (it runs from this checkout). |
 
 ---

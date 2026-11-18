@@ -1,0 +1,29 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-violins-2",
+ "name": "BBC Violins 2",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "strings",
+  "violin",
+  "violins",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Violins 2, all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-violins-2.state",
+ "created": "2026-11-18 15:38",
+ "param_count": 2126,
+ "role": "strings",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-violins-2]",
+  "phrase": "chords",
+  "peak_dbfs": -10.0,
+  "rms_dbfs": -26.9,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 719,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

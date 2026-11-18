@@ -26,14 +26,14 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import api, bench, config, gear, livehost, picture as pic, studio, styles, takes, tracking
+from . import api, bench, config, gear, livehost, picture as pic, review, studio, styles, takes, tracking
 from .crew import detect, host, scorecard
 
 PORT = 7373
 WEB = Path(__file__).parent / "web"
 # Only what the editor UI uses. Imports, patch deletion, opening files/apps etc. stay agent/CLI-only.
 CALLABLE = {
-    "audition", "automation", "clip_create", "clip_edit", "clip_set", "comp", "fx_add", "fx_remove", "fx_update",
+    "audition", "automation", "cleanup", "clip_create", "clip_edit", "clip_set", "comp", "fx_add", "fx_remove", "fx_update",
     "harmony", "hits", "library_status", "markers", "patch_capture", "picture", "plugin_params", "preview", "project_list",
     "project_new", "project_open", "project_set", "redo", "render", "sfz_list", "synths_list", "tempo_fit",
     "track_add", "track_duplicate", "track_move", "track_remove", "track_update", "undo",
@@ -217,7 +217,8 @@ STUDIO = {f.__name__: f for f in (
     studio.message_send, studio.inbox, studio.attention_list, studio.attention_resolve, studio.events,
     takes.take_list, takes.take_diff, takes.take_accept, takes.take_reject, takes.take_discard,
     takes.take_audition, takes.take_submit, takes.take_sync, take_cut, host.crew_start, host.crew_stop, host.crew_state, host.seat_hold, crew_detect,
-    studio_view, bench.seat_bench, studio.report_list, studio.report_read,
+    studio_view, bench.seat_bench, studio.report_list, studio.report_read, review.review_draft, review.review_send,
+    review.review_check, review.final_status,
     scorecard.crew_scorecard, scorecard.crew_review, scorecard.crew_history, scorecard.crew_pick,
     live_play, live_stop, live_seek, live_loop, live_window, live_off, live_state,
     live_inputs, live_arm, live_click, live_keys, live_record, live_record_stop, live_devices, live_device,

@@ -276,6 +276,43 @@ def test_sync_brings_accepted_work_into_an_open_take(song):
     assert takes.take_sync()["note"] == "Already up to date"
 
 
+def test_a_stale_take_is_caught_up_before_it_is_handed_in(song):
+    # seen live: a Mix take cut before the Composer's fixes landed was handed in, judged and merged without them
+    studio.seat_join("mix")
+    mine = takes.take_new("Mix pass")
+    api.track_update("Bass", volume_db=-4.0)
+    studio.seat_join(None)
+    api.set_default_project(None)
+    takes.take_accept(_in_take("composer", lambda: api.write("Piano", "D5:w", at="1:1")))
+
+    studio.seat_join("mix")
+    takes.take_use(mine["take"])
+    with pytest.raises(ValueError, match="listen"):  # an agent seat hears the current music once more first
+        takes.take_submit("Bass down")
+    assert (74, 0.0) in _notes(mine["project"], "Piano")
+    res = takes.take_submit("Bass down, checked with the new piano")  # nothing moved since: it goes through
+    assert res["state"] == "submitted" and [c["where"] for c in res["changes"]] == ["Bass"]
+    studio.seat_join(None)
+    assert "listen" not in takes.take_accept(mine["take"])
+
+
+def test_a_person_s_stale_take_is_synced_and_handed_in(song):
+    mine = takes.take_new("My mix")
+    api.track_update("Bass", volume_db=-4.0)
+    api.set_default_project(None)
+    takes.take_accept(_in_take("composer", lambda: api.write("Piano", "D5:w", at="1:1")))
+    takes.take_use(mine["take"])
+    res = takes.take_submit("Bass down")
+    assert res["synced"]["brought_in"] >= 1 and res["state"] == "submitted"
+
+
+def test_accepting_onto_a_newer_session_says_to_listen_again(song):
+    a = _in_take("composer", lambda: api.write("Piano", "D5:w", at="1:1"))
+    b = _in_take("mix", lambda: api.track_update("Bass", volume_db=-4.0))  # both cut from the same rev
+    assert "listen" not in takes.take_accept(a)
+    assert "listen()" in takes.take_accept(b)["listen"]
+
+
 def test_work_outside_a_seats_department_is_flagged(song):
     tk = _in_take("mix", lambda: (api.track_update("Bass", volume_db=-4.0), api.write("Piano", "D5:w", at="1:1")))
     rep = takes.take_diff(tk)
@@ -429,7 +466,7 @@ def test_tools_are_listed_without_schema_labels_and_still_check_their_arguments(
 
     from tunetrack import mcp_server
     tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
-    assert len(tools) == len(mcp_server.TOOLS) == 75
+    assert len(tools) == len(mcp_server.TOOLS) == 78
 
     def labels(o):
         if isinstance(o, dict):

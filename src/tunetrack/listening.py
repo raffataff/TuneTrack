@@ -33,6 +33,7 @@ OCT_LABEL = ["31 Hz", "63 Hz", "125 Hz", "250 Hz", "500 Hz", "1 kHz", "2 kHz", "
 LEAD_WORDS = ("lead", "melody", "vocal", "solo", "theme", "hook")
 DRUM_ROLES = ("drums", "percussion", "drum kit", "kit")
 EPS = 1e-20
+NOTE_WINDOW = 0.3  # s: the least of a note that verify hears, so a slow attack late in a bar still counts
 
 
 def _db(x: float) -> float:
@@ -491,16 +492,16 @@ def verify_track(p: Project, t: Track, pre: np.ndarray | None, probe: dict | Non
     if pre is not None and notes:
         mono = pre.mean(axis=0).astype(np.float64)
         cs = np.concatenate([[0.0], np.cumsum(mono ** 2)])
-        first: dict[int, float] = {}
-        for s, _n in notes:
+        # Each note is heard over its own length (at least NOTE_WINDOW s, even past the barline), and a bar counts as
+        # its loudest note. Measured from the bar's first onset to the barline instead, a late pickup (seen live: a
+        # humanised horn note 22 ms before the next bar) gave a few ms of slow attack and read as "no sound".
+        ms: dict[int, float] = {}
+        for s, n in notes:
             b = int(s // bpb)
-            first[b] = min(first.get(b, s), s)
-        ms = {}
-        for b, s in first.items():
             a = int(tm.sec(s) * sr)
-            e = min(len(mono), int(tm.sec((b + 1) * bpb) * sr))
+            e = min(len(mono), max(int(tm.sec(s + n.dur) * sr), a + int(NOTE_WINDOW * sr)))
             if e - a > 64:
-                ms[b] = (cs[e] - cs[a]) / (e - a)
+                ms[b] = max(ms.get(b, 0.0), (cs[e] - cs[a]) / (e - a))
         if ms:
             ref = float(np.percentile(list(ms.values()), 90))
             quiet = [b + 1 for b, v in ms.items() if v < max(ref * 1e-4, 1e-12)]

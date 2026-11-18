@@ -37,7 +37,17 @@ def test_reposition_cursor_for_voices():
     assert [(n.pitch, n.start) for n in notes] == [(72, 0), (64, 0), (67, 2)]
 
 
+def test_standalone_dynamic_is_sticky():
+    from tunetrack.theory import DYNAMICS
+    notes, _, _ = notation.parse("!f D2:w | !mf C4:q D4 !40 (C3 G3)")
+    assert [n.vel for n in notes] == [DYNAMICS["f"], DYNAMICS["mf"], DYNAMICS["mf"], 40, 40]
+    assert notation.parse("!f D2:w")[0][0].vel == notation.parse("D2:w!f")[0][0].vel
+    with pytest.raises(ValueError):
+        notation.parse("!loud C4")
+
+
 @pytest.mark.parametrize("text", [
+    "!f D2:w | !mf C4:q D4",
     "D4:q!80 F4 A4:h | (D3 A3 F4):w",
     "C4:e3 D4 E4 F4:q. G4:e | r:h A4:h",
     "C5:w @0 E4:h G4:h | B3:q r:q D4:h",
@@ -301,3 +311,14 @@ def test_render_audio_and_synth_tracks(proj, tmp_path):
     assert abs(info.duration - 2 * 4 * 60 / 100) < 0.05  # exactly two bars at 100 bpm
     assert rep["file_format"] == {"format": "ogg", "sample_rate": info.samplerate, "channels": info.channels}
     assert any(f.endswith("_stem_Audio.ogg") for f in rep["files"])
+
+
+def test_project_list_details(proj, tmp_path):
+    """The Projects screen reads each project's name, key, tempo, meter, track count and brief without loading it."""
+    api.track_add("Verb", kind="bus", fx=["builtin:reverb"])
+    gone = str(tmp_path / "gone")
+    d = api.project_list()
+    card = next(c for c in d["details"] if c["path"] == proj)
+    assert (card["name"], card["key"], card["tempo"], card["time_sig"], card["tracks"]) == ("Test Song", "D minor", 100, "4/4", 2)
+    assert card["exists"] and card["modified"] > 0
+    assert api._project_card(gone) == {"path": gone, "name": "gone", "exists": False}

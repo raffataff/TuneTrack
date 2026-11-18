@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 FORM, BRIEF, NOTES, SOUND, MIX, MASTER, TRACKS = "form", "brief", "notes", "sound", "mix", "master", "tracks"
 
 # MCP tool groups (names as registered in mcp_server.py).
-READ = {"status", "project_info", "project_list", "notes_read", "score", "analyze", "theory", "plugins_list",
+READ = {"status", "project_info", "project_list", "notes_read", "score", "analyze", "theory", "knowledge", "plugins_list",
         "patches_list", "synths_list", "sfz_list", "sfz_info", "plugin_params"}
 HEAR = {"render", "listen", "audition"}
 WRITE = {"write", "add_notes", "chords", "pattern", "drums", "cc", "notes_edit", "clip_edit", "arrange", "midi_import"}
@@ -27,7 +27,7 @@ LIBRARY = {"patch_import", "patch_import_folder", "patch_update", "plugins_scan"
 HISTORY = {"undo", "redo"}
 # Every seat can see the board, talk, ask the user, and work in a take.
 CREW = {"studio_status", "inbox", "message_send", "task_update", "ask_human", "take_new", "take_use", "take_diff",
-        "take_sync", "take_submit", "report_write", "report_list", "report_read"}
+        "take_sync", "take_submit", "report_write", "report_list", "report_read", "lessons"}
 LEAD = {"task_add", "take_accept", "take_reject", "take_discard", "seat_assign", "midi_export"}
 # Never given to a launched agent: these open windows or apps on the user's desktop, or switch the open project.
 HUMAN_ONLY = {"play", "ui_open", "patch_capture", "project_new", "project_open"}

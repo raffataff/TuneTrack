@@ -138,7 +138,8 @@ def _form(doc: dict, d: Path) -> dict:
         except Exception:  # noqa: BLE001 - an unreadable chord is shown as written rather than hiding the bench
             chords = [{"at": e.get("at", 0), "len": e.get("len", 0), "chord": e.get("chord", "?"),
                        "name": e.get("chord", "?")} for e in doc["chord_track"]]
-    return {"name": doc.get("name"), "tempo": doc.get("tempo"), "key": doc.get("key"), "time_sig": [num, den],
+    return {"name": doc.get("name"), "tempo": doc.get("tempo"), "tempo_changes": doc.get("tempo_changes") or [],
+            "key": doc.get("key"), "time_sig": [num, den],
             "bpb": num * 4.0 / den, "end": end, "loop": doc.get("loop") or None,
             "markers": sorted(doc.get("markers") or [], key=lambda m: m.get("at", 0)), "chords": chords,
             "brief": doc.get("brief") or {}}

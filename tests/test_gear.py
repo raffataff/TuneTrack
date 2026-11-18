@@ -130,6 +130,74 @@ def test_catalog_new_items_sort_first(studio):
     assert gear.catalog(kind="instrument")["items"][0]["id"] == f"sfz:{f}"
 
 
+# ---- maker and type ----------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("entry, maker", [
+    ({"name": "SSL Native X-Echo", "path": r"C:\VST3\SSL Native X-Echo.vst3"}, "Solid State Logic"),
+    ({"name": "C4 Stereo", "path": r"C:\VST3\WaveShell1-VST3 14.12_x64.vst3"}, "Waves"),
+    ({"name": "Legacy Thing", "path": r"C:\Common Files\VST3\Harrison\Legacy\Legacy.vst3"}, "Harrison"),
+    ({"name": "HALion Sonic", "path": r"C:\VST3\Steinberg\HALion Sonic.vst3"}, "Steinberg"),
+    ({"name": "Foo", "path": r"C:\VST3\Foo.vst3", "vendor": "Acme"}, "Acme"),
+    ({"name": "Magic7", "path": r"C:\VST3\Magic7.vst3"}, "Magic7"),
+])
+def test_plugin_maker(entry, maker):
+    assert gear.plugin_maker(dict(entry, kind="effect")) == maker
+
+
+@pytest.mark.parametrize("name, kind, typ", [
+    ("TDR Nova", "effect", "EQ"), ("CLA-76 Mono", "effect", "Dynamics"), ("SSL Native X-ValveComp v6", "effect",
+                                                                        "Dynamics"),
+    ("ValhallaSupermassive", "effect", "Reverb"), ("H-Delay Stereo", "effect", "Delay"),
+    ("Doubler2 Mono/Stereo", "effect", "Modulation"), ("GTR Stomp 4 Mono", "effect", "Distortion / Saturation"),
+    ("GTR Tuner Mono", "effect", "Utility / Analyzer"), ("Youlean Loudness Meter 2", "effect", "Utility / Analyzer"),
+    ("L2 Stereo", "effect", "Dynamics"), ("Magic7", "effect", "Other"),
+    ("Surge XT", "instrument", "Synth"), ("HALion Sonic", "instrument", "Sampler"),
+    ("MODO DRUM", "instrument", "Drums / Percussion"), ("BBC Symphony Orchestra (64 Bit)", "instrument", "Orchestral"),
+])
+def test_plugin_type_from_name(name, kind, typ):
+    assert gear.plugin_type({"name": name, "kind": kind, "path": "x.vst3"}) == typ
+
+
+def test_plugin_type_prefers_vst3_subcategories():
+    assert gear.plugin_type({"name": "Mystery", "kind": "effect", "category": "Fx|Delay"}) == "Delay"
+    assert gear.plugin_type({"name": "TDR Nova", "kind": "effect", "subcategories": ["Fx", "Dynamics"]}) == "Dynamics"
+    assert gear.plugin_type({"name": "Thing", "kind": "instrument", "category": "Instrument|Synth"}) == "Synth"
+
+
+def test_catalog_items_carry_maker_and_type(studio, monkeypatch):
+    halion = studio["vst3"] / "HALion Sonic.vst3"
+    halion.write_bytes(b"")
+    studio["reg"]["plugins"].append({"name": "HALion Sonic", "path": str(halion), "kind": "instrument"})
+    monkeypatch.setattr(plugins, "list_patches", lambda *a, **k: [
+        {"id": "h1", "name": "Big Band Brass", "plugin": "HALion Sonic", "kind": "instrument",
+         "tags": ["brass", "halion-sonic-taiko-bigband-multi"]},
+        {"id": "h2", "name": "Chunky", "plugin": "HALion Sonic", "kind": "instrument", "tags": []},
+        {"id": "s1", "name": "Wobble", "plugin": "Surge XT", "kind": "instrument", "tags": ["surge", "basses"]},
+    ])
+    _sfz(studio["samples"], "Grand Piano")
+    vsco = studio["samples"] / "vsco2-ce" / "Cello Pizz.sfz"
+    vsco.parent.mkdir()
+    vsco.write_text("<region> sample=a.wav\n", encoding="utf-8")
+    cat = gear.catalog()
+    assert {k: _item(cat, "vst3:HALion Sonic")[k] for k in ("maker", "type")} == {"maker": "Steinberg",
+                                                                                 "type": "Sampler"}
+    assert _item(cat, "patch:h1")["type"] == "Orchestral"  # the multi's slug ("taiko") does not count
+    assert _item(cat, "patch:h2")["type"] == "Sampler"     # nothing in its name: its plugin's type
+    assert (_item(cat, "patch:s1")["maker"], _item(cat, "patch:s1")["type"]) == ("Surge Synth Team", "Synth")
+    piano = _item(cat, f"sfz:{studio['samples'] / 'MyLib' / 'Grand Piano.sfz'}")
+    assert (piano["maker"], piano["type"]) == ("MyLib", "Piano / Keys")
+    cello = _item(cat, f"sfz:{vsco}")
+    assert (cello["maker"], cello["type"]) == ("Versilian Studios", "Orchestral")
+    assert _item(cat, "synth:drums")["type"] == "Drums / Percussion"
+    assert _item(cat, "synth:supersaw")["type"] == "Synth"
+    assert _item(cat, "builtin:reverb")["type"] == "Reverb"
+    for i in cat["items"]:
+        assert i["type"] in (gear.EFFECT_TYPES if i["kind"] == "effect" else gear.INSTRUMENT_TYPES)
+        if i["source"] in ("synth", "builtin"):
+            assert i["maker"] == "TuneTrack"
+    assert _ids(gear.catalog("steinberg")["items"]) == ["patch:h1", "patch:h2", "vst3:HALion Sonic"]
+
+
 # ---- the watched folders ---------------------------------------------------------------------------------------
 
 def test_gear_folders_add_once_and_remove(tmp_path):
