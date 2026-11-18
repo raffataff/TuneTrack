@@ -12,6 +12,7 @@ installed counts as seen, so only what arrives later is marked new.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -73,21 +74,142 @@ def _sfz_item(f: Path) -> dict:
             break
         except ValueError:
             continue
-    return {"id": f"sfz:{f}", "kind": "instrument", "source": "sfz", "name": f.stem, "by": by}
+    return {"id": f"sfz:{f}", "kind": "instrument", "source": "sfz", "name": f.stem, "by": by,
+            "maker": _SFZ_MAKERS.get(by.lower(), by),
+            "type": _by_rules(_INSTRUMENT_RULES, _text(f.stem, by, f.parent.name)) or "Other"}
+
+
+# ---- maker and type: how the drawer groups the list -------------------------------------------------------------
+
+BUILTIN_MAKER = "TuneTrack"
+EFFECT_TYPES = ("EQ", "Dynamics", "Reverb", "Delay", "Modulation", "Distortion / Saturation", "Filter", "Pitch",
+                "Stereo / Spatial", "Utility / Analyzer", "Other")
+INSTRUMENT_TYPES = ("Synth", "Sampler", "Drums / Percussion", "Piano / Keys", "Orchestral", "Other")
+
+# a plugin's maker from its name (lower case, matched from the start of a word); first match wins
+_VENDORS = [(re.compile(p), v) for p, v in (
+    (r"\bssl\b", "Solid State Logic"), (r"\bvalhalla", "Valhalla DSP"), (r"\btdr\b", "Tokyo Dawn Records"),
+    (r"\byoulean\b", "Youlean"), (r"\bt-de-esser\b", "Techivation"), (r"\bsurge\b", "Surge Synth Team"),
+    (r"\bdexed\b", "Digital Suburban"), (r"\b(halion|groove agent|padshop|retrologue|cubase)\b", "Steinberg"),
+    (r"\b(bbc symphony|spitfire|labs)\b", "Spitfire Audio"), (r"\bmodo\b", "IK Multimedia"),
+    (r"\bsfizz\b", "sfztools"), (r"\bharrison\b", "Harrison"), (r"\b(fabfilter|pro-[qlcrg])", "FabFilter"),
+    (r"\b(ozone|neutron|nectar|izotope)\b", "iZotope"), (r"\b(kontakt|reaktor|massive|guitar rig)\b",
+                                                         "Native Instruments"),
+    (r"\bvital\b", "Vital Audio"), (r"\b(serum|ott)\b", "Xfer Records"), (r"\barturia\b", "Arturia"),
+)]
+# SFZ libraries whose maker is known, by folder name
+_SFZ_MAKERS = {"vsco2-ce": "Versilian Studios", "salamander-grand-piano": "Alexander Holm",
+               "greg-sullivan-epianos": "Greg Sullivan", "mtg-solo-sax": "MTG (UPF)", "jrhodes3c": "jlearman",
+               "steel-drum": "jlearman", "virtuosity-drums": "Karoryfer Samples", "meatbass": "Karoryfer Samples",
+               "black-and-green-guitars": "Karoryfer Samples", "horse-pulse": "Karoryfer Samples",
+               "caveman-cosmonaut": "Karoryfer Samples", "discord-gm-bank": "Discord SFZ GM Bank"}
+
+# VST3 sub-categories ("Fx|Reverb", "Instrument|Synth") -> type, when the scan stored them
+_EFFECT_SUBCATS = {"eq": "EQ", "dynamics": "Dynamics", "reverb": "Reverb", "delay": "Delay",
+                   "modulation": "Modulation", "distortion": "Distortion / Saturation", "filter": "Filter",
+                   "pitch shift": "Pitch", "pitch": "Pitch", "spatial": "Stereo / Spatial",
+                   "surround": "Stereo / Spatial", "analyzer": "Utility / Analyzer", "tools": "Utility / Analyzer"}
+_INSTRUMENT_SUBCATS = {"synth": "Synth", "sampler": "Sampler", "drum": "Drums / Percussion",
+                       "piano": "Piano / Keys"}
+
+# name / tag keywords -> type, in order: the first that matches wins
+_EFFECT_RULES = [(t, re.compile(p)) for t, p in (
+    ("Utility / Analyzer", r"meter|loudness|analy[sz]|tuner|scope|spectrum|utility|\bgain\b|\btrim\b"),
+    ("Reverb", r"verb|\broom\b|\bhall\b|\bplate\b|\bspring\b|supermassive|chamber|convol"),
+    ("Delay", r"delay|echo"),
+    ("EQ", r"\beq\b|equali|\bnova\b|pro-?q|pultec|channel ?strip|drumstrip|vocalstrip"),
+    ("Dynamics", r"comp|limit|\bl[123]\b|gate|expand|de-?ess|dynamic|maxim|\bc[46]\b|rvox|\b2a\b|\b76\b|1176|"
+                 r"\blmc|\bidx\b|transient|mastering|mixdown|multiband"),
+    ("Modulation", r"chorus|flang|phaser|tremolo|vibrato|doubler|ensemble|rotary|leslie|modulat"),
+    ("Pitch", r"pitch|auto-?tune|harmoni[sz]|octav|shifter"),
+    ("Distortion / Saturation", r"satur|distort|drive|fuzz|\bamp\b|stomp|\bgtr\b|tape|tube|valve|crush|"
+                                r"lo-?fi|decapit|\bclip"),
+    ("Filter", r"filter|\bwah\b"),
+    ("Stereo / Spatial", r"imager|widen|width|spatial|panner|binaural|surround"),
+)]
+_INSTRUMENT_RULES = [(t, re.compile(p)) for t, p in (
+    ("Orchestral", r"timpani|glocken|vibraphone|marimba|xylo|mallet|tuned perc|tubular|celest"),
+    ("Piano / Keys", r"piano|\bkeys\b|rhodes|wurli|\bep\b|e-?piano|organ|harpsi|clavi|cp80|pianet"),
+    ("Drums / Percussion", r"drum|\bkit\b|percussion|\bperc\b|groove agent|\bbeat\b|taiko|snare|kick|\btoms?\b|"
+                           r"cymbal|hi-?hat|cajon|conga|bongo"),
+    ("Synth", r"synth|surge|dexed|\bfm\b|analog|wavetable|\bchip|serum|vital|massive|retrologue|juno|jupiter|"
+              r"moog|oberheim|ppg|string machine"),
+    ("Orchestral", r"orchestr|symphon|string|violin|viola|cello|contrabass|double bass|brass|horn|trumpet|"
+                   r"trombone|tuba|flute|oboe|clarinet|bassoon|woodwind|choir|\bharp\b|pizz|\barco\b|vsco"),
+    ("Synth", r"\bpads?\b|\blead\b|\bplucks?\b|\barp\b|\bsaw|square|digital|polysynth|sequence"),
+    ("Sampler", r"sampler|halion|sfizz|kontakt|\bsfz\b"),
+)]
+
+
+def _text(*parts) -> str:
+    """Words to match: lower case, channel layouts ("Mono/Stereo") and underscores dropped."""
+    s = " ".join(str(p) for p in parts if p).lower().replace("_", " ")
+    return re.sub(r"\b(mono/stereo|mono|stereo)\b", " ", s)
+
+
+def _words(tags) -> list[str]:
+    """Tags that describe the sound, not slugs naming where a patch came from ("halion-sonic-brass-multi")."""
+    return [t for t in tags if str(t).count("-") < 2]
+
+
+def _by_rules(rules, text: str) -> str | None:
+    return next((t for t, rx in rules if rx.search(text)), None)
+
+
+def plugin_maker(p: dict) -> str:
+    """A registry entry's maker: what the scan stored, else known from its name, else the folder it is installed
+    in below a VST3 folder, else the plugin's own name."""
+    for k in ("vendor", "manufacturer", "maker"):
+        if p.get(k):
+            return str(p[k])
+    hit = next((v for rx, v in _VENDORS if rx.search(p["name"].lower())), None)
+    if hit:
+        return hit
+    path = Path(p.get("path", ""))
+    if "waveshell" in path.name.lower():
+        return "Waves"
+    parts = path.parts[:-1]
+    for i, x in enumerate(parts):
+        if x.lower() == "vst3" and i + 1 < len(parts) and not parts[i + 1].lower().endswith(".vst3"):
+            return parts[i + 1]
+    return p["name"]
+
+
+def _subcats(p: dict) -> list[str]:
+    raw = p.get("subcategories") or p.get("categories") or p.get("category") or []
+    if isinstance(raw, str):
+        raw = raw.split("|")
+    return [str(x).strip().lower() for x in raw if str(x).strip()]
+
+
+def plugin_type(p: dict) -> str:
+    """A registry entry's type: its VST3 sub-categories when the scan stored them, else keywords in its name."""
+    table = _EFFECT_SUBCATS if p["kind"] == "effect" else _INSTRUMENT_SUBCATS
+    for c in _subcats(p):
+        if c in table:
+            return table[c]
+    rules = _EFFECT_RULES if p["kind"] == "effect" else _INSTRUMENT_RULES
+    return _by_rules(rules, _text(p["name"])) or "Other"
 
 
 def _items() -> list[dict]:
     """Everything, unsorted, without the new marks."""
     out: list[dict] = []
-    for p in plugins.load_registry()["plugins"]:
+    reg = {p["name"]: p for p in plugins.load_registry()["plugins"]}
+    for p in reg.values():
         it = {"id": f"vst3:{p['name']}", "kind": p["kind"], "source": "vst3", "name": p["name"],
-              "by": Path(p["path"]).stem}
+              "by": Path(p["path"]).stem, "maker": plugin_maker(p), "type": plugin_type(p)}
         if not Path(p["path"]).exists():
             it["missing"] = True
         out.append(it)
     for m in plugins.list_patches():
-        it = {"id": f"patch:{m['id']}", "kind": m.get("kind", "instrument"), "source": "patch", "name": m["name"],
-              "by": m["plugin"], "tags": m.get("tags", [])}
+        kind = m.get("kind", "instrument")
+        host = reg.get(m["plugin"], {"name": m["plugin"], "kind": kind})
+        rules = _EFFECT_RULES if kind == "effect" else _INSTRUMENT_RULES
+        it = {"id": f"patch:{m['id']}", "kind": kind, "source": "patch", "name": m["name"],
+              "by": m["plugin"], "tags": m.get("tags", []), "maker": plugin_maker(host),
+              "type": _by_rules(rules, _text(m["name"], *_words(m.get("tags", [])), m.get("role")))
+              or plugin_type(dict(host, kind=kind))}
         if m.get("role"):
             it["role"] = m["role"]
         if m.get("description"):
@@ -96,10 +218,11 @@ def _items() -> list[dict]:
     out.extend(_sfz_item(f) for f in _sfz_files())
     for k, (_t, desc, _p) in synths.SYNTHS.items():
         out.append({"id": f"synth:{k}", "kind": "instrument", "source": "synth", "name": k, "by": "built-in",
-                    "about": desc})
+                    "about": desc, "maker": BUILTIN_MAKER,
+                    "type": _by_rules(_INSTRUMENT_RULES[1:3], _text(k)) or "Synth"})
     for k, (desc, _p, _b) in synths.FX.items():
         out.append({"id": f"builtin:{k}", "kind": "effect", "source": "builtin", "name": k, "by": "built-in",
-                    "about": desc})
+                    "about": desc, "maker": BUILTIN_MAKER, "type": _by_rules(_EFFECT_RULES, _text(k)) or "Other"})
     return out
 
 
@@ -122,15 +245,17 @@ def _marked(items: list[dict]) -> list[dict]:
 def catalog(query: str | None = None, kind: str | None = None) -> dict:
     """Every instrument and effect: VST3 plugins, saved patches, SFZ instruments, built-in synths and effects.
     Each item: id (what track_add / track_update / fx_add take), kind (instrument | effect), source (vst3 | patch |
-    sfz | synth | builtin), name, by (the plugin file, the plugin a patch is of, or the SFZ library), and when they
-    apply: tags, role, about, new (arrived since the user last looked), missing (its file is gone)."""
+    sfz | synth | builtin), name, by (the plugin file, the plugin a patch is of, or the SFZ library), maker (the
+    company: a patch's is its plugin's, built-ins are TuneTrack's), type (one of EFFECT_TYPES or INSTRUMENT_TYPES),
+    and when they apply: tags, role, about, new (arrived since the user last looked), missing (its file is gone)."""
     items = _marked(_items())
     words = [w for w in (query or "").lower().split() if w]
     if kind:
         items = [i for i in items if i["kind"] == kind]
     if words:
-        items = [i for i in items if all(w in " ".join([i["name"], i["by"], *i.get("tags", [])]).lower()
-                                         for w in words)]
+        def hay(i):
+            return " ".join([i["name"], i["by"], i["maker"], *i.get("tags", [])]).lower()
+        items = [i for i in items if all(w in hay(i) for w in words)]
     order = {"patch": 0, "vst3": 1, "sfz": 2, "synth": 3, "builtin": 4}
     items.sort(key=lambda i: (not i.get("new"), i["kind"], order[i["source"]], i["by"].lower(), i["name"].lower()))
     return {"items": items, "new": sum(1 for i in items if i.get("new")), "watch": gear_state()}

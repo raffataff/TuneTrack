@@ -328,7 +328,28 @@ def project_list() -> dict:
     if config.PROJECTS_DIR.exists():
         for f in sorted(config.PROJECTS_DIR.glob("*/project.json")):
             found.append(str(f.parent))
-    return {"current": st.get("current"), "recent": st.get("recent", []), "projects_dir": found}
+    recent = st.get("recent", [])
+    return {"current": st.get("current"), "recent": recent, "projects_dir": found,
+            "details": [_project_card(p) for p in dict.fromkeys([*recent, *found])]}
+
+
+def _project_card(path: str) -> dict:
+    """What the Projects screen shows for one folder: read straight from project.json, never loaded or migrated."""
+    f = Path(path) / "project.json"
+    card = {"path": path, "name": Path(path).name, "exists": f.is_file()}
+    if not card["exists"]:
+        return card
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return card
+    sig = d.get("time_sig") or [4, 4]
+    tracks = [t for t in d.get("tracks", []) if isinstance(t, dict)]
+    card.update(name=d.get("name") or card["name"], tempo=d.get("tempo"), key=d.get("key"),
+                time_sig=f"{sig[0]}/{sig[1]}" if isinstance(sig, list) and len(sig) == 2 else str(sig),
+                brief=d.get("brief") or {}, tracks=sum(t.get("kind") != "bus" for t in tracks),
+                modified=f.stat().st_mtime)
+    return card
 
 
 def project_info(project: str | None = None, clips: bool = True) -> dict:
@@ -977,6 +998,9 @@ def automation(track: str, param: str = "volume_db", points: list | None = None,
     or the text the plugin shows, e.g. "2 kHz"). An automated setting ignores its static value."""
     with _Edit(project) as p:
         if device is None:
+            if str(track).strip().lower() == "master":
+                raise ValueError("The master has no fader lane. Automate its effects with device=<n>, or a "
+                                 "track's volume_db (static master level: project_set master_volume_db).")
             if param not in ("volume_db", "pan"):
                 raise ValueError("param must be volume_db or pan for the fader; pass device=<effect index> or "
                                  "'instrument' to automate a device setting (cc() shapes instrument expression)")
@@ -1125,7 +1149,8 @@ def cc(track: str, controller, start, end=None, from_value: float | None = None,
                     raise ValueError("shape must be linear, exp, log or swell")
                 pts.append((s + (e - s) * x, from_value + (to_value - from_value) * f))
         if not pts:
-            raise ValueError("give points, or end + from_value + to_value")
+            raise ValueError("give points, or end + from_value + to_value: points=[['1:1', 40], ['3:1', 100]] "
+                             "or end='5:1', from_value=40, to_value=100")
         lo, hi = min(b for b, _ in pts), max(b for b, _ in pts)
         c = _clip_for(p, t, lo, max(hi, lo + 1e-3))
         lst = c.cc.setdefault(lane, [])
@@ -1767,8 +1792,23 @@ def sfz_list(query: str | None = None) -> dict:
 
 
 def sfz_info(path: str) -> dict:
+    import difflib
     from . import sfz
-    d = sfz.describe(path)
+    p = Path(str(path).removeprefix("sfz:"))
+    if not p.exists():
+        for base in config.load_config().get("sample_dirs", []):
+            if base and (Path(base) / p).exists():
+                p = Path(base) / p
+                break
+        else:
+            files = plugins.find_sfz(limit=100000)
+            close = difflib.get_close_matches(str(p), files, n=5, cutoff=0.4)
+            by_name = {Path(f).name.lower(): f for f in files}
+            close += [by_name[n] for n in difflib.get_close_matches(p.name.lower(), list(by_name), n=5, cutoff=0.4)
+                      if by_name[n] not in close]
+            hint = f" Closest: {', '.join(close[:5])}." if close else ""
+            raise FileNotFoundError(f"No SFZ {str(path)!r}.{hint} Call sfz_list(query) for real paths.")
+    d = sfz.describe(p)
     d["range_names"] = f"{theory.note_name(d['range'][0])}-{theory.note_name(d['range'][1])}"
     d["keyswitch_names"] = [theory.note_name(k) for k in d["keyswitches"]]
     return d
@@ -1800,7 +1840,11 @@ def audition(instrument, phrase: str = "auto", out: str | None = None, tempo: fl
             lo_hi = meta.get("range")
         if phrase == "auto":
             phrase = "chords" if not lo_hi or lo_hi[0] < 48 else "melody"
-    notes, length, _ = notation.parse(texts.get(phrase, phrase))
+    try:
+        notes, length, _ = notation.parse(texts.get(phrase, phrase))
+    except ValueError as e:
+        raise ValueError(f"{e}. phrase is TTN as in write: velocity !40 or !mf (not v40); "
+                         "@beat is its own token, not a modifier.") from None
     t.clips.append(Clip(id="c1", start=0, length=max(length, 4), notes=notes))
     p.tracks.append(t)
     p.tail = 2.0
@@ -1897,7 +1941,9 @@ def score(start=None, end=None, section: str | None = None, tracks: list | None 
           project: str | None = None) -> dict:
     """Bar-by-bar text score: the chord on each beat (chord track, else inferred from the notes, marked *) and every
     part's notes in TTN, columns lined up by beat, plus harmony warnings (clashes on strong beats, parallel 5ths/8ves
-    between bass and lead, voice crossings, parts that disagree with the chord track) with bar:beat and a fix.
+    between bass and lead, voice crossings, parts that disagree with the chord track, unresolved leading tones and 7ths at V-I, a doubled
+    leading tone, +6/Neapolitan chords that skip V, leaps a melody can't carry, a loop that closes on V-I) with
+    bar:beat and a fix.
     Default range: the whole song, at most 32 bars. Drum tracks are left out unless named in `tracks`."""
     p = load(project)
     s, e = _span(p, start, end, section)
@@ -2000,3 +2046,9 @@ def preview(project: str | None = None) -> dict:
     rep = engine.render_project(p, str(p.path / "renders" / "_preview.wav"), "wav", 24, "off", True)
     rep.pop("renderer", None)
     return rep
+
+
+def cleanup(project: str | None = None, dry_run: bool = False) -> dict:
+    """Delete the session's cached renders that neither the session nor an open/handed-in take would use."""
+    from . import cleanup as _cleanup
+    return _cleanup.cleanup(_path(project), dry_run=bool(dry_run))

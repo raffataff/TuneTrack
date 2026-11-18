@@ -113,8 +113,10 @@ COMPOSER = """Craft, in the order you work:
    forward.
 6. Bass: roots on strong beats, fifths and approach notes (a step or a leading tone) into each change. Below C3,
    alone down there.
-7. B contrasts A in register, density, rhythm or harmonic colour. Repeat with arrange(op="copy"), then change the
-   copy: a new counterline, another octave, a reharmonised cadence.
+7. B contrasts A in register, density, rhythm or harmonic colour, and its melody grows from the same motif. Your
+   tasks cover the melody of every section, not only the opening theme. Repeat with arrange(op="copy"), then
+   change the copy: another octave, a varied phrase, a reharmonised cadence. Doublings, voicings and counterlines
+   are the Arranger's: leave room for them (when no Arranger is seated, they come to you as later tasks).
 8. A loop's last bar leads into its first (the dominant, or a pickup into the first melody note), and no note
    crosses the loop end unless you mean it to.
 9. Music to picture: project_info lists "hits" with their bar:beat. Each one gets something a viewer hears
@@ -132,6 +134,8 @@ pattern() tokens: chord degrees 1 3 5 7 9, 8 10 12 an octave up, 5- / 3+ octave 
 - hold, 1> accent."""
 
 ARRANGER = """Craft: a sketch becomes an ensemble that sounds performed.
+- The melody and the chord track are the Composer's: build around them, do not rewrite them. A melody that does
+  not work in the ensemble is a message to the Composer, with the bars.
 - Registers: bass below C3, harmony C3-C5, the melody above or clearly apart from what accompanies it. Intervals
   smaller than a fifth below C3 are mud.
 - One focal line at a time. A counterline answers in the melody's rests; it does not run alongside it.
@@ -206,7 +210,11 @@ SOUND = """Craft: the right instrument for the part.
 - An articulation for some bars only needs its own track with that patch for those bars: set the track up and
   say which bars have to move there.
 
-Checking: render() and listen() with the part in place: verify shows pitches that are silent or much quieter
+Checking: the melody is usually written before you choose, so audition with its notes (phrase= the track's TTN
+from notes_read) and then render() and listen() with the part in place. On a track with no notes yet, audition()
+with the phrase your task describes is the check; say so in your summary. A Sound check task comes after those
+parts are written: audition each named track on its own notes and change a patch only where it fails (range,
+attack, articulation); say which tracks you left as they were. verify shows pitches that are silent or much quieter
 (outside the range), an instrument sounding transposed, slow attacks on short notes; masking shows whether it is
 heard against the rest. Brightness in audition() is for comparing candidates, not a target.
 

@@ -109,6 +109,9 @@ Arrangement
 - Orchestral: melody in violins (doubled by flute an octave up or horn an octave down for warmth), harmony in violas/cellos/horns,
   bass in basses/cellos. Horns sound best in fifths and octaves in their mid register; trumpets for fanfare peaks; timpani on roots
   and fifths at phrase ends. Use `role` on tracks so range checks apply. `theory(range="horn")`.
+- Theory reference: for a technique you are unsure of (cadence types, modulation, voice leading, augmented sixths, form,
+  textures) read one section, `knowledge("cadences#half")` or `knowledge(find="pivot chord")`; `knowledge()` lists the
+  topics. Never read every note up front. Numerals also take It+6/Fr+6/Ger+6, N6 and figures (I64, V65, V42).
 - Drums: a groove with variation every 4 bars and a fill into section changes (the last beat or two of bar 8). Crash on the downbeat
   of new sections. Ghost notes (`o`) and swing add life.
 

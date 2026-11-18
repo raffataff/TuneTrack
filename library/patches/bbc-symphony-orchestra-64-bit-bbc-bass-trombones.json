@@ -1,0 +1,29 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-bass-trombones",
+ "name": "BBC Bass Trombones",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "trombone",
+  "bass-trombone",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Bass Trombones a2, all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-bass-trombones.state",
+ "created": "2026-11-18 15:44",
+ "param_count": 2126,
+ "role": "bass",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-bass-trombones]",
+  "phrase": "chords",
+  "peak_dbfs": -4.1,
+  "rms_dbfs": -19.4,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 583,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

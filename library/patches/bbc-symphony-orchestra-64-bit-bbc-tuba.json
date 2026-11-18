@@ -1,0 +1,28 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-tuba",
+ "name": "BBC Tuba",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "tuba",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Tuba, all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-tuba.state",
+ "created": "2026-11-18 15:44",
+ "param_count": 2126,
+ "role": "bass",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-tuba]",
+  "phrase": "chords",
+  "peak_dbfs": -2.3,
+  "rms_dbfs": -15.4,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 301,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

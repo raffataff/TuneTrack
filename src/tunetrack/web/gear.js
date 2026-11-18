@@ -1,5 +1,5 @@
 // The gear browser (stage 6): every instrument and effect on this computer in one drawer, opened from the header's
-// GEAR key over either room. Search and filter; NEW marks what arrived since you last looked; AUDITION plays it
+// GEAR key over either room. Search and filter, grouped by maker or by type; NEW marks what arrived since you last looked; AUDITION plays it
 // (on the live engine when LIVE is on: a loop in the project's key and tempo that your keyboards play too;
 // otherwise a short render); USE puts it to work (an instrument on a track or a new one, an effect as an insert or
 // on a new bus), in whatever the Desk shows. FOLDERS lists what TuneTrack watches, failed scans and RETRY.
@@ -9,18 +9,23 @@
   const SRC = { patch: "SOUNDS", vst3: "PLUG-INS", sfz: "SFZ", synth: "BUILT-IN", builtin: "BUILT-IN" };
   const SRC_TIP = { patch: "Saved plugin sounds (patches)", vst3: "VST3 plug-ins", sfz: "SFZ sample instruments",
     synth: "TuneTrack's own synths and effects", builtin: "TuneTrack's own synths and effects" };
-  // the list's sections, in order: [kind, sources, heading, grouped by maker/library]
-  const SECTIONS = [
-    ["instrument", ["patch"], "Saved sounds", true], ["instrument", ["vst3"], "Plug-in instruments", false],
-    ["instrument", ["sfz"], "SFZ instruments", true], ["instrument", ["synth"], "Built-in synths", false],
-    ["effect", ["patch"], "Saved effect settings", true], ["effect", ["vst3"], "Plug-in effects", false],
-    ["effect", ["builtin"], "Built-in effects", false],
-  ];
-  const FOLD_AT = 6;  // a maker's group longer than this starts folded (unless you are searching)
+  // GROUP BY: MAKER (one group per company) or TYPE (what it does); gear.py gives each item its maker and type.
+  // TYPE groups come in this order; MAKER groups by name.
+  const TYPES = {
+    instrument: ["Synth", "Sampler", "Drums / Percussion", "Piano / Keys", "Orchestral", "Other"],
+    effect: ["EQ", "Dynamics", "Reverb", "Delay", "Modulation", "Distortion / Saturation", "Filter", "Pitch",
+      "Stereo / Spatial", "Utility / Analyzer", "Other"],
+  };
+  const FOLD_AT = 6;  // a group longer than this starts folded (unless you are searching)
   const G = {
     open: false, items: null, watch: null, loading: false, q: "", kind: "", src: "", sel: null, tab: "list",
     phrase: "auto", fold: new Map(), playing: null, busy: null, audio: null, mark: null, timer: 0,
   };
+  // the group-by follows the kind filter (EFFECTS -> TYPE, else MAKER) until you flip it; your pick is kept per filter
+  let byPick = {};
+  try { byPick = JSON.parse(localStorage.getItem("tt.gear.by") || "{}") || {}; } catch { /* no storage */ }
+  const groupBy = () => byPick[G.kind] || (G.kind === "effect" ? "type" : "maker");
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true });
   const gearBtn = $("#gearBtn"), countEl = $("#gearCount"), lampEl = gearBtn.querySelector(".lamp");
 
   const el = document.createElement("aside");
@@ -40,6 +45,9 @@
           <button data-k="" class="on">ALL</button><button data-k="instrument">INSTRUMENTS</button><button data-k="effect">EFFECTS</button>
           <i></i>
           <button data-s="" class="on">ANY</button><button data-s="patch" title="${SRC_TIP.patch}">SOUNDS</button><button data-s="vst3" title="${SRC_TIP.vst3}">PLUG-INS</button><button data-s="sfz" title="${SRC_TIP.sfz}">SFZ</button><button data-s="builtin" title="${SRC_TIP.builtin}">BUILT-IN</button>
+        </div>
+        <div class="gChips" role="group" aria-label="Group by">
+          <span class="gBy">GROUP BY</span><button data-by="maker" title="One group per company">MAKER</button><button data-by="type" title="Effects by what they do, instruments by kind">TYPE</button>
         </div>
       </div>
       <div id="gRows" class="gRows" tabindex="0" aria-label="Gear list"></div>
@@ -63,7 +71,7 @@
     if (G.kind && it.kind !== G.kind) return false;
     if (G.src && !(G.src === "builtin" ? it.source === "builtin" || it.source === "synth" : it.source === G.src)) return false;
     if (!ws.length) return true;
-    const hay = [it.name, it.by, ...(it.tags || []), it.role || ""].join(" ").toLowerCase();
+    const hay = [it.name, it.by, it.maker || "", ...(it.tags || []), it.role || ""].join(" ").toLowerCase();
     return ws.every((w) => hay.includes(w));
   };
 
@@ -82,16 +90,31 @@
     const ws = words(), items = (G.items || []).filter((i) => matches(i, ws));
     const out = [], fresh = items.filter((i) => i.new);
     if (fresh.length) out.push({ key: "new", head: "Just arrived", items: fresh, fresh: true });
-    for (const [kind, srcs, head, grouped] of SECTIONS) {
-      const its = items.filter((i) => !i.new && i.kind === kind && srcs.includes(i.source));
-      if (!its.length) continue;
-      if (!grouped) { out.push({ key: kind + srcs, head, items: its }); continue; }
-      const groups = new Map();
-      for (const i of its) { if (!groups.has(i.by)) groups.set(i.by, []); groups.get(i.by).push(i); }
-      out.push({ key: kind + srcs, head, groups: [...groups].map(([by, list]) => ({ key: `${kind}|${srcs}|${by}`, by, items: list })), count: its.length });
+    const rest = items.filter((i) => !i.new);
+    const grouped = (list, keyOf, order) => {
+      const m = new Map();
+      for (const i of list) { const k = keyOf(i); if (!m.has(k)) m.set(k, []); m.get(k).push(i); }
+      const names = order ? order.filter((k) => m.has(k)) : [...m.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+      return names.map((k) => ({ by: k, items: m.get(k).sort(byName) }));
+    };
+    if (groupBy() === "maker") {
+      if (rest.length) out.push({ key: "maker", head: "By maker", count: rest.length,
+        groups: grouped(rest, (i) => i.maker || i.by).map((g) => ({ ...g, key: `maker|${g.by}` })) });
+    } else {
+      for (const kind of ["instrument", "effect"]) {
+        const its = rest.filter((i) => i.kind === kind);
+        if (its.length) out.push({ key: "type" + kind, head: kind === "effect" ? "Effects by type" : "Instruments by type", count: its.length,
+          groups: grouped(its, (i) => (TYPES[kind].includes(i.type) ? i.type : "Other"), TYPES[kind]).map((g) => ({ ...g, key: `type|${kind}|${g.by}` })) });
+      }
     }
     return { out, total: items.length };
   }
+  // the small note on a row: where it comes from when grouped by maker, who made it when grouped by type
+  const note = (it) => {
+    if (it.new) return it.by !== it.name ? it.by : "";
+    if (groupBy() === "type") return it.maker || it.by;
+    return it.source === "patch" || it.source === "sfz" ? it.by : SRC[it.source];
+  };
   const isOpen = (g) => (G.fold.has(g.key) ? G.fold.get(g.key) : words().length > 0 || g.items.length <= FOLD_AT || g.items.some((i) => i.id === G.sel));
   function rowHtml(it) {
     const tags = (it.tags || []).slice(0, 3).map((t) => `<em>${esc(t)}</em>`).join("");
@@ -99,7 +122,7 @@
     return `<div class="gRow${it.id === G.sel ? " sel" : ""}${it.missing ? " gone" : ""}${on ? " playing" : ""}" data-id="${esc(it.id)}" title="${esc(it.about || it.id)}">
       <span class="gN">${on ? '<i class="lamp green"></i>' : ""}${esc(it.name)}</span>
       <span class="gT">${it.new ? '<b class="tag stale">NEW</b>' : ""}${it.missing ? '<b class="tag bad">FILE GONE</b>' : ""}${tags}</span>
-      ${it.new && it.by !== it.name ? `<span class="gB">${esc(it.by)}</span>` : ""}
+      ${note(it) ? `<span class="gB">${esc(note(it))}</span>` : ""}
     </div>`;
   }
   function drawList() {
@@ -349,9 +372,16 @@
   });
   let qTimer = 0;
   qEl.oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(() => { G.q = qEl.value.trim(); drawList(); }, 90); };
+  const byKeys = () => el.querySelectorAll("[data-by]").forEach((x) => x.classList.toggle("on", x.dataset.by === groupBy()));
   el.querySelectorAll("[data-k]").forEach((b) => b.onclick = () => {
-    G.kind = b.dataset.k; el.querySelectorAll("[data-k]").forEach((x) => x.classList.toggle("on", x === b)); drawList();
+    G.kind = b.dataset.k; el.querySelectorAll("[data-k]").forEach((x) => x.classList.toggle("on", x === b)); byKeys(); drawList();
   });
+  el.querySelectorAll("[data-by]").forEach((b) => b.onclick = () => {
+    byPick[G.kind] = b.dataset.by;
+    try { localStorage.setItem("tt.gear.by", JSON.stringify(byPick)); } catch { /* no storage */ }
+    byKeys(); drawList();
+  });
+  byKeys();
   el.querySelectorAll("[data-s]").forEach((b) => b.onclick = () => {
     G.src = b.dataset.s; el.querySelectorAll("[data-s]").forEach((x) => x.classList.toggle("on", x === b)); drawList();
   });

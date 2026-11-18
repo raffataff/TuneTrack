@@ -1,0 +1,27 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-piano",
+ "name": "BBC Piano",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "piano",
+  "keys",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Piano",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-piano.state",
+ "created": "2026-11-18 15:47",
+ "param_count": 2126,
+ "role": "keys",
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-piano]",
+  "phrase": "chords",
+  "peak_dbfs": -15.1,
+  "rms_dbfs": -35.9,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 254,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

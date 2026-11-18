@@ -1,0 +1,37 @@
+/* Task cables on the crew rack (crewlinks.js): the patch gutter beside the rack, a jack on each unit's ear, a cable
+   per open task in the colour of its state, and the lights that run along a cable when its two seats talk. */
+#studio { --patch-w: 66px; }
+#rack { position: relative; grid-template-columns: 14px minmax(0, 1fr) 14px var(--patch-w); }
+#rack > .rail, #rack > #units, #rack > #patch { grid-row: 1; }
+#studio.sideL #rack { grid-template-columns: var(--patch-w) 14px minmax(0, 1fr) 14px; }
+#studio.sideL #rack > #patch { grid-column: 1; }
+#patch { background: linear-gradient(90deg, #040506, #07080a 50%, #040506); box-shadow: inset 0 0 16px #000; }
+
+#patchSvg { position: absolute; left: 0; top: 0; width: 100%; height: 0; overflow: visible; pointer-events: none; z-index: 1; }
+#patchSvg path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+#patchSvg .sh { stroke: #000; stroke-width: 5.5; stroke-opacity: .85; }
+#patchSvg .core { stroke: var(--c); stroke-width: 2.6; stroke-opacity: .7; transition: stroke-opacity .35s; }
+#patchSvg .multi .sh { stroke-width: 6.5; } #patchSvg .multi .core { stroke-width: 3.6; }
+#patchSvg .cab { transition: opacity .8s; }
+#patchSvg .cab.gone { opacity: 0; }
+#patchSvg .cab.lit .core { stroke-opacity: 1; filter: drop-shadow(0 0 3px var(--c)); }
+#patchSvg .cab.new .sh, #patchSvg .cab.new .core { stroke-dasharray: 1 1; stroke-dashoffset: 1; animation: ttPlug .55s ease-out forwards; }
+@keyframes ttPlug { to { stroke-dashoffset: 0; } }
+#patchSvg .ghost .sh { stroke-opacity: .45; }
+#patchSvg .ghost .core { stroke-dasharray: 3 4; stroke-opacity: .55; }
+#patchSvg .hit { stroke: transparent; stroke-width: 12; pointer-events: stroke; cursor: pointer; }
+#patchSvg .cab:hover .core { stroke-opacity: 1; }
+#patchSvg .tag { display: none; }
+#patchSvg .multi .tag { display: inline; }
+#patchSvg .tag circle { fill: #0a0b0d; stroke: var(--c); stroke-width: 1.2; }
+#patchSvg .tag text { font: 500 8.5px var(--legend); fill: var(--ink); text-anchor: middle; dominant-baseline: central; }
+#patchSvg .jack { fill: #040506; stroke: #3a414a; stroke-width: 1.4; transition: fill .6s, stroke .6s; }
+#patchSvg .jack.on { stroke: #707884; }
+#patchSvg .jack.hit { fill: var(--c); stroke: var(--c); filter: drop-shadow(0 0 4px var(--c)); transition: none; }
+#patchSvg .pk { filter: drop-shadow(0 0 3px var(--c)); }
+#patchSvg .pk > * { fill: var(--c); }
+.bay h2 { transition: box-shadow .6s; }
+.bay h2.rx { box-shadow: 0 1px 0 rgba(255,255,255,.03), inset 3px 0 0 var(--c); transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  #patchSvg .cab.new .sh, #patchSvg .cab.new .core { animation: none; stroke-dashoffset: 0; }
+}

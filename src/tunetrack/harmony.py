@@ -8,13 +8,16 @@ infer        the chord the pitched parts sound (duration-weighted pitch classes 
 score        compact text an agent can read: per bar the chord on each beat and every part's notes in TTN, with columns
              lined up by beat so vertical relationships show.
 check        conservative warnings with bar:beat and a fix: lead/bass notes that clash with the chord on strong beats
-             (unless they move on by step), parallel 5ths/8ves between bass and lead, voice crossings by role, and parts
-             that disagree with the chord track. Drum tracks are left out.
+             (unless they move on by step), parallel 5ths/8ves between bass and lead, voice crossings by role, parts
+             that disagree with the chord track, and rules from the theory notes: tendency tones at V(7)-I, a doubled
+             leading tone, +6 and Neapolitan chords that skip V, leaps a melody can't carry, a loop closing on V-I.
+             Drum tracks are left out.
 """
 from __future__ import annotations
 
 import bisect
 import math
+import re
 from dataclasses import dataclass
 
 from . import plugins
@@ -710,11 +713,184 @@ def check(p: Project, prts: list[Part], segs: list[Seg], s: float, e: float) -> 
             flagged.setdefault(part.name, []).append((a, b, own.symbol, label(p, x, flats)))
     for name, items in flagged.items():
         out.append(_disagree(p, next(x for x in pitched if x.name == name), items, flats))
+    out += _tendencies(p, bass, lead, segs, s, e, fmt, nm)
+    if lead:
+        out += _leaps(lead, segs, s, e, fmt, nm)
+    out += _loop_seam(p, s, e, fmt)
     out.sort(key=lambda f: f.at)
     if len(out) > MAX_FINDINGS:
         out = out[:MAX_FINDINGS] + [Finding(out[MAX_FINDINGS].at, (), f"... {len(out) - MAX_FINDINGS} more harmony "
                                             f"warnings: check a shorter range with score(start, end)")]
     return out
+
+
+# Rules from the theory notes (library/knowledge/theory: cadences, voice-leading, augmented-sixth, neapolitan,
+# melody-motive), kept to the ones a score shows without doubt and good writing rarely breaks.
+
+_CHROMATIC_PD = re.compile(r"(It|Fr|Ger|Gr)\+?6|N6?|bII6?", re.IGNORECASE)
+_INTERVAL = {13: "minor 9th", 14: "major 9th", 15: "minor 10th", 16: "major 10th", 17: "11th", 18: "augmented 11th",
+             19: "12th"}
+TENDENCY_MAX = 6  # findings per rule, so one habit repeated over a song is reported a few times, not forty
+
+
+def _entries(p: Project) -> list[tuple[dict, Chord, Key]]:
+    out = []
+    for x in sorted(p.chord_track, key=lambda x: x["at"]):
+        try:
+            out.append((x, resolve(p, x), Key(x.get("key") or p.key)))
+        except ValueError:
+            continue
+    return out
+
+
+def _is_dominant(c: Chord, k: Key) -> bool:
+    """V or V7 of the key: root on 5 with a major 3rd (a minor v has no leading tone and is a modal colour)."""
+    return c.root == (k.tonic + 7) % 12 and 4 in c.intervals and 3 not in c.intervals
+
+
+def _is_tonic(c: Chord, k: Key) -> bool:
+    return c.root == k.tonic and (3 in c.intervals or 4 in c.intervals) and 6 not in c.intervals
+
+
+def _around(line: list, t: float, x0: float, reach: float) -> tuple:
+    """In a single-voice line: the note that carries the voice into time t (it started in [x0, t) and was still
+    sounding within a beat of t) and the first note starting at t (within `reach` beats)."""
+    i = bisect.bisect_left([n[0] for n in line], t - EPS)
+    before = line[i - 1] if i > 0 and line[i - 1][0] >= x0 - EPS and line[i - 1][1] >= t - 1.0 - EPS else None
+    after = line[i] if i < len(line) and line[i][0] <= t + reach + EPS else None
+    return before, after
+
+
+def _tendencies(p: Project, bass: Part | None, lead: Part | None, segs: list[Seg], s: float, e: float,
+                fmt, nm) -> list[Finding]:
+    out: list[Finding] = []
+    ents = _entries(p)
+    voices = [(v, v.line(top=v is lead)) for v in (lead, bass) if v is not None]
+    counts: dict[str, int] = {}
+    flats = Key(p.key).flats
+
+    def add(rule: str, f: Finding):
+        if s - EPS <= f.at < e - EPS and counts.get(rule, 0) < TENDENCY_MAX:
+            counts[rule] = counts.get(rule, 0) + 1
+            out.append(f)
+
+    for (x, a, _), (y, b, k) in zip(ents, ents[1:]):
+        t = y["at"]
+        la, lb = label(p, x, flats), label(p, y, flats)
+        if abs(x["at"] + x["len"] - t) > EPS:
+            continue  # a gap in the chord track: nothing resolves across it
+        # 1. at V(7) -> I: the leading tone rises to the tonic and the 7th falls by step (outer voices)
+        if _is_dominant(a, k) and _is_tonic(b, k):
+            lt, sev = (a.root + 4) % 12, ((a.root + 10) % 12 if 10 in a.intervals else None)
+            for v, line in voices:
+                before, after = _around(line, t, x["at"], 1.0)
+                if not before or not after or before[1] - before[0] < 0.5 - EPS or after[2] == before[2]:
+                    continue
+                pc, nxt = before[2] % 12, after[2]
+                if pc == lt and nxt != before[2] + 1:
+                    add("lt", Finding(t, (v.name,), f"{fmt(t)} {v.name} {nm(before[2])}, the leading tone of "
+                                                    f"{la}, goes to {nm(nxt)} at {lb}: a weak cadence - "
+                                                    f"let it rise a half step to {nm(before[2] + 1)}"))
+                elif pc == sev and not 1 <= before[2] - nxt <= 2:
+                    third = next(q for q in (before[2] - 1, before[2] - 2) if q % 12 in b.pcs) \
+                        if any(q % 12 in b.pcs for q in (before[2] - 1, before[2] - 2)) else before[2] - 1
+                    add("sev", Finding(t, (v.name,), f"{fmt(t)} {v.name} {nm(before[2])}, the 7th of {la}, "
+                                                     f"goes to {nm(nxt)} at {lb}: a chord's 7th falls by step "
+                                                     f"- {nm(third)} there"))
+        # 2. augmented sixths and the Neapolitan are pre-dominants: they go on to V (or the cadential I64)
+        tok = x["chord"].strip()
+        if _CHROMATIC_PD.fullmatch(tok):
+            to_v = b.root == (k.tonic + 7) % 12 or (b.root == k.tonic and b.bass == (k.tonic + 7) % 12) or \
+                (tok[:1].upper() in "NB" and b.root == (k.tonic + 11) % 12)
+            if not to_v:
+                kind = "the Neapolitan" if tok[:1].upper() in "NB" else "an augmented sixth"
+                add("pd", Finding(t, (), f"{fmt(t)} {tok} goes to {lb}: {kind} leads to the dominant - "
+                                         f"follow it with V (or I64 then V) in the chord track (harmony)"))
+    # 3. an augmented sixth needs b6 in the bass: that's the note the #4 makes the augmented sixth with
+    if bass:
+        for x, c, k in ents:
+            if not re.fullmatch(r"(It|Fr|Ger|Gr)\+?6", x["chord"].strip(), re.IGNORECASE):
+                continue
+            low = bass.sounding(x["at"] + 0.02)
+            want = (k.tonic + 8) % 12
+            if low and min(low) % 12 != want:
+                q = min(low)
+                fix = min((q + d for d in range(-6, 7) if (q + d) % 12 == want), key=lambda z: (abs(z - q), z))
+                add("b6", Finding(x["at"], (bass.name,), f"{fmt(x['at'])} {bass.name} plays {nm(q)} under "
+                                                         f"{x['chord']}: put {note_name(fix, True)} (b6) in the bass, "
+                                                         f"falling a half step to {nm(fix - 1)} on V"))
+    # 4. the leading tone doubled in the outer voices over V (it has nowhere good to go in both)
+    if bass and lead:
+        k = Key(p.key)
+        for g in segs:
+            if g.source != "track" or g.chord is None or not _is_dominant(g.chord, k):
+                continue
+            lt = (g.chord.root + 4) % 12
+            for a, b, pi in bass.between(g.start, g.end):
+                if a < g.start - EPS or b - a < 0.5 - EPS or pi % 12 != lt:
+                    continue
+                top = [q for q in lead.sounding(a + 0.02, 0.5) if q % 12 == lt]
+                if top:
+                    add("dbl", Finding(a, (bass.name, lead.name),
+                                       f"{fmt(a)} the leading tone {nm(pi)[:-1]} is doubled in {bass.name} and "
+                                       f"{lead.name} over {g.text}: give {bass.name} the root "
+                                       f"({nm(pi - 4)}) or {lead.name} another chord tone"))
+                    break
+    return out
+
+
+def _leaps(lead: Part, segs: list[Seg], s: float, e: float, fmt, nm) -> list[Finding]:
+    """Leaps a melody can't carry: wider than an octave (two octaves is a register jump, fine), or two leaps the same
+    way spanning more than an octave that aren't an arpeggio of the chord. After a big leap a line steps back."""
+    if lead.mono < 0.85:
+        return []  # a chordal lead: its top note jumps between voicings
+    line, out = lead.line(top=True), []
+    for i in range(1, len(line)):
+        (a0, b0, p0), (a1, _, p1) = line[i - 1], line[i]
+        if a1 - b0 > 0.5 + EPS or not s - EPS <= a1 < e - EPS:
+            continue
+        d = p1 - p0
+        if 12 < abs(d) < 24:
+            out.append(Finding(a1, (lead.name,), f"{fmt(a1)} {lead.name} leaps a {_INTERVAL.get(abs(d), 'wide interval')} "
+                                                 f"({nm(p0)} to {nm(p1)}): wider than an octave is hard to follow - "
+                                                 f"take {nm(p1 - 12 if d > 0 else p1 + 12)} instead"))
+        elif i + 1 < len(line) and line[i + 1][0] - line[i][1] <= 0.5 + EPS:
+            p2 = line[i + 1][2]
+            d2 = p2 - p1
+            g = _seg_at(segs, a1 + 0.02)
+            arp = g is not None and g.chord is not None and {p0 % 12, p1 % 12, p2 % 12} <= set(g.chord.pcs)
+            if abs(d) >= 3 and abs(d2) >= 3 and (d > 0) == (d2 > 0) and abs(p2 - p0) > 12 and not arp:
+                out.append(Finding(a1, (lead.name,), f"{fmt(a1)} {lead.name} {nm(p0)} {nm(p1)} {nm(p2)} leaps twice "
+                                                     f"the same way, over an octave: after a leap step back the other "
+                                                     f"way"))
+        if len(out) >= 4:
+            break
+    return out
+
+
+def _loop_seam(p: Project, s: float, e: float, fmt) -> list[Finding]:
+    """A loop whose last bars make a full V-I and that restarts on I: every pass sounds like an ending. Ending on V
+    makes the seam itself the cadence."""
+    if not p.loop:
+        return []
+    ents = _entries(p)
+    ls, le = p.loop["start"], p.loop["end"]
+    last = [i for i, (x, _, _) in enumerate(ents) if abs(x["at"] + x["len"] - le) < EPS]
+    first = next(((x, c, k) for x, c, k in ents if abs(x["at"] - ls) < EPS), None)
+    if not last or not last[0] or first is None:
+        return []
+    (w, cw, _), (x, cx, k) = ents[last[0] - 1], ents[last[0]]
+    flats = Key(p.key).flats
+    lw, lx, lf = label(p, w, flats), label(p, x, flats), label(p, first[0], flats)
+    if abs(w["at"] + w["len"] - x["at"]) > EPS or not (_is_dominant(cw, k) and _is_tonic(cx, k)
+                                                        and _is_tonic(first[1], first[2])):
+        return []
+    if not s - EPS <= x["at"] < e - EPS:
+        return []
+    return [Finding(x["at"], (), f"{fmt(w['at'])}-{fmt(le)} the loop closes with a full {lw}-{lx} and "
+                                 f"restarts on {lf}: each pass sounds like an ending. End the loop on "
+                                 f"{lw} (a half cadence) so the seam itself resolves, or keep it if the cue "
+                                 f"should breathe there")]
 
 
 def _disagree(p: Project, part: Part, items: list, flats: bool) -> Finding:

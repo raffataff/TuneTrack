@@ -243,3 +243,23 @@ def test_apps_detected(sandbox, monkeypatch, tmp_path):
     assert apps["claude-desktop"]["mcp_config"].endswith(os.path.join("Claude", "claude_desktop_config.json"))
     assert apps["codex-desktop"]["installed"] and apps["codex-desktop"]["mcp_config"].endswith("config.toml")
     assert apps["vscode-kilo"]["installed"] and apps["vscode-kilo"]["mcp_config"].endswith("kilo.jsonc")
+
+
+def test_parse_kilo_verbose_metadata():
+    paid = {"id": "p/big", "name": "P: Big", "status": "active", "cost": {"input": 4, "output": 20, "cache": {"read": 0.2}},
+            "limit": {"context": 1000000, "output": 128000}, "isFree": False, "mayTrainOnYourPrompts": False,
+            "options": {"description": "A big model.\n\nMore detail."}, "release_date": "2026-11-01",
+            "capabilities": {"reasoning": True, "toolcall": True, "input": {"image": True, "pdf": False}},
+            "variants": {"high": {}, "low": {}, "max": {}, "medium": {}}}
+    free = {"id": "q/small:free", "name": "Q: Small", "cost": {"input": 0, "output": 0}, "limit": {"context": 262144},
+            "capabilities": {"reasoning": False, "toolcall": True, "input": {}}, "isFree": True,
+            "mayTrainOnYourPrompts": True}
+    text = KILO_BANNER + "kilo/p/big\n" + json.dumps(paid, indent=2) + "\nkilo/q/small:free\n" + json.dumps(free, indent=2) + "\n"
+    rows = detect.parse_kilo_verbose(text)
+    assert [r["id"] for r in rows] == ["kilo/q/small:free", "kilo/p/big"]  # free first
+    s, b = rows
+    assert s["cost"] == "free" and s["info"]["trains"] is True and s["info"]["can"] == ["tools"] and "efforts" not in s
+    assert b["info"]["price"] == {"in": 4.0, "out": 20.0, "cache": 0.2} and b["info"]["context"] == 1000000
+    assert b["info"]["can"] == ["reasoning", "tools", "images"] and b["info"]["about"] == "A big model."
+    assert b["efforts"] == ["low", "medium", "high", "max"]
+    assert detect.parse_kilo_verbose("kilo/a/b\nkilo/c/d\n") == []  # plain list: caller falls back

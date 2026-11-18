@@ -1,0 +1,29 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-harp-celeste",
+ "name": "BBC Harp Celeste",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "harp",
+  "celeste",
+  "plucked",
+  "keys",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Harp & Celeste (pitched)",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-harp-celeste.state",
+ "created": "2026-11-18 16:02",
+ "param_count": 2126,
+ "role": "harp",
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-harp-celeste]",
+  "phrase": "chords",
+  "peak_dbfs": -15.0,
+  "rms_dbfs": -35.2,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 255,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

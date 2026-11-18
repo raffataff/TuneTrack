@@ -353,7 +353,53 @@ def _task_view(st: dict, t: dict, detail: bool = False) -> dict:
             d[k] = t[k]
     if detail:
         d.update(detail=t.get("detail", ""), by=t.get("by"), depends=t.get("depends", []))
+        for k in ("report", "recheck", "from_review"):  # a person's review (review.py): what filed it, what it follows up
+            if t.get(k):
+                d[k] = t[k]
     return d
+
+
+def _new_task(b: "_Board", seat: str, title: str, detail: str = "", depends: list | None = None,
+              scope: dict | None = None, **extra) -> dict:
+    """Put a task on the board inside an open _Board (task_add, and review.review_send, which adds several at once)."""
+    now = round(time.time(), 3)
+    t = {"id": b.new_id("T"), "seat": seat, "title": str(title).strip(), "detail": detail or "", "state": "queued",
+         "depends": list(depends or []), "scope": scope or {}, "by": me(), "take": None, "result": "",
+         "created": now, "updated": now, "attempts": 0, **extra}
+    b.st["tasks"].append(t)
+    b.emit("task", id=t["id"], seat=seat, state="queued", title=t["title"], by=me())
+    return t
+
+
+def _upstream(st: dict, tid: str) -> set[str]:
+    """tid and every task it waits on, however far back."""
+    deps = {t["id"]: t.get("depends", []) for t in st["tasks"]}
+    seen, todo = set(), [tid]
+    while todo:
+        x = todo.pop()
+        if x not in seen:
+            seen.add(x)
+            todo += deps.get(x, [])
+    return seen
+
+
+def _review_links(b: "_Board", t: dict) -> list[str]:
+    """The Producer is handing out the findings of a person's review (its task carries from_review, see review.py):
+    what it adds or rewrites meanwhile is part of the fixes, so the tasks waiting on its task (Mix's fixes, the
+    reviewer's second listen) wait on this one too. Nobody keeps depends lists by hand, and no cycle is made."""
+    if me() != "producer" or t["seat"] == "producer" or t["state"] not in OPEN:
+        return []
+    acting = {p["id"] for p in b.st["tasks"]
+              if p["seat"] == "producer" and p["state"] == "working" and p.get("from_review")}
+    if not acting:
+        return []
+    above, linked = _upstream(b.st, t["id"]), []
+    for w in b.st["tasks"]:
+        if (w["state"] == "queued" and acting & set(w.get("depends", [])) and t["id"] not in w["depends"]
+                and w["id"] not in above):
+            w["depends"].append(t["id"])
+            linked.append(w["id"])
+    return linked
 
 
 def task_add(seat: str, title: str, detail: str = "", depends: list | None = None, scope: dict | None = None,
@@ -366,14 +412,11 @@ def task_add(seat: str, title: str, detail: str = "", depends: list | None = Non
     if not str(title).strip():
         raise ValueError("A task needs a title")
     with _Board(session) as b:
-        deps = [b.task(d)["id"] for d in depends or []]
-        now = round(time.time(), 3)
-        t = {"id": b.new_id("T"), "seat": sid, "title": str(title).strip(), "detail": detail or "",
-             "state": "queued", "depends": deps, "scope": scope or {}, "by": me(), "take": None, "result": "",
-             "created": now, "updated": now, "attempts": 0}
-        b.st["tasks"].append(t)
-        b.emit("task", id=t["id"], seat=sid, state="queued", title=t["title"], by=me())
+        t = _new_task(b, sid, title, detail, [b.task(d)["id"] for d in depends or []], scope)
         out = _task_view(b.st, t)
+        linked = _review_links(b, t)
+        if linked:
+            out["waited_for_by"] = linked
         if not b.st["seats"][sid]["occupant"]:
             out["warning"] = f"{sid} is empty: nobody will pick this up until the seat is assigned"
     return out
@@ -415,6 +458,9 @@ def task_update(task: str, state: str | None = None, result: str | None = None, 
         b.emit("task", id=t["id"], seat=t["seat"], state=t["state"], title=t["title"], by=who,
                result=(t["result"] or "")[:EVENT_TEXT] or None, take=t.get("take"))
         out = _task_view(b.st, t)
+        linked = _review_links(b, t) if detail is not None else []
+        if linked:
+            out["waited_for_by"] = linked
         if t["state"] == "done":
             freed = [x["id"] for x in b.st["tasks"] if t["id"] in x.get("depends", []) and _ready(b.st, x)]
             if freed:
@@ -569,7 +615,6 @@ def report_write(title: str, body: str, kind: str = "report", report: str | None
         raise ValueError("A report needs a title and a body")
     who = by or me()
     with _Board(session) as b:
-        now = round(time.time(), 3)
         r = None
         if report:
             r = next((x for x in b.st["reports"] if x["id"].lower() == str(report).strip().lower()), None)
@@ -577,15 +622,23 @@ def report_write(title: str, body: str, kind: str = "report", report: str | None
                 raise KeyError(f"No report {report!r}")
             if who != r["by"] and not _lead(who) and who != "floor":
                 raise PermissionError(f"{r['id']} was filed by {r['by']}")
-        if not r:
-            r = {"id": b.new_id("R"), "by": who, "created": now}
-            b.st["reports"].append(r)
-        r.update(title=str(title).strip(), kind=kind, updated=now, chars=len(str(body)))
-        d = b.path / "studio" / "reports"
-        d.mkdir(parents=True, exist_ok=True)
-        _atomic_write(d / f"{r['id']}.md", str(body))
-        b.emit("report", id=r["id"], title=r["title"], what=kind, sender=who)
+        r = _file_report(b, r["id"] if r else b.new_id("R"), who, title, body, kind)
     return {"report": r["id"], "title": r["title"], "note": "Filed. The user reads it under REPORTS in the studio."}
+
+
+def _file_report(b: "_Board", rid: str, who: str, title: str, body: str, kind: str) -> dict:
+    """Write report rid (new or replaced) inside an open _Board: its file, its line in the index, its event."""
+    now = round(time.time(), 3)
+    r = next((x for x in b.st["reports"] if x["id"] == rid), None)
+    if not r:
+        r = {"id": rid, "by": who, "created": now}
+        b.st["reports"].append(r)
+    r.update(title=str(title).strip(), kind=kind, updated=now, chars=len(str(body)))
+    d = b.path / "studio" / "reports"
+    d.mkdir(parents=True, exist_ok=True)
+    _atomic_write(d / f"{rid}.md", str(body))
+    b.emit("report", id=rid, title=r["title"], what=kind, sender=who)
+    return r
 
 
 def report_list(session: str | None = None) -> dict:

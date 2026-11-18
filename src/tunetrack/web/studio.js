@@ -129,7 +129,7 @@ function listen() {
       || (S.take && msg.take && msg.take.id === S.take && msg.take.version !== S.version)
       || (S.take && ev.some((e) => e.kind === "take" && e.id === S.take && e.seq > ST.lastSeq));
     if (stale && !S.pendingSave && !S.drag) loadState();
-    if (ev.length && msg.project === ST.project) { ingest(ev); refresh(); }
+    if (ev.length && msg.project === ST.project) { window.TTLinks?.events(ev, ST.board); ingest(ev); refresh(); }
   };
 }
 
@@ -191,8 +191,11 @@ $("#needsBtn").onclick = () => { setRoom("studio"); $("#needs").scrollIntoView({
 function setRoom(room) {
   document.body.dataset.room = room; store.set("room", room);
   document.querySelectorAll("#rooms button").forEach((b) => b.classList.toggle("active", b.dataset.room === room));
-  if (room === "desk") renderAll(); else render();
+  if (room === "desk") renderAll(); else if (room === "studio") render();
+  if (room === "mix") TTMix.show();
+  if (room === "cables") window.TTCables?.show(); else window.TTCables?.hide();
 }
+const ROOMS = ["studio", "desk", "mix", "cables"];
 document.querySelectorAll("#rooms button").forEach((b) => b.onclick = () => setRoom(b.dataset.room));
 
 // ---------------------------------------------------------------- the rack
@@ -205,8 +208,8 @@ function seatState(s) {
   if (t && t.state === "submitted") return ["handed", "cyan", "TAKE HANDED IN"];
   if (t && t.state === "working") return ["working", kind === "agent" ? "dimamber" : "amber", kind === "human" ? "YOU · WORKING" : "WORKING"];
   if (t && t.state === "queued") {
+    if (t.waiting_for) return ["queued", "dimamber", "WAITS ON " + t.waiting_for.join(" ")];  // not your move yet either
     if (kind === "human") return ["yours", "amber blink", "YOUR MOVE"];
-    if (t.waiting_for) return ["queued", "dimamber", "WAITS ON " + t.waiting_for.join(" ")];
     if (t.not_before) return ["queued", "dimamber", "TRIES AGAIN " + new Date(t.not_before * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })];
     if (kind === "agent" && !(ST.crew && (ST.crew.running || ST.crew.elsewhere))) return ["queued", "dimamber", "QUEUED · CREW STOPPED"];
     return ["queued", "dimamber", "QUEUED"];
@@ -242,7 +245,7 @@ function buildUnits() {
   }
 }
 function renderUnits() {
-  if (!ST.board) { $("#units").innerHTML = `<div class="empty">Open or create a project to seat a crew.</div>`; ST.units = {}; return; }
+  if (!ST.board) { $("#units").innerHTML = `<div class="empty">Open or create a project to seat a crew.</div>`; ST.units = {}; window.TTLinks?.draw(null); return; }
   if (!ST.units[ST.board.seats[0].seat] || !ST.units[ST.board.seats[0].seat].isConnected) buildUnits();
   for (const s of ST.board.seats) {
     const u = ST.units[s.seat], q = (sel) => u.querySelector(sel), [state, lamp, label] = seatState(s), t = taskOf(s.task), a = seatAct(s.seat);
@@ -253,6 +256,7 @@ function renderUnits() {
     q(".l3").textContent = s.occupant ? (a.last || "·") : s.purpose;
     q('[data-k="hold"]').classList.toggle("on", s.paused); q('[data-k="hold"]').disabled = !s.occupant || s.occupant.kind !== "agent";
     q('[data-k="open"]').classList.toggle("on", ST.open === s.seat);
+    const bt = q('.tabsB [data-tab="bench"]'); if (bt.textContent !== benchName(s)) bt.textContent = benchName(s);
     q(".bench").classList.toggle("hidden", ST.open !== s.seat);
     const fold = L.fold.includes(s.seat), f = q('[data-k="fold"]');
     u.classList.toggle("folded", fold); f.textContent = fold ? "+" : "–"; f.title = fold ? "Unfold this unit" : "Fold this unit to a 1U strip";
@@ -260,7 +264,14 @@ function renderUnits() {
     if (ST.open === s.seat) renderBench(s.seat);
   }
   tickUnits();
+  window.TTLinks?.draw(ST.board);  // the task cables follow the units (crewlinks.js)
 }
+// a task cable clicked: open the seat doing that task, on its tasks
+if (window.TTLinks) window.TTLinks.onOpen = (seat) => {
+  if (!ST.units[seat]) return;
+  ST.open = seat; ST.tab[seat] = "tasks"; delete ST.benchSig[seat]; store.set("open", seat); renderUnits();
+  ST.units[seat].scrollIntoView({ block: "nearest", behavior: "smooth" });
+};
 function tickUnits() {
   if (!ST.board || document.body.dataset.room !== "studio") return;
   const now = Date.now() / 1000;
@@ -334,6 +345,7 @@ function dragUnit(ev, u) {
       if (before !== undefined && before !== u.nextElementSibling) {
         box.insertBefore(u, before);
         L.order = [...box.querySelectorAll(":scope > .unit")].map((x) => x.dataset.seat); saveLayout();
+        window.TTLinks?.draw();
       }
     },
     cancel() { u.classList.remove("mmLift"); line.remove(); },
@@ -350,6 +362,7 @@ function applySide() {
   b.before(a); a.after(SPLIT);
   side.classList.toggle("mmFree", !!L.bayH || L.bays[0] !== "needs");
   side.style.setProperty("--mm-rows", L.bayH ? `minmax(120px, ${L.bayH}px) 12px minmax(120px, 1fr)` : L.bays[0] === "needs" ? "minmax(120px, auto) 12px minmax(220px, 1fr)" : "minmax(120px, 1fr) 12px minmax(120px, 1fr)");
+  window.TTLinks?.draw();  // the cable gutter changes sides with the column
 }
 COLGRIP.onpointerdown = (ev) => {
   const was = L.sideW, w0 = $("#side").getBoundingClientRect().width;
@@ -378,7 +391,7 @@ document.querySelectorAll("#side > .bay > h2").forEach((hd) => {
   };
 });
 const LAYOUT_KEY = h(`<button id="mmLayout" class="mini" title="Rack layout">LAYOUT</button>`);
-$("#rack .rail:last-child").appendChild(LAYOUT_KEY);
+document.querySelectorAll("#rack .rail")[1].appendChild(LAYOUT_KEY);
 LAYOUT_KEY.onclick = (e) => {
   const set = (fn) => () => { fn(); saveLayout(); relayout(); }, ids = ST.board ? ST.board.seats.map((s) => s.seat) : [];
   menu(e, [["Rack layout", null],
@@ -405,8 +418,10 @@ function tabOf(s) {
   if (ST.tab[s.seat]) return ST.tab[s.seat];
   if (ST.board.takes.some((t) => t.seat === s.seat && t.state === "submitted")) return "takes";
   const yours = s.occupant && s.occupant.kind === "human" && ST.board.tasks.some((t) => t.seat === s.seat && t.state === "queued");
-  return yours ? "tasks" : "bench";
+  return yours && s.seat !== "review" ? "tasks" : "bench";  // a person reviews on the bench: the review sheet
 }
+const reviewing = (s) => s.seat === "review" && s.occupant && s.occupant.kind === "human";
+const benchName = (s) => reviewing(s) ? "review" : BENCH_NAME[VIEW[s.seat]];
 function renderBench(seat, force = false) {
   const u = ST.units[seat], s = seatOf(seat); if (!u || !s) return;
   const tab = tabOf(s);
@@ -414,7 +429,8 @@ function renderBench(seat, force = false) {
   const body = u.querySelector(".benchBody");
   const tasks = ST.board.tasks.filter((t) => t.seat === seat), takes = ST.board.takes.filter((t) => t.seat === seat), a = seatAct(seat);
   const B = benchOf(seat);
-  const sig = JSON.stringify(tab === "bench" ? [tab, B.version, B.err, [...B.hidden], body.clientWidth, (ST.crew && ST.crew.active && ST.crew.active[seat] || {}).take, s.seat === "producer" ? ST.board.tasks.map((t) => [t.id, t.state, t.depends]) : 0]
+  const sig = JSON.stringify(tab === "bench" ? [tab, B.version, B.err, [...B.hidden], body.clientWidth, (ST.crew && ST.crew.active && ST.crew.active[seat] || {}).take, s.seat === "producer" ? ST.board.tasks.map((t) => [t.id, t.state, t.depends]) : 0,
+      reviewing(s) ? [ST.board.tasks.filter((t) => t.seat === "review").map((t) => [t.id, t.state, t.waiting_for]), ST.board.seats.map((x) => !!x.occupant), ST.board.takes.map((k) => k.id + k.state)] : s.seat === "review" ? [s.occupant, (ST.board.reports || []).length] : 0]
     : tab === "tasks" ? [tab, tasks, s.occupant, takes.map((t) => [t.id, t.state, t.reason])] : tab === "takes" ? [tab, takes, Object.fromEntries(takes.map((t) => [t.id, ST.diffs[t.id]]))]
     : tab === "log" ? [tab, a.lines.length] : [tab, s.occupant, s.mode, s.notes, s.paused]);
   if (!force && ST.benchSig[seat] === sig) return;
@@ -448,9 +464,6 @@ function benchSoon() { clearTimeout(benchTimer); benchTimer = setTimeout(() => {
 setInterval(() => { if (!document.hidden && document.body.dataset.room === "studio") benchSoon(); }, 2500);
 window.addEventListener("resize", () => { if (ST.open) renderBench(ST.open); });
 
-const faderPos = (db) => { const v = Math.max(-60, Math.min(12, +db || 0)); return v >= -20 ? 30 + (v + 20) / 32 * 70 : (v + 60) / 40 * 30; };  // % up the slot
-const panName = (p) => Math.abs(p) < 0.005 ? "C" : (p < 0 ? "L" : "R") + Math.round(Math.abs(p) * 100);
-const dbName = (v) => (v > 0 ? "+" : "") + (+v).toFixed(1);
 function benchWork(body, s) {
   const B = benchOf(s.seat), d = B.data;
   if (!d) { body.innerHTML = `<div class="empty">${B.err ? esc(B.err) : "Reading the work…"}</div>`; if (!B.err) loadBench(s.seat); return; }
@@ -548,287 +561,19 @@ function workRoll(box, d, B, s) {
   }
   if (!vis.some((x) => (x.t.notes || []).length) && !passT.length) { g.fillStyle = "#5a564d"; g.font = "12px 'Segoe UI', sans-serif"; g.fillText(parts.length ? "Nothing written yet." : "No tracks yet.", GUT + 14, TOP + 26); }
 }
-// Mix: the console. Every moved fader stands next to a dashed outline of where it was, and the controls work:
-// drag a fader or the pan strip (Shift: fine), double-click to reset, click the readout to type a level, M and S,
-// click an effect for its settings (Shift-click bypasses it), click a send to type its level, × removes an effect or a send, +FX / +SND / OUT
-// add an effect, add a send and route the output. An edit goes to what the bench shows (the take, or the session), one undo step each.
-// While LIVE is on, each strip's meter shows the engine's peak as it plays (consoleMeters, fed by app.js's /api/live stream).
-const PLUGIN_PARAMS = new Map();  // device -> promise of plugin_params: a plugin loads once per page, then its list is filtered here
-const pluginParams = (dev) => {
-  if (!PLUGIN_PARAMS.has(dev)) PLUGIN_PARAMS.set(dev, api("plugin_params", { device: dev, limit: 5000 }).catch((e) => { PLUGIN_PARAMS.delete(dev); throw e; }));
-  return PLUGIN_PARAMS.get(dev);
-};
-const knobPos = (k, v) => k.log ? Math.log(v / k.lo) / Math.log(k.hi / k.lo) : (v - k.lo) / (k.hi - k.lo);  // 0..1 along the slider
-const knobAt = (k, x) => { const v = k.log ? k.lo * Math.pow(k.hi / k.lo, x) : k.lo + x * (k.hi - k.lo); return +(Math.round(v / k.step) * k.step).toFixed(6); };
-const knobName = (k, v) => {
-  if (k.unit === "LP/HP") return v >= 0.5 ? "HP" : "LP";
-  if (k.unit === "Hz" && v >= 1000) return `${+(v / 1000).toFixed(2)} kHz`;
-  const dp = k.step >= 1 ? 0 : k.step >= 0.1 ? 1 : k.step >= 0.01 ? 2 : 4;
-  return `${(+v).toFixed(dp)}${k.unit ? (k.unit === ":1" ? ":1" : " " + k.unit) : ""}`;
-};
-const peakOf = (pk) => Array.isArray(pk) ? (pk.length ? Math.max(...pk) : 0) : +pk || 0;
-function consoleMeters() {
-  const st = S.eng.st || {}, live = liveMode(), on = live && !!st.on && !st.audition;  // a gear audition is not this mix
-  document.querySelectorAll(".benchBody .console").forEach((c) => {
-    c.classList.toggle("live", on);
-    c.querySelectorAll("[data-ch]").forEach((ch) => {
-      const b = ch.querySelector(".lvl b.live");
-      if (b) b.style.height = (on ? peakPct(peakOf(st.peaks && st.peaks[ch.dataset.ch])) : 0) + "%";
-    });
-    c.parentElement.querySelectorAll("[data-fxp-win]").forEach((w) => { w.hidden = !live; });
-  });
-}
-liveES.addEventListener("message", () => { if (document.body.dataset.room === "studio") consoleMeters(); });
+// Mix: the console (console.js). The bench shows the Mix seat's take, else the session, and every edit goes there;
+// a take shows each moved control next to where it was.
 function workConsole(box, d, B, s) {
-  const r = d.render, was = (t, k) => t.was && k in t.was, on = d.source.take || null;
-  const buses = d.tracks.filter((t) => t.kind === "bus");
-  const sendsTo = (t, b) => t.sends.some((x) => x.id ? x.id === b.id : x.to === b.name);  // a bench read before sends carried ids has names only
-  const rmKey = (attr, k, what) => `<button class="rm" ${attr}="${k}" title="Remove ${what}" aria-label="Remove ${what}">×</button>`;
-  const isOpen = (chId, k) => !!B.fxOpen && B.fxOpen.ch === chId && B.fxOpen.k === k;
-  const fxSlots = (list, fresh, chId) => list.map((f, k) => `<span class="slotRow"><button class="slot ${f.bypass ? "byp" : ""} ${fresh && fresh(f) ? "new" : ""} ${isOpen(chId, k) ? "open" : ""}" data-fx="${k}" aria-expanded="${isOpen(chId, k)}" title="${esc(f.label)}${f.bypass ? " (bypassed)" : ""}${f.auto ? `. Automated: ${esc(f.auto.join(", "))}` : ""}. Click for its settings, Shift-click to ${f.bypass ? "switch it in" : "bypass it"}.">${esc(f.label)}${f.auto ? " ~" : ""}</button>${rmKey("data-fxrm", k, esc(f.label))}</span>`).join("");
-  // the keys that change a strip's shape: add an effect, add a send (tracks only), route the output
-  const addKeys = (t) => {
-    const free = t ? buses.filter((b) => b.id !== t.id && !sendsTo(t, b)) : [];
-    return `<div class="adds"><button data-add="fx" title="Add an effect to the end of this chain">+FX</button>${t && t.kind !== "bus" ? `<button data-add="send" ${free.length ? "" : "disabled"} title="${free.length ? "Send to a bus" : buses.length ? "Already sends to every bus" : "No buses yet: add one on the desk"}">+SND</button>` : ""}${t ? `<button data-add="out" title="Output: ${esc(t.output)}. Click to route it.">OUT</button>` : ""}</div>`;
-  };
-  const fader = (name, db, ghost, lo) => `<div class="slotway" data-lo="${lo}" title="Drag to set the level (Shift: fine), double-click for 0 dB."><i class="zero" style="bottom:${faderPos(0)}%"></i>${ghost != null ? `<i class="cap ghost" style="bottom:${faderPos(ghost)}%"></i>` : ""}<i class="cap now" role="slider" tabindex="0" aria-label="${esc(name)} level" aria-valuemin="${lo}" aria-valuemax="12" aria-valuenow="${+db || 0}" style="bottom:${faderPos(db)}%"></i></div>`;
-  const strip = (t, i) => {
-    const moved = [], w = t.was || {};
-    if ("volume_db" in w) moved.push(`was ${dbName(w.volume_db)}`);
-    if ("pan" in w) moved.push(`pan was ${panName(w.pan)}`);
-    if ("mute" in w) moved.push(w.mute ? "was muted" : "was unmuted");
-    if ("solo" in w) moved.push(w.solo ? "was solo" : "solo now");
-    const chain = (l) => l.map((f) => f.label).join(", ");
-    if ("fx" in w) moved.push(chain(w.fx) !== chain(t.fx) ? `fx was ${chain(w.fx) || "none"}` : w.fx.some((f, k) => !f.bypass !== !t.fx[k].bypass) ? "fx switched in or out" : "fx settings changed");
-    if ("sends" in w) moved.push("sends changed"); if ("output" in w) moved.push(`out was ${w.output}`); if ("automation" in w) moved.push("automation changed");
-    if (t.new) moved.push("new track");
-    const lv = t.level, rms = lv && lv.rms_dbfs != null ? Math.max(0, Math.min(100, (lv.rms_dbfs + 54) / 54 * 100)) : 0, pk = lv && lv.peak_dbfs != null ? Math.max(0, Math.min(100, (lv.peak_dbfs + 54) / 54 * 100)) : null;
-    const oldFx = new Set(((w.fx || t.fx).map((f) => f.label)));
-    return `<div class="ch ${moved.length ? "moved" : ""}" style="--c:${trackColor(t, i)}" data-ch="${esc(t.id)}">
-      <div class="nm" title="${esc(t.name)} · ${esc(t.instrument || t.kind)}">${esc(t.name)}</div>
-      <div class="slots">${fxSlots(t.fx, (f) => was(t, "fx") && !oldFx.has(f.label), t.id)}${t.sends.map((x, k) => `<span class="slotRow"><button class="slot send" data-send="${k}" title="Send to ${esc(x.to)} at ${dbName(x.db)} dB. Click to type a level.">→ ${esc(x.to)} ${dbName(x.db)}</button>${rmKey("data-sendrm", k, `the send to ${esc(x.to)}`)}</span>`).join("")}${t.output !== "master" ? `<button class="slot send" data-add="out" title="Output: ${esc(t.output)}. Click to route it.">out ${esc(t.output)}</button>` : ""}${t.automation.length ? `<span class="slot send">auto ${esc(t.automation.join(", "))}</span>` : ""}</div>
-      ${addKeys(t)}
-      <div class="well"><div class="lvl" title="${lv ? `last render: peak ${lv.peak_dbfs} dBFS, rms ${lv.rms_dbfs} dBFS` : "not rendered yet"}. While LIVE plays: the live peak."><i style="height:${rms}%"></i>${pk != null ? `<u style="bottom:${pk}%"></u>` : ""}<b class="live"></b></div>
-        ${fader(t.name, t.volume_db, was(t, "volume_db") ? w.volume_db : null, -60)}</div>
-      <button class="db" title="Click to type a level in dB">${dbName(t.volume_db)}</button>
-      <div class="pan" role="slider" tabindex="0" aria-label="${esc(t.name)} pan" aria-valuemin="-1" aria-valuemax="1" aria-valuenow="${t.pan}" title="Pan ${panName(t.pan)}. Drag to move it (Shift: fine), double-click to centre.">${was(t, "pan") ? `<i class="ghost" style="left:${(w.pan + 1) * 50}%"></i>` : ""}<i class="now" style="left:${(t.pan + 1) * 50}%"></i></div>
-      <div class="ms"><button class="m ${t.mute ? "on" : ""}" aria-pressed="${!!t.mute}" title="Mute">M</button><span>${panName(t.pan)}</span><button class="s ${t.solo ? "on" : ""}" aria-pressed="${!!t.solo}" title="Solo">S</button></div>
-      <div class="was" title="${esc(moved.join(" · "))}">${esc(moved[0] || "")}${moved.length > 1 ? ` +${moved.length - 1}` : ""}</div></div>`;
-  };
-  const m = d.master, mw = m.was || {}, bands = r ? Object.entries(r.bands_pct) : [], top = Math.max(1, ...bands.map((b) => b[1]));
-  // The open effect's settings, under the console. It stays open through redraws while that effect is still in its place.
-  const chainOf = (chId) => chId === "master" ? m.fx : (d.tracks.find((x) => x.id === chId) || {}).fx;
-  const opened = (() => {
-    const o = B.fxOpen, f = o && (chainOf(o.ch) || [])[o.k];
-    if (!f || f.label !== o.label) { B.fxOpen = null; return null; }
-    return f;
-  })();
-  const fxPanel = () => {
-    if (!opened) return "";
-    const f = opened, o = B.fxOpen, ti = d.tracks.findIndex((x) => x.id === o.ch), who = ti < 0 ? "Master" : d.tracks[ti].name;
-    const auto = new Set(f.auto || []);
-    const body = f.type === "builtin" ? (f.settings || []).map((k) => {
-      const v = typeof k.value === "number" ? k.value : k.default;
-      return `<div class="fxk ${auto.has(k.name) ? "auto" : ""}" title="${esc(k.name)}${auto.has(k.name) ? ": automated, so the lane decides what plays and this value is used only where the lane has no points" : ""}. Drag (arrow keys nudge), double-click for the default (${esc(knobName(k, k.default))}).">
-        <span class="kn">${esc(k.name.replace(/_/g, " "))}${auto.has(k.name) ? " ~" : ""}</span>
-        <input type="range" min="0" max="1" step="0.001" value="${Math.max(0, Math.min(1, knobPos(k, v)))}" data-k="${esc(k.name)}" aria-label="${esc(k.name)}" aria-valuetext="${esc(knobName(k, v))}">
-        <button class="v" title="Click to type a value">${esc(knobName(k, v))}</button></div>`;
-    }).join("") || `<span class="meta">This effect has no settings.</span>`
-      : f.type === "vst3" ? `<input class="fxq" type="search" placeholder="Search the settings…" value="${esc(B.fxQuery || "")}" aria-label="Search the plugin's settings" hidden><div class="fxks"><span class="meta">Loading the plugin's settings…</span></div>`
-      : `<span class="meta">${esc(f.type)} effects have no settings here.</span>`;
-    return `<div class="fxPanel" data-fxp="${esc(f.device)}" style="--c:${ti < 0 ? "var(--amber)" : trackColor(d.tracks[ti], ti)}">
-      <div class="fxHead"><span class="nm">${esc(who)} · ${esc(f.label)}</span><span class="meta">${f.type === "vst3" ? "plugin" : "built-in"}${f.bypass ? " · bypassed" : ""}</span><span class="spacer"></span>
-        <button class="mini ${f.bypass ? "" : "on"}" data-fxp-byp aria-pressed="${!f.bypass}" title="${f.bypass ? "Bypassed: click to switch it in" : "In: click to bypass it"}">${f.bypass ? "BYPASSED" : "IN"}</button>
-        ${f.type === "vst3" ? `<button class="mini" data-fxp-win title="Open this plugin's window in the live engine" ${liveMode() ? "" : "hidden"}>WINDOW</button>` : ""}
-        <button class="mini" data-fxp-rm title="Remove this effect">REMOVE</button><button class="mini" data-fxp-x title="Close the settings">×</button></div>
-      <div class="fxBody">${body}</div></div>`;
-  };
-  box.innerHTML = d.tracks.length ? `<div class="console">${d.tracks.map(strip).join("")}
-    <div class="ch master ${m.was ? "moved" : ""}" data-ch="master"><div class="nm">Master</div>
-      <div class="slots">${fxSlots(m.fx, null, "master") || `<span class="slot send">no master chain</span>`}</div>
-      ${addKeys(null)}
-      <div class="well"><div class="bandsB" title="Band balance of the last render">${bands.map(([k, v]) => `<div title="${esc(k)}: ${v}%"><i style="height:${v / top * 100}%"></i><span>${esc(k.replace("_", " "))}</span></div>`).join("") || `<span class="meta">not rendered yet</span>`}</div>
-        <div class="lvl" title="The master's live peak while LIVE plays"><b class="live"></b></div>
-        ${fader("Master", m.volume_db || 0, "volume_db" in mw ? mw.volume_db || 0 : null, -24)}</div>
-      <div class="dbs"><span class="db" title="Loudness of the last render">${r && r.lufs != null ? `${r.lufs} LUFS` : "— LUFS"}</span><button class="db" title="Click to type the master level in dB">${dbName(m.volume_db || 0)}</button></div>
-      <div class="ms"><span>target ${esc(m.target_lufs)} · ceil ${esc(m.ceiling_db)}</span></div>
-      <div class="ms"><span>${r ? `peak ${esc(r.true_peak_dbtp)} dBTP` : ""}</span></div>
-      <div class="was">${[r && r.stale ? "render is older than the mix" : "", r ? (r.warnings.length ? r.warnings.length + " warning" + (r.warnings.length === 1 ? "" : "s") : "no warnings") : "", "volume_db" in mw ? `level was ${dbName(mw.volume_db || 0)}` : "", Object.keys(mw).some((k) => k !== "volume_db") ? "master changed" : ""].filter(Boolean).join(" · ")}</div></div></div>
-    ${fxPanel()}
-    ${r && r.warnings.length ? `<ul class="changes">${r.warnings.slice(0, 6).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}` : `<div class="empty">No tracks to mix yet.</div>`;
-
-  // One edit, sent to what this bench shows. The bench is not redrawn under a control in use (B.hold counts the
-  // drags, key runs and edits in flight); the answer is, so the strip shows what was stored and where it was.
-  const send = async (fn, args, rev = null) => {
-    B.hold++;
-    try { await api(fn, args, on, rev); delete AB.cache[on || "session"]; }
-    catch (e) {  // refused because it moved on since the bench read it: say so plainly, the redraw below shows it as it is
-      toast(e.conflict && rev != null && /changed since you loaded/.test(e.message) ? `${on ? on.toUpperCase() : "The session"} changed while you were looking at it, so that edit was not made. The bench now shows it as it is: try again.` : e.message);
-    }
-    B.hold--; B.version = null; await loadBench(s.seat);
-    if (!on || on === S.take) loadState().catch(() => {});  // the desk shows the same music: bring it along
-  };
-  const set = (id, args) => send(id === "master" ? "project_set" : "track_update", id === "master" ? { master_volume_db: args.volume_db } : { track: id, ...args });
-  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), step = (v, by) => Math.round(v / by) * by;
-  const dbAt = (pct) => pct >= 30 ? -20 + (pct - 30) / 70 * 32 : -60 + pct / 30 * 40;  // faderPos, the other way
-  // A drag is relative: pressing anywhere on a control takes hold of it where it is, so a stray click moves nothing.
-  const drag = (el, ev, onMove, onDone) => {
-    if (ev.button) return;
-    ev.preventDefault(); try { el.setPointerCapture(ev.pointerId); } catch { /* a pointer that is already gone */ } B.hold++;
-    const box0 = el.getBoundingClientRect(); let went = false;
-    el.onpointermove = (e) => { went = true; onMove(e, box0); };
-    el.onpointerup = el.onpointercancel = (e) => { el.onpointermove = el.onpointerup = el.onpointercancel = null; B.hold--; onDone(went && e.type === "pointerup"); };
-  };
-  // Arrow keys nudge; the edit is sent once the keys rest, and the control keeps the focus through the redraw.
-  const nudger = (key, commit) => { let tm = null; return () => { if (tm == null) B.hold++; B.focus = key; clearTimeout(tm); tm = setTimeout(() => { tm = null; B.hold--; commit(); }, 450); }; };
-  // A readout that is clicked becomes a box to type a number in: Enter or leaving it sets it, Escape leaves it be.
-  const typeIn = (el, value, label, onValue) => {
-    const inp = h(`<input class="db" type="text" inputmode="decimal" value="${value}" aria-label="${label}">`); let done = false;
-    const end = (keep) => { if (done) return; done = true; const x = parseFloat(inp.value.replace(",", ".")); inp.replaceWith(el); if (keep && isFinite(x) && x !== value) onValue(x); };
-    inp.onkeydown = (e) => { if (e.key === "Enter") end(true); else if (e.key === "Escape") end(false); };
-    inp.onblur = () => end(true);
-    el.replaceWith(inp); inp.select();
-  };
-  // An effect leaving the chain: the open panel follows its effect, or closes with it.
-  const fxGone = (chId, k) => {
-    const o = B.fxOpen; if (!o || o.ch !== chId) return;
-    if (o.k === k) B.fxOpen = null; else if (o.k > k) o.k--;
-  };
-  // A setting edit: one fx_update per gesture. A slider's change lands when the hand lets go (or the arrow keys rest);
-  // edits to other settings of the same effect within that moment go in the same call.
-  const fxEdit = (params, flush = false) => {
-    const o = B.fxOpen; if (!o) return;
-    const key = `${o.ch}:${o.k}`;
-    if (B.fxPend && B.fxPend.key !== key) fxFire();  // another effect's edit still waiting: it goes first, on its own
-    if (!B.fxPend) { B.fxPend = { key, ch: o.ch, k: o.k, params: {} }; B.hold++; }
-    Object.assign(B.fxPend.params, params);
-    clearTimeout(B.fxTm); B.fxTm = setTimeout(fxFire, flush ? 0 : 350);
-  };
-  const fxFire = async () => {
-    const p = B.fxPend; if (!p) return;
-    clearTimeout(B.fxTm); B.fxPend = null; B.hold--;
-    const a = document.activeElement, k = a && a.closest && a.closest(".fxPanel") && a.dataset.k;
-    await send("fx_update", { track: p.ch, index: p.k, params: p.params }, d.source.rev);
-    if (k) B.focus = "fxp:" + k;
-    if (ST.open === s.seat) renderBench(s.seat, true);  // a slider still has the focus, which holds an ordinary redraw back
-  };
-  const P = box.querySelector(".fxPanel");
-  if (P && opened) {
-    const o = B.fxOpen, f = opened, pq = (sel) => P.querySelector(sel);
-    pq("[data-fxp-x]").onclick = () => { B.fxOpen = null; renderBench(s.seat, true); };
-    pq("[data-fxp-byp]").onclick = () => send("fx_update", { track: o.ch, index: o.k, bypass: !f.bypass }, d.source.rev);
-    pq("[data-fxp-rm]").onclick = () => { const k = o.k; fxGone(o.ch, k); send("fx_remove", { track: o.ch, index: k }, d.source.rev); };
-    const win = pq("[data-fxp-win]");
-    if (win) win.onclick = async () => {
-      status("opening the plugin window…", "busy");
-      try { const r = await api("live_window", { track: o.ch, slot: o.k, take: on }, on); status(""); if (r && r.opened === false) toast("The plugin window did not open."); }
-      catch (e) { status(""); toast(e.message); }
-    };
-    // a slider row: drag it, nudge it, double-click for the default, click the value to type one
-    const wireKnob = (row, name, toValue, fromValue, label, dflt, typed = (x) => x) => {
-      const rg = row.querySelector("input[type=range]"), vb = row.querySelector(".v");
-      rg.oninput = () => { const v = toValue(+rg.value); vb.textContent = label(v); rg.setAttribute("aria-valuetext", label(v)); };
-      rg.onchange = () => fxEdit({ [name]: toValue(+rg.value) });
-      if (dflt != null) rg.ondblclick = () => { rg.value = fromValue(dflt); rg.oninput(); fxEdit({ [name]: dflt }, true); };
-      vb.onclick = () => typeIn(vb, toValue(+rg.value), `${name} value`, (x) => { rg.value = fromValue(x); fxEdit({ [name]: typed(x) }, true); });
-    };
-    if (f.type === "builtin") {
-      for (const k of f.settings || []) {
-        const row = P.querySelector(`.fxk [data-k="${CSS.escape(k.name)}"]`); if (!row) continue;
-        wireKnob(row.closest(".fxk"), k.name, (x) => knobAt(k, x), (v) => Math.max(0, Math.min(1, knobPos(k, v))), (v) => knobName(k, v), k.default);
-      }
-    } else if (f.type === "vst3") {
-      const list = pq(".fxks"), q = pq(".fxq"), auto = new Set(f.auto || []), SHOW = 60;
-      const fill = (res) => {
-        const ql = (B.fxQuery || "").toLowerCase(), hit = res.params.filter((p) => !ql || p.name.toLowerCase().includes(ql));
-        q.hidden = res.params.length <= 12;  // a short list needs no search
-        list.innerHTML = hit.slice(0, SHOW).map((p) => {
-          const st = f.params[p.name], v = typeof st === "number" ? st : p.value;
-          const txt = typeof st === "string" ? st : typeof st === "number" ? st.toFixed(3) : p.text;
-          return `<div class="fxk ${auto.has(p.name) ? "auto" : ""}" title="${esc(p.name)}${auto.has(p.name) ? ": automated" : ""}${typeof st === "number" ? ". Set to " + st.toFixed(3) + " of its travel" : st != null ? "" : ". As the plugin has it"}">
-            <span class="kn">${esc(p.name)}${auto.has(p.name) ? " ~" : ""}</span><input type="range" min="0" max="1" step="0.001" value="${v}" data-k="${esc(p.name)}" aria-label="${esc(p.name)}">
-            <button class="v" title="Click to type a value from 0 to 1">${esc(txt)}</button></div>`;
-        }).join("") + `<div class="meta">${hit.length > SHOW ? `${SHOW} of ${hit.length} shown: search for the rest. ` : ""}${res.total} setting${res.total === 1 ? "" : "s"}${ql ? `, ${hit.length} match` : ""}.</div>`;
-        list.querySelectorAll(".fxk").forEach((row) => {
-          const name = row.querySelector("[data-k]").dataset.k, clip = (x) => Math.max(0, Math.min(1, +x));
-          wireKnob(row, name, (x) => +clip(x).toFixed(4), clip, (v) => v.toFixed(3), null, (x) => +clip(x).toFixed(4));
-        });
-        if (B.focus && B.focus.startsWith("fxp:")) focusKnob();
-      };
-      pluginParams(f.device).then((res) => { if (list.isConnected) fill(res); }, (e) => { if (list.isConnected) list.innerHTML = `<span class="meta">${esc(e.message)}</span>`; });
-      let qt = null;
-      q.oninput = () => { clearTimeout(qt); qt = setTimeout(() => { B.fxQuery = q.value; pluginParams(f.device).then((res) => { if (list.isConnected) fill(res); }, () => {}); }, 200); };
-    }
-  }
-  const focusKnob = () => {
-    const k = B.focus.slice(4), el = P && P.querySelector(`[data-k="${CSS.escape(k)}"]`);
-    if (el) { B.focus = null; el.focus({ preventScroll: true }); }
-  };
-  box.querySelectorAll("[data-ch]").forEach((ch) => {
-    const id = ch.dataset.ch, t = d.tracks.find((x) => x.id === id), q = (sel) => ch.querySelector(sel);
-    const way = q(".slotway"), cap = q(".cap.now"), read = q("button.db"), lo = +way.dataset.lo, v0 = +cap.getAttribute("aria-valuenow");
-    let v = v0;
-    const show = (x) => { v = +clamp(x, lo, 12).toFixed(1); cap.style.bottom = faderPos(v) + "%"; cap.setAttribute("aria-valuenow", v); read.textContent = dbName(v); liveMix(id, { db: v }, on || null); };
-    const commit = () => { if (v !== v0) set(id, { volume_db: v }); }, nudge = nudger(`${id}:cap`, commit);
-    way.onpointerdown = (ev) => {
-      const y0 = ev.clientY, p0 = faderPos(v); cap.focus({ preventScroll: true });
-      drag(way, ev, (e, bx) => show(step(dbAt(clamp(p0 + (y0 - e.clientY) / bx.height * 100, 0, 100)), e.shiftKey ? 0.1 : 0.5)), (ok) => { if (ok) commit(); else show(v0); });
-    };
-    way.ondblclick = () => { show(0); commit(); };
-    cap.onkeydown = (e) => {
-      const by = { ArrowUp: 0.5, ArrowRight: 0.5, ArrowDown: -0.5, ArrowLeft: -0.5, PageUp: 3, PageDown: -3 }[e.key];
-      if (!by && e.key !== "Home") return;
-      e.preventDefault(); show(e.key === "Home" ? 0 : v + (e.shiftKey && Math.abs(by) < 1 ? by / 5 : by)); nudge();
-    };
-    read.onclick = () => typeIn(read, v, "Level in dB", (x) => { show(x); commit(); });
-    ch.querySelectorAll("[data-fx]").forEach((b) => b.onclick = (e) => {
-      const k = +b.dataset.fx, f = chainOf(id)[k];
-      if (e.shiftKey) return send("fx_update", { track: id, index: k, bypass: !f.bypass }, d.source.rev);
-      B.fxOpen = isOpen(id, k) ? null : { ch: id, k, label: f.label }; B.fxQuery = "";
-      renderBench(s.seat, true);
-      const p = B.fxOpen && document.querySelector(".benchBody .fxPanel"); if (p) p.scrollIntoView({ block: "nearest" });
-    });
-    // removing names the effect by its place in the chain, so like bypass it carries the revision the bench read
-    ch.querySelectorAll("[data-fxrm]").forEach((b) => b.onclick = () => { fxGone(id, +b.dataset.fxrm); send("fx_remove", { track: id, index: +b.dataset.fxrm }, d.source.rev); });
-    q('[data-add="fx"]').onclick = () => openDevicePicker(false, (dev) => send("fx_add", { track: id, device: dev }));
-    if (!t) return;  // the master strip has a level and a chain; the rest is per track
-    const pan = q(".pan"), mark = q(".pan .now"), lab = q(".ms span"), p0 = t.pan; let p = p0;
-    const showPan = (x) => { p = clamp(+x.toFixed(2), -1, 1); if (Math.abs(p) < 0.03) p = 0; mark.style.left = (p + 1) * 50 + "%"; pan.setAttribute("aria-valuenow", p); lab.textContent = panName(p); liveMix(id, { pan: p }, on || null); };
-    const commitPan = () => { if (p !== p0) set(id, { pan: p }); }, nudgePan = nudger(`${id}:pan`, commitPan);
-    pan.onpointerdown = (ev) => {
-      const x0 = ev.clientX; pan.focus({ preventScroll: true });
-      drag(pan, ev, (e, bx) => showPan(step(p0 + (e.clientX - x0) / bx.width * 2, e.shiftKey ? 0.01 : 0.05)), (ok) => { if (ok) commitPan(); else showPan(p0); });
-    };
-    pan.ondblclick = () => { showPan(0); commitPan(); };
-    pan.onkeydown = (e) => {
-      const by = { ArrowRight: 0.05, ArrowUp: 0.05, ArrowLeft: -0.05, ArrowDown: -0.05 }[e.key];
-      if (!by && e.key !== "Home") return;
-      e.preventDefault(); showPan(e.key === "Home" ? 0 : p + (e.shiftKey ? by / 5 : by)); nudgePan();
-    };
-    // the send list is stored whole, so every send edit carries the revision the bench read
-    const sendList = (list) => send("track_update", { track: id, sends: list.map((y) => ({ to: y.id || y.to, db: y.db })) }, d.source.rev);
-    ch.querySelectorAll("[data-send]").forEach((b) => b.onclick = () => {
-      const k = +b.dataset.send;
-      typeIn(b, t.sends[k].db, `Send to ${esc(t.sends[k].to)} in dB`, (x) => sendList(t.sends.map((y, j) => j === k ? { ...y, db: clamp(+x.toFixed(1), -60, 12) } : y)));
-    });
-    ch.querySelectorAll("[data-sendrm]").forEach((b) => b.onclick = () => sendList(t.sends.filter((y, j) => j !== +b.dataset.sendrm)));
-    // the menu opens under the key, so it lands in the same place from the mouse or the keyboard
-    const under = (b) => { const rc = b.getBoundingClientRect(); return { clientX: rc.left, clientY: rc.bottom + 2 }; };
-    const sk = q('[data-add="send"]');
-    if (sk) sk.onclick = () => menu(under(sk), buses.filter((b) => b.id !== id && !sendsTo(t, b))
-      .map((b) => [`Send to ${b.name}`, () => sendList([...t.sends, { id: b.id, db: -12 }])]));
-    ch.querySelectorAll('[data-add="out"]').forEach((ok) => ok.onclick = () => menu(under(ok), [{ id: "master", name: "Master" }, ...buses.filter((b) => b.id !== id)]
-      .map((b) => [`${b.id === (t.output_id || t.output) ? "• " : ""}Out to ${b.name}`, () => { if (b.id !== (t.output_id || t.output)) set(id, { output: b.id }); }])));
-    q(".ms .m").onclick = () => set(id, { mute: !t.mute });
-    q(".ms .s").onclick = () => set(id, { solo: !t.solo });
+  TTConsole.render(box, d, B, {
+    take: d.source.take || null,
+    active: () => ST.open === s.seat,
+    redraw: () => renderBench(s.seat, true),
+    edited: () => { delete AB.cache[d.source.take || "session"]; },
+    reload: async () => {
+      B.version = null; await loadBench(s.seat);
+      if (!d.source.take || d.source.take === S.take) loadState().catch(() => {});  // the desk shows the same music: bring it along
+    },
   });
-  consoleMeters();  // the live peaks, without waiting for the next frame
-  if (B.focus && B.focus.startsWith("fxp:")) {  // a setting just sent keeps the focus (a plugin's list fills in later)
-    focusKnob(); if (!P || (opened && opened.type !== "vst3")) B.focus = null;
-  } else if (B.focus) {  // a control nudged from the keyboard keeps the focus through its own redraw
-    const [id, what] = B.focus.split(":"), ch = [...box.querySelectorAll("[data-ch]")].find((x) => x.dataset.ch === id);
-    B.focus = null; const el = ch && ch.querySelector(what === "pan" ? ".pan" : ".cap.now"); if (el) el.focus({ preventScroll: true });
-  }
 }
 // Sound: the instrument rack. One slot per part, with what it was before this take, and a key to hear it.
 function workSounds(box, d) {
@@ -935,16 +680,25 @@ function workPicture(box, d, B, s) {
   };
   B.picDraw = draw; draw();
 }
-// Review: the last render of what this seat is listening to, as measured.
-function workReport(box, d) {
-  const r = d.render;
-  if (!r) { box.innerHTML = `<div class="empty">Nothing rendered yet. Play or A/B renders it; the measurements land here.</div>`; return; }
+// Review: with you in the seat, the review sheet (review.js): listen, write, send it back. With an agent, the last
+// render as measured and the review it filed last.
+function workReport(box, d, B, s) {
+  if (s.occupant && s.occupant.kind === "human") {
+    TTReview.render(box, d, {
+      get board() { return ST.board; }, title, audition, hush, AB, refresh: () => refresh(true),
+      crewRunning: () => !!(ST.crew && (ST.crew.running || ST.crew.elsewhere)),
+    });
+    return;
+  }
+  const r = d.render, last = (ST.board.reports || []).filter((x) => x.by === "review").slice(-1)[0];
+  const filed = last ? `<div class="meta" style="margin-top:8px">Last review: <u data-report="${esc(last.id)}" title="Read it">${esc(last.id)} ${esc(last.title)}</u></div>` : "";
+  if (!r) { box.innerHTML = `<div class="empty">Nothing rendered yet. Play or A/B renders it; the measurements land here.</div>${filed}`; return; }
   const bands = Object.entries(r.bands_pct), top = Math.max(1, ...bands.map((b) => b[1]));
   box.innerHTML = `<div class="planHead"><span class="vfd small">${esc(r.lufs)} LUFS · PEAK ${esc(r.true_peak_dbtp)} dBTP · ${esc(r.duration_s)} S${r.loop_mode && r.loop_mode !== "off" ? " · " + esc(String(r.loop_mode).toUpperCase()) : ""}</span>
       <span class="tag ${r.stale ? "stale" : "ok"}">${r.stale ? "OLDER THAN THE MUSIC" : "CURRENT"}</span><span class="tag">width ${esc(r.stereo_correlation)}</span><span class="tag">limiter ${esc(r.limiter_db)} dB</span></div>
     <div class="report2"><div class="bandsB tall">${bands.map(([k, v]) => `<div title="${esc(k)}: ${v}%"><i style="height:${v / top * 100}%"></i><span>${esc(k.replace("_", " "))}<br>${v}%</span></div>`).join("")}</div>
       <div class="lvls">${d.tracks.filter((t) => t.level).map((t, i) => `<div><span>${esc(t.name)}</span><div class="hbar"><i style="width:${Math.max(0, Math.min(100, (t.level.rms_dbfs + 54) / 54 * 100))}%;background:${trackColor(t, i)}"></i></div><span class="num">${esc(t.level.rms_dbfs)} rms · ${esc(t.level.peak_dbfs)} pk</span></div>`).join("")}</div></div>
-    ${r.warnings.length ? `<ul class="changes">${r.warnings.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : `<div class="meta ok">No warnings from the last render.</div>`}`;
+    ${r.warnings.length ? `<ul class="changes">${r.warnings.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : `<div class="meta ok">No warnings from the last render.</div>`}${filed}`;
 }
 
 function benchTasks(body, s, tasks) {
@@ -959,7 +713,7 @@ function benchTasks(body, s, tasks) {
       <h4><span class="id">${esc(t.id)}</span>${esc(t.title)}<span class="tag ${TAG[t.state] || ""}">${esc(t.state.replace("_", " "))}</span>${t.waiting_for ? `<span class="tag">after ${esc(t.waiting_for.join(", "))}</span>` : ""}${t.take ? `<span class="tag cy">${esc(t.take)}</span>` : ""}</h4>
       ${t.detail ? `<p>${esc(t.detail)}</p>` : ""}${t.result ? `<p class="meta">Result: ${esc(t.result)}</p>` : ""}${cameBack(t)}
       <div class="row" style="margin-top:8px">${OPEN_STATES.includes(t.state)
-        ? `${byTake && t.state !== "submitted" && !t.waiting_for ? `<button class="key go" data-do="take" title="Do this task on the desk in a take, then hand it in">${openTakeOf(t) ? `CONTINUE ${esc(openTakeOf(t).toUpperCase())} ON THE DESK` : "WORK IN A TAKE"}</button>` : ""}${human && t.state !== "submitted" ? `<button class="key" data-do="done">MARK DONE</button>` : ""}${t.state === "needs_you" ? `<button class="key" data-do="queued">BACK IN THE QUEUE</button>` : ""}<button class="key warn" data-do="cancelled">CANCEL TASK</button>`
+        ? `${byTake && t.state !== "submitted" && !t.waiting_for ? `<button class="key go" data-do="take" title="Do this task on the desk in a take, then hand it in">${openTakeOf(t) ? `CONTINUE ${esc(openTakeOf(t).toUpperCase())} ON THE DESK` : "WORK IN A TAKE"}</button>` : ""}${reviewing(s) ? `<button class="key go" data-do="review" title="Listen and write the review on the review sheet; sending it closes this task">${t.waiting_for ? "START IT NOW" : "WRITE THE REVIEW"}</button>` : human && t.state !== "submitted" ? `<button class="key" data-do="done">MARK DONE</button>` : ""}${t.state === "needs_you" ? `<button class="key" data-do="queued">BACK IN THE QUEUE</button>` : ""}<button class="key warn" data-do="cancelled">CANCEL TASK</button>`
         : t.state !== "done" ? `<button class="key" data-do="queued">QUEUE AGAIN</button>` : ""}<span class="meta">from ${esc(title(t.by || "you"))}</span></div></div>`;
   body.innerHTML = `<div class="stack">${open.map(card).join("") || `<div class="empty">Nothing open for the ${esc(s.title)}.</div>`}
     <div class="item"><h4>Give the ${esc(s.title)} a task</h4>
@@ -971,6 +725,7 @@ function benchTasks(body, s, tasks) {
   body.querySelectorAll("[data-task] [data-do]").forEach((b) => b.onclick = async () => {
     const id = b.closest("[data-task]").dataset.task, state = b.dataset.do, args = { task: id, state };
     if (state === "take") { await cutTake({ seat: s.seat, task: id }); return; }
+    if (state === "review") { TTReview.pick(id); ST.tab[s.seat] = "bench"; delete ST.benchSig[s.seat]; renderUnits(); return; }
     if (state === "done") { const r = prompt("What was done? (one or two sentences; the next seat reads it)"); if (r === null) return; args.result = r; }
     if (state === "cancelled" && !confirm(`Cancel ${id}?`)) return;
     await call("task_update", args);
@@ -1048,49 +803,110 @@ async function openSeatPicker(seat, opts = {}) {
     const sum = (k) => h.reduce((a, x) => a + x[k], 0), dry = sum("out_of_usage");
     return `<span class="tag ${sum("returned") > sum("accepted") || dry > sum("ok") ? "stale" : "ok"}" title="In this seat so far: ${sum("runs")} runs (${sum("ok")} ended ok, ${dry} out of usage, ${sum("failed")} failed); ${sum("handed_in")} takes handed in, ${sum("accepted")} accepted (${sum("first_time")} first time), ${sum("returned")} sent back">${sum("handed_in") ? `${sum("accepted")}/${sum("handed_in")} takes` : `${sum("ok")}/${sum("runs")} runs`}</span>`;
   };
-  const row = (val, label, tags = "", extra = "") => `<label><input type="radio" name="occ" value="${esc(val)}" ${extra}><span class="m">${label}</span>${tags}</label>`;
-  const box = modal(`<h2>${esc(many.map((x) => seatOf(x).title).join(", "))} · who sits here</h2>
-    <p class="hint">${esc(s.purpose)} Suggested model tier: <b>${esc(s.tier)}</b>.</p>
-    <div class="pick">
-      <h5>People and apps</h5>
-      ${row("none", "Nobody (leave it empty)", "", !s.occupant ? "checked" : "")}
-      ${row("human", "You: do this seat's work yourself and hand it in", "", cur.kind === "human" ? "checked" : "")}
-      ${row("external", "An outside app (Claude Desktop, Codex…) that joins over MCP with seat_join", "", cur.kind === "external" ? "checked" : "")}
-      ${runners.map((r) => `<h5>${esc(r.name)}${!r.available ? `<span class="tag bad">not installed</span>` : r.auth === "missing" ? `<span class="tag bad">not signed in</span>` : `<span class="tag ok">ready</span>`}</h5>
-        ${r.auth === "missing" && r.notes && r.notes[0] ? `<div class="meta muted" style="padding:0 6px 4px">${esc(r.notes[0])}</div>` : ""}
-        ${(r.available ? r.models : []).map((m) => row(`${r.id}|${m.id}`, esc(m.label || m.id), `${record(r.id, m.id)}<span class="tag">${esc(m.tier || "")}</span><span class="tag ${m.cost === "free" ? "ok" : ""}">${esc(m.cost || "")}</span>`,
-          cur.kind === "agent" && cur.runner === r.id && cur.model === m.id ? "checked" : "")).join("")}`).join("")}
-    </div>
-    <div class="formgrid" style="margin-top:12px"><span>Effort</span><select id="spEffort"><option value="">default</option></select>
-      ${seat === "producer" && many.length === 1 ? `<span title="Runs whose only job is to audition handed-in takes. Planning, and the audition that may close the last open work (where the final listen happens), stay on the model chosen above.">Auditions on</span><select id="spAud"></select>` : ""}
-      <span>Works</span><select id="spMode"><option value="propose">in takes (proposes; you or the Producer accept)</option><option value="direct">directly on the session</option></select></div>
-    <div class="row"><button class="ghost" id="spScan" title="Look again for installed agent apps and their models">Rescan apps</button><span class="spacer"></span><button class="ghost" id="spCancel">Cancel</button><button class="key go" id="spOk">SEAT</button></div>`);
-  $("#spMode").value = s.mode;
-  const efforts = () => {
-    const v = (box.querySelector('input[name="occ"]:checked') || {}).value || "", [rid, mid] = v.split("|");
-    const r = runners.find((x) => x.id === rid), m = r && r.models.find((x) => x.id === mid), list = (m && m.efforts) || (r && r.efforts) || [];
-    $("#spEffort").innerHTML = `<option value="">default</option>` + list.map((e) => `<option ${cur.effort === e && cur.runner === rid ? "selected" : ""}>${esc(e)}</option>`).join("");
-    $("#spEffort").disabled = !list.length;
-    const aud = $("#spAud");  // a cheaper model on the same app for audition-only runs (Producer seat)
-    if (aud) {
-      const others = r && mid ? r.models.filter((x) => x.id !== mid) : [], keep = cur.runner === rid ? cur.audition_model : null;
-      aud.innerHTML = `<option value="">the same model (off)</option>` + others.map((x) => `<option value="${esc(x.id)}" ${keep === x.id ? "selected" : ""}>${esc(x.label || x.id)}${x.cost ? ` · ${esc(x.cost)}` : ""}</option>`).join("");
-      aud.disabled = !others.length;
+  // A sheet: who sits here (four kinds), and for an AI agent the app on the left and its models as a table;
+  // effort, audition model and how the seat works along the bottom.
+  const P = { who: cur.kind || "none", rid: cur.kind === "agent" ? cur.runner : null, mid: cur.kind === "agent" ? cur.model : null,
+    effort: cur.kind === "agent" ? cur.effort || "" : "", aud: cur.audition_model || "", mode: s.mode, q: "" };
+  if (!P.rid) P.rid = (runners.find((r) => r.available && r.auth !== "missing") || runners.find((r) => r.available) || runners[0] || {}).id || null;
+  const WHO = [["none", "Nobody", "Leave the seat empty"], ["human", "You", "Do this seat's work yourself and hand it in"],
+    ["external", "Outside app", "Claude Desktop, Codex… joins over MCP with seat_join"], ["agent", "AI agent", "A model on an app here runs the seat"]];
+  const many1 = many.length === 1, isProd = seat === "producer" && many1;
+  const el = Sheet.open({ title: many.map((x) => seatOf(x).title).join(", "), sub: "WHO SITS HERE", size: "seat",
+    body: `<div class="sp"><p class="spWhy">${esc(s.purpose)} <span>Suggested tier <b>${esc(s.tier)}</b></span></p>
+      <div class="tiles" role="radiogroup">${WHO.map(([k, t, d]) => `<button role="radio" data-who="${k}"><b>${t}</b><span>${esc(d)}</span></button>`).join("")}</div>
+      <div class="spAgent"><nav class="spApps"></nav><div class="spModels"></div></div>
+      <div class="spSet"></div></div>`,
+    foot: `<button class="mini" id="spScan" title="Look again for installed agent apps and their models">RESCAN APPS</button><span class="spacer"></span>
+      <button class="key" id="spCancel">CANCEL</button><button class="key go" id="spOk">SEAT</button>` });
+  const runner = () => runners.find((r) => r.id === P.rid);
+  const model = () => { const r = runner(); return r && r.models.find((m) => m.id === P.mid); };
+  // model facts the apps report (detect.py `info`): context, price per 1M tokens, what it can take in
+  const CAN = { reasoning: ["THINK", "Reasons before answering (thinking / effort levels)"], tools: ["TOOLS", "Calls tools"],
+    images: ["IMG", "Reads images (e.g. analyze()'s piano roll)"], pdf: ["PDF", "Reads PDFs"], audio: ["AUD", "Hears audio input"], video: ["VID", "Watches video input"] };
+  const toks = (n) => n >= 1e6 ? `${+(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n);
+  const usd = (v) => v == null ? "?" : v === 0 ? "0" : v < 1 ? `${+v.toFixed(3)}` : `${+v.toFixed(2)}`;
+  const priceCell = (m) => { const p = m.info && m.info.price;
+    if (m.cost === "free" || (p && !p.in && !p.out)) return `<em class="tag ok">free</em>`;
+    return p ? `<span class="spNum">$${usd(p.in)} · $${usd(p.out)}</span>` : `<em class="tag" title="${m.cost === "paid" && P.rid === "codex" ? "Billed to your ChatGPT plan" : "No price reported"}">${esc(m.cost || "—")}</em>`; };
+  function infoStrip(r, m) {
+    if (!m) return "";
+    const i = m.info || {}, p = i.price, bits = [];
+    if (i.context) bits.push(`<span><b>${toks(i.context)}</b> context</span>`);
+    if (i.output) bits.push(`<span><b>${toks(i.output)}</b> max reply</span>`);
+    if (p && (p.in || p.out)) bits.push(`<span><b>$${usd(p.in)}</b> in · <b>$${usd(p.out)}</b> out${p.cache != null ? ` · $${usd(p.cache)} cached` : ""} per 1M tokens${r.id === "claude" ? " (API rates; a Claude plan sign-in uses plan usage)" : ""}</span>`);
+    else if (m.cost === "free" || (p && !p.in && !p.out)) bits.push(`<span><b>Free</b></span>`);
+    else if (r.id === "codex") bits.push(`<span>Billed to your ChatGPT plan</span>`);
+    if (m.efforts && m.efforts.length) bits.push(`<span>Effort: ${m.efforts.map(esc).join(", ")}</span>`);
+    if (i.released) bits.push(`<span>Released ${esc(i.released)}</span>`);
+    return `<div class="spInfo"><div class="spInfoTop"><b>${esc(i.name || m.label || m.id)}</b>
+        ${(i.can || []).map((c) => CAN[c] ? `<em class="tag" title="${CAN[c][1]}">${CAN[c][0]}</em>` : "").join("")}
+        ${i.trains ? `<em class="tag bad" title="The provider may train on what the agent sends it (your project, notes and briefs)">MAY TRAIN ON PROMPTS</em>` : ""}</div>
+      ${i.about ? `<p>${esc(i.about)}</p>` : ""}${bits.length ? `<div class="spInfoFacts">${bits.join("")}</div>` : ""}</div>`;
+  }
+  const status_ = (r) => !r.available ? `<span class="tag bad">NOT INSTALLED</span>` : r.auth === "missing" ? `<span class="tag bad">SIGN IN</span>` : `<span class="lamp green" title="Ready"></span>`;
+  function draw() {
+    el.querySelectorAll("[data-who]").forEach((b) => { b.classList.toggle("on", b.dataset.who === P.who); b.setAttribute("aria-checked", b.dataset.who === P.who); });
+    const ag = el.querySelector(".spAgent"); ag.classList.toggle("hidden", P.who !== "agent");
+    if (P.who === "agent") {
+      el.querySelector(".spApps").innerHTML = `<h6>Apps</h6>` + (runners.length ? runners.map((r) => `<button data-rid="${esc(r.id)}" class="${r.id === P.rid ? "on" : ""} ${r.available ? "" : "dim"}">
+          <span>${esc(r.name)}</span>${status_(r)}</button>`).join("") : `<p class="muted">No agent apps found. Install Claude Code, Codex or Kilo, then RESCAN APPS.</p>`);
+      const r = runner(), ms = (r && r.available ? r.models : []).slice();
+      // the model sitting here now, even when the app no longer lists it
+      if (r && r.available && cur.kind === "agent" && cur.runner === r.id && !ms.some((m) => m.id === cur.model)) ms.unshift({ id: cur.model, label: `${cur.model} (seated now)` });
+      el.querySelector(".spModels").innerHTML = !r ? "" : !r.available ? `<p class="spNote">${esc(r.name)} is not installed on this computer.</p>`
+        : `${r.auth === "missing" ? `<p class="spNote bad">Not signed in${r.notes && r.notes[0] ? `: ${esc(r.notes[0])}` : "."}</p>` : ""}
+          ${ms.length > 12 ? `<div class="plTools spFind"><input class="shQ" type="search" spellcheck="false" autocomplete="off" placeholder="FILTER MODELS · free, claude, gpt…" value="${esc(P.q)}"><span class="plCount"></span></div>` : ""}
+          <div class="spHead"><span>Model</span><span>Tier</span><span title="Context window, in tokens">Context</span><span title="Price per million tokens, in / out">$ / 1M in · out</span><span>Can</span><span>In this seat</span></div>
+          <div class="spRows" role="radiogroup">${ms.map((m) => { const i = m.info || {}; return `<button role="radio" data-mid="${esc(m.id)}" class="${P.mid === m.id && P.rid === r.id ? "on" : ""}" aria-checked="${P.mid === m.id && P.rid === r.id}" title="${esc(i.about || m.id)}">
+            <span class="spM"><i class="dot"></i>${esc(m.label || m.id)}</span><span><em class="tag">${esc(m.tier || "—")}</em></span>
+            <span class="spNum">${i.context ? toks(i.context) : "—"}</span><span>${priceCell(m)}</span>
+            <span class="spCan">${(i.can || []).filter((c) => CAN[c] && c !== "tools").map((c) => `<em title="${CAN[c][1]}">${CAN[c][0]}</em>`).join("") || `<span class="muted">—</span>`}</span>
+            <span>${record(r.id, m.id) || `<span class="muted">—</span>`}</span></button>`; }).join("")}</div>`;
+      // filter in place (no redraw, so typing keeps focus); every word must match the id or its cost, the seated model stays
+      const q = el.querySelector(".spFind .shQ"), rows = [...el.querySelectorAll(".spRows [data-mid]")];
+      const filter = () => {
+        const words = P.q.toLowerCase().split(/\s+/).filter(Boolean); let n = 0;
+        rows.forEach((b) => { const m = ms.find((x) => x.id === b.dataset.mid), hay = `${m.id} ${m.cost || ""} ${m.tier || ""} ${(m.info && m.info.name) || ""} ${((m.info && m.info.can) || []).map((c) => `${c} ${CAN[c] ? CAN[c][0] : ""}`).join(" ")}`.toLowerCase();
+          const show = b.classList.contains("on") || words.every((w) => hay.includes(w)); b.hidden = !show; n += show; });
+        const c = el.querySelector(".spFind .plCount"); if (c) c.textContent = words.length ? `${n} of ${rows.length}` : `${rows.length} models`;
+      };
+      if (q) { q.oninput = () => { P.q = q.value; filter(); }; filter(); }
+      el.querySelectorAll("[data-rid]").forEach((b) => b.onclick = () => { if (P.rid !== b.dataset.rid) { P.rid = b.dataset.rid; P.mid = null; P.effort = ""; P.q = ""; } draw(); });
+      el.querySelectorAll("[data-mid]").forEach((b) => {
+        b.onclick = () => { P.mid = b.dataset.mid; if (cur.runner !== P.rid || cur.model !== P.mid) P.effort = ""; draw(); };
+        b.ondblclick = () => { P.mid = b.dataset.mid; ok(); };
+      });
     }
-  };
-  box.querySelectorAll('input[name="occ"]').forEach((i) => i.onchange = efforts); efforts();
-  const sel = box.querySelector('input[name="occ"]:checked'); if (sel) sel.scrollIntoView({ block: "center" });
-  $("#spCancel").onclick = closeModal;
-  $("#spScan").onclick = async () => { status("scanning for agent apps…", "busy"); try { ST.agents = await api("crew_detect", { refresh: true }); } catch (e) { toast(e.message); } status(""); openSeatPicker(seat, opts); };
-  $("#spOk").onclick = async () => {
-    const v = (box.querySelector('input[name="occ"]:checked') || {}).value; if (!v) { toast("Choose who sits here"); return; }
-    const [rid, mid] = v.split("|"), who = mid ? { kind: "agent", runner: rid, model: mid, effort: $("#spEffort").value || null } : { kind: v }, mode = $("#spMode").value;
-    if (mid && $("#spAud")) who.audition_model = $("#spAud").value;  // "" turns it off
-    closeModal();
+    // settings along the bottom
+    const r = runner(), m = model(), efforts = P.who === "agent" ? (m && m.efforts) || (r && r.efforts) || [] : [];
+    const others = isProd && P.who === "agent" && r && P.mid ? r.models.filter((x) => x.id !== P.mid) : [];
+    el.querySelector(".spSet").innerHTML = `${P.who === "agent" && r ? infoStrip(r, m) : ""}
+      ${P.who === "agent" ? `<div class="fld"><span>Effort</span>${efforts.length ? `<div class="seg">${["", ...efforts].map((e) => `<button data-eff="${esc(e)}" class="${P.effort === e ? "on" : ""}">${esc(e || "default")}</button>`).join("")}</div>`
+        : `<span class="muted spNone">${P.mid ? "this model has one setting" : "choose a model"}</span>`}</div>` : ""}
+      ${isProd && P.who === "agent" ? `<label class="fld" title="Runs whose only job is to audition handed-in takes. Planning, and the audition that may close the last open work (where the final listen happens), stay on the model chosen above."><span>Auditions on</span>
+        <select id="spAud" ${others.length ? "" : "disabled"}><option value="">the same model</option>${others.map((x) => `<option value="${esc(x.id)}" ${P.aud === x.id ? "selected" : ""}>${esc(x.label || x.id)}${x.cost ? ` · ${esc(x.cost)}` : ""}</option>`).join("")}</select></label>` : ""}
+      ${many1 && P.who !== "none" ? `<div class="fld"><span>Works</span><div class="seg"><button data-mode="propose" class="${P.mode === "propose" ? "on" : ""}" title="Proposes changes in takes that you or the Producer accept">IN TAKES</button>
+        <button data-mode="direct" class="${P.mode === "direct" ? "on" : ""}" title="Edits the session itself">ON THE SESSION</button></div></div>` : ""}`;
+    el.querySelectorAll("[data-eff]").forEach((b) => b.onclick = () => { P.effort = b.dataset.eff; draw(); });
+    el.querySelectorAll("[data-mode]").forEach((b) => b.onclick = () => { P.mode = b.dataset.mode; draw(); });
+    const aud = el.querySelector("#spAud"); if (aud) aud.onchange = () => { P.aud = aud.value; };
+    const go = el.querySelector("#spOk"); go.disabled = P.who === "agent" && !P.mid;
+  }
+  el.querySelectorAll("[data-who]").forEach((b) => b.onclick = () => { P.who = b.dataset.who; draw(); });
+  async function ok() {
+    if (P.who === "agent" && !P.mid) { toast("Choose a model"); return; }
+    const who = P.who === "agent" ? { kind: "agent", runner: P.rid, model: P.mid, effort: P.effort || null } : { kind: P.who };
+    if (P.who === "agent" && isProd) who.audition_model = P.aud;  // "" turns it off
+    Sheet.close(true);
     // several seats: each keeps its own way of working (takes or direct); only who sits there changes
-    for (const x of many) await call("seat_assign", { seat: x, ...who, ...(many.length === 1 ? { mode } : {}) });
-    if (opts.done) opts.done(mid || (v === "human" ? "you" : v));
-  };
+    for (const x of many) await call("seat_assign", { seat: x, ...who, ...(many1 ? { mode: P.mode } : {}) });
+    if (opts.done) opts.done(P.mid || (P.who === "human" ? "you" : P.who));
+  }
+  draw();
+  const on = el.querySelector(".spRows button.on"); if (on) on.scrollIntoView({ block: "nearest" });
+  el.querySelector("#spCancel").onclick = () => Sheet.close();
+  el.querySelector("#spScan").onclick = async () => { status("scanning for agent apps…", "busy"); try { ST.agents = await api("crew_detect", { refresh: true }); } catch (e) { toast(e.message); } status(""); openSeatPicker(seat, opts); };
+  el.querySelector("#spOk").onclick = ok;
 }
 
 // ---------------------------------------------------------------- A/B audition
@@ -1344,6 +1160,7 @@ window.Studio = {
     const project = board ? board.session : null;
     if (project !== ST.project) {
       ST.project = project; ST.units = {}; $("#units").innerHTML = ""; $("#needsList").innerHTML = ""; ST.tickets = {}; AB.cache = {}; hush();
+      window.TTLinks?.reset();
       const open = store.get("open", ""); ST.open = board && board.seats.some((s) => s.seat === open) ? open : null;
       connect();
     }
@@ -1351,6 +1168,6 @@ window.Studio = {
   },
   render, hush, listen, room: setRoom, board: () => ST.board,
 };
-setRoom(store.get("room", "studio") === "desk" ? "desk" : "studio");
+setRoom(ROOMS.includes(store.get("room", "studio")) ? store.get("room", "studio") : "studio");
 if (S.path || S.doc) loadState();  // app.js loaded the state before this file defined Studio
 })();

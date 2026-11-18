@@ -324,6 +324,15 @@ class Floor:
                 if not take:
                     made = takes.take_new(task["title"], task["id"], seat, use=False, session=self.session)
                     take = next(t for t in studio.take_index(self.path) if t["id"] == made["take"])
+                else:
+                    # A take picked up again (returned, or its run was stopped while the task waited on others)
+                    # was cut from an older session: bring that in first, so the seat hears the current music.
+                    # Seen live: a Mix take cut before the Composer's fixes landed was mixed and judged without them.
+                    # On a clash nothing changes; take_submit asks the seat to sync.
+                    try:
+                        takes.take_sync(take["id"], session=self.session)
+                    except Exception:  # noqa: BLE001 - an unsynced take still runs; take_submit catches it up
+                        pass
             # A run that only auditions goes on the seat's cheaper audition model, if it names one. The audition
             # that may close the last open work stays on the main model: that run is where the final listen is.
             model = occ.get("model")
@@ -490,10 +499,13 @@ class Floor:
             if rec["take"]:
                 rep = takes.take_diff(rec["take"], self.session)
                 if rep["changes"] and rep["state"] == "open":
-                    takes.take_submit("Handed in by the floor manager - the agent stopped without submitting. "
-                                      "Its last words: " + (said[:600] or "(none)"), rec["take"], self.session)
-                    return
-                if not rep["changes"]:
+                    try:
+                        takes.take_submit("Handed in by the floor manager - the agent stopped without submitting. "
+                                          "Its last words: " + (said[:600] or "(none)"), rec["take"], self.session)
+                        return
+                    except ValueError as e:  # its take clashes with what the session took in meanwhile
+                        why = str(e)
+                elif not rep["changes"]:
                     why = "it stopped without changing anything in its take"
             else:
                 if task.get("audition") and self._undecided(task, said):

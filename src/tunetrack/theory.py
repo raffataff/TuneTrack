@@ -184,6 +184,22 @@ def parse_chord(symbol: str) -> Chord:
     return Chord(root, CHORD_QUALITIES[q], bass, s)
 
 
+_AUG6 = {"it": [0, 4, 10], "fr": [0, 4, 6, 10], "ger": [0, 4, 7, 10], "gr": [0, 4, 7, 10]}
+
+
+def _aug6(token: str, key: Key) -> Chord | None:
+    """Augmented sixth chords in a key: It+6, Fr+6, Ger+6 (also It6, Ger6, Gr+6), built on b6 with the #4 as the
+    augmented sixth above the bass, whichever the mode; and the Neapolitan, N (bII) or N6 (bII over its 3rd).
+    None for any other token."""
+    if token.strip() in ("N", "N6"):  # the Neapolitan: bII, usually over 4 (its 3rd) as N6
+        root = (key.tonic + 1) % 12
+        return Chord(root, [0, 4, 7], (root + 4) % 12 if token.strip() == "N6" else None, token.strip())
+    m = re.fullmatch(r"(It|Fr|Ger|Gr)\+?6", token.strip(), re.IGNORECASE)
+    if not m:
+        return None
+    return Chord((key.tonic + 8) % 12, _AUG6[m.group(1).lower()], None, token.strip())
+
+
 _ROMAN = ["VII", "VI", "V", "IV", "III", "II", "I"]
 _ROMAN_VAL = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7}
 
@@ -191,10 +207,14 @@ _ROMAN_VAL = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7}
 def parse_roman(token: str, key: Key) -> Chord:
     """Roman numeral relative to the key's own scale: in D minor 'VI' = Bb. Case sets triad quality.
 
-    Suffixes: ° (dim), ø (half-dim 7), + (aug), 7, maj7, 9, sus2, sus4, add9, 6.
-    Accidentals: bVI, #iv°. Secondary chords: V/V, V7/ii, vii°7/V.
+    Suffixes: ° / o / dim (dim), ø / hd / % / m7b5 (half-dim 7), + (aug), 7, maj7, 9, sus2, sus4, add9, 6 (added
+    sixth). Inversions by figure: I64, V65, V43, V42. Accidentals: bVI, #iv°. Secondary chords: V/V, V7/ii,
+    vii°7/V. Also It+6 / Fr+6 / Ger+6 and N / N6 (see _aug6).
     """
     t = token.strip()
+    six = _aug6(t, key)
+    if six:
+        return six
     if "/" in t:
         head, target = t.split("/", 1)
         target_root = parse_roman(target, key).root
@@ -209,6 +229,17 @@ def parse_roman(token: str, key: Key) -> Chord:
     root = key.degree_pc(degree) + {"b": -1, "♭": -1, "#": 1, "♯": 1}.get(acc, 0)
     upper = num.isupper()
     suf = suf.replace("dim", "°").replace("hd", "ø")
+    fig = re.search(r"(64|65|43|42)$", suf)
+    inversion = 0
+    if fig:  # figured-bass inversions: I64, V65, viio43, V42 ("6" alone stays an added sixth)
+        suf = suf[:fig.start()]
+        inversion = {"64": 2, "65": 1, "43": 2, "42": 3}[fig.group(1)]
+        if fig.group(1) != "64" and "7" not in suf and not suf.startswith(("ø", "%")):
+            suf += "7"
+    if suf in ("m7b5", "%", "%7") or (suf == "7b5" and not upper):
+        suf = "ø"
+    elif suf[:1] == "o" and suf in ("o", "o7"):
+        suf = "°" + suf[1:]
     if suf.startswith("°"):
         quality = "°7" if "7" in suf else "dim"
         rest = ""
@@ -237,7 +268,11 @@ def parse_roman(token: str, key: Key) -> Chord:
             if q2 not in CHORD_QUALITIES:
                 raise ValueError(f"Unknown roman numeral suffix {rest!r} in {token!r}")
             quality = q2
-    return Chord(root % 12, CHORD_QUALITIES[quality], None, t)
+    ivs = CHORD_QUALITIES[quality]
+    if inversion >= len(ivs):
+        raise ValueError(f"{token!r}: a {len(ivs)}-note chord has no inversion {inversion}")
+    bass = (root + ivs[inversion]) % 12 if inversion else None
+    return Chord(root % 12, ivs, bass, t)
 
 
 def parse_progression(text: str, key: Key | None = None, default_len: float = 4.0) -> list[tuple[Chord | None, float]]:
@@ -261,7 +296,7 @@ def parse_progression(text: str, key: Key | None = None, default_len: float = 4.
             out.append((None if prev is None else Chord(prev.root, prev.intervals, prev.bass, prev.symbol), length))
         elif tok.upper().rstrip(".") in ("N.C", "NC"):
             out.append((None, length))
-        elif tok[0] not in "ABCDEFG":
+        elif tok[0] not in "ABCDEFG" or (key is not None and _aug6(tok, key)):
             if key is None:
                 raise ValueError("Roman numerals need a key")
             out.append((parse_roman(tok, key), length))
@@ -273,7 +308,7 @@ def parse_progression(text: str, key: Key | None = None, default_len: float = 4.
 def parse_any(token: str, key: Key) -> Chord:
     """One chord: a symbol ('Am7', 'F/A') or a roman numeral in `key` ('iv', 'V7/V')."""
     t = token.strip()
-    return parse_chord(t) if t[:1] in "ABCDEFG" else parse_roman(t, key)
+    return parse_chord(t) if t[:1] in "ABCDEFG" and not _aug6(t, key) else parse_roman(t, key)
 
 
 _QUALITY_NAME: dict[tuple, str] = {}

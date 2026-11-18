@@ -1,0 +1,30 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-percussion",
+ "name": "BBC Percussion",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "percussion",
+  "untuned-percussion",
+  "drums",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Percussion (untuned orchestral percussion, keys map to different instruments)",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-percussion.state",
+ "created": "2026-11-18 16:01",
+ "param_count": 2126,
+ "role": "percussion",
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-percussion]",
+  "phrase": "drums",
+  "peak_dbfs": -11.1,
+  "rms_dbfs": -36.3,
+  "warnings": [
+   "track 'inst': instrument: made no sound when one of its own notes was tried"
+  ],
+  "silent": false,
+  "brightness_hz": 237,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}

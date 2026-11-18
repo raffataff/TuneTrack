@@ -157,3 +157,35 @@ def test_listen_for_a_bar_range_reports_only_those_bars(song):
     with pytest.raises(ValueError):
         api.listen(probe=False, start="4:1", end="2:1")
 
+
+
+# ---- verify: bars with notes but no sound -------------------------------------------------------------------------
+
+def _slow_horn(p: Project, notes: list, attack: float = 0.08) -> np.ndarray:
+    """Pre-fader audio of a slow-attack part: each note sounds `attack` s after its onset, for its length."""
+    tm = p.tempo_map()
+    out = np.zeros((2, int(tm.sec(40) * SR)), np.float32)
+    for n in notes:
+        a, e = int((tm.sec(n.start) + attack) * SR), int(tm.sec(n.start + n.dur) * SR)
+        out[:, a:e] = 0.3 * _tone(220.0, (e - a) / SR)
+    return out
+
+
+def test_a_late_pickup_on_a_slow_instrument_is_not_called_silent():
+    # seen live: one horn note humanised to 22 ms before the next bar read as "bar 20 has notes but no sound"
+    from tunetrack.model import Clip, Note, Track
+    p = Project(name="v", tempo=120)
+    notes = [Note(57, b * 4.0, 2.0) for b in range(8)] + [Note(57, 8 * 4.0 - 0.045, 1.0)]
+    t = Track(id="t1", name="Horns", clips=[Clip(id="c1", start=0, length=40, notes=notes)])
+    out, warns = listening.verify_track(p, t, _slow_horn(p, notes), None)
+    assert "bars_without_sound" not in out and not warns
+
+
+def test_a_bar_that_really_makes_no_sound_is_still_found():
+    from tunetrack.model import Clip, Note, Track
+    p = Project(name="v", tempo=120)
+    notes = [Note(57, b * 4.0, 2.0) for b in range(8)]
+    pre = _slow_horn(p, [n for n in notes if n.start != 12.0])  # bar 4 is written but silent (CC1 at 0, say)
+    t = Track(id="t1", name="Horns", clips=[Clip(id="c1", start=0, length=40, notes=notes)])
+    out, _ = listening.verify_track(p, t, pre, None)
+    assert out["bars_without_sound"] == "4"

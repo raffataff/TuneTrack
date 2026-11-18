@@ -11,6 +11,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import api, roles, studio, takes
+from . import knowledge as _knowledge
 
 INSTRUCTIONS = """TuneTrack is a multitrack music workstation for game soundtracks, driven by tools.
 
@@ -29,7 +30,7 @@ Workflow:
    the chord track and re-run them for that range. Positions are beats or "bar:beat" ("9:1"). Reuse material with
    arrange(op="copy") and vary it with notes_edit.
 5. Review: score() (bar by bar: the chord on each beat and every part in TTN, lined up, plus harmony warnings:
-   clashes, parallel 5ths/8ves, crossings, parts off the chord track), notes_read() (TTN per clip), analyze()
+   clashes, parallel 5ths/8ves, crossings, parts off the chord track, unresolved tendency tones, wide leaps), notes_read() (TTN per clip), analyze()
    (key/range/overlap/mud/harmony checks + piano_roll_png - view it).
 6. render() - returns loudness, band balance, per-track levels and warnings (silent tracks, mud, clipping, loop
    seam). Fix what it flags, re-render (unchanged tracks are cached). Game loops: project_set(loop="1:1-17:1")
@@ -49,6 +50,8 @@ C4 = middle C (MIDI 60).
 
 Quality bar: real phrases with contour and rhythmic identity, functional bass, voice-led harmony, contrast
 between sections, dynamics (velocity + CC), instruments in their ranges, headroom. No generic filler loops.
+knowledge() is a library of theory/craft notes (cadences, modulation, voice leading, form, textures): read one
+section when a decision needs it, not up front. lessons(seat="all") holds what earlier sessions taught the crew.
 Never call patch_capture unless the user is at the computer - it opens a plugin window for them.
 
 The studio: a project can be worked on by a crew - seats such as producer, composer, arranger, rhythm, sound,
@@ -556,6 +559,22 @@ def theory(scale: str | None = None, chord: str | None = None, progression: str 
     return api.theory_info(scale, chord, progression, key, range, chords_in_key, sevenths)
 
 
+@tool
+def knowledge(topic: str | None = None, find: str | None = None, seat: str | None = None) -> dict:
+    """Reference notes on theory and craft (cadences, voice leading, modulation, form, textures...), read a piece
+    at a time. No arguments: the index. topic="cadences" a note, "cadences#half" one section of it (cheapest);
+    find="deceptive cadence" the sections that mention it. seat= narrows the index to one seat's notes."""
+    return _knowledge.knowledge(topic, find, seat)
+
+
+@tool
+def lessons(seat: str | None = None, add: list[str] | None = None, remove: list[int] | None = None) -> dict:
+    """Lessons earlier sessions taught a seat, kept across sessions; the latest go into that seat's brief.
+    seat: a seat or "all" (default yours). add: rules that change a decision, with the reason. remove: numbers
+    to drop (stale, wrong, merged). The Producer, Review and the user write for any seat, others for their own."""
+    return _knowledge.lessons(seat, add, remove)
+
+
 # ---- library -----------------------------------------------------------------------------------------------------
 
 @tool
@@ -700,7 +719,8 @@ def score(start: Any = None, end: Any = None, section: str | None = None, tracks
     the notes where it has none) and every part's notes in TTN, columns lined up by beat so you can see what
     sounds together. Harmony warnings ("!" lines and `warnings`) give bar:beat and a fix: lead/bass notes that clash
     with the chord on strong beats (not passing/neighbour notes that move on by step), parallel 5ths/8ves between
-    bass and lead, voice crossings, parts that don't follow the chord track. Range: start/end or a marker section
+    bass and lead, voice crossings, parts that don't follow the chord track, leading tones and 7ths that don't
+    resolve at V-I, +6/Neapolitan chords that skip V, leaps wider than an octave, a loop closing on V-I. Range: start/end or a marker section
     (default the whole song, up to 32 bars). tracks: only these parts (drums are left out unless named)."""
     return api.score(start, end, section, tracks, check, project)
 
@@ -940,6 +960,12 @@ def take_discard(take: str, session: str | None = None) -> dict:
     For a take that is not wanted - superseded, cut by mistake, or left over when its task was closed. A take
     that needs changes is returned with take_reject instead."""
     return takes.take_discard(take, session)
+
+
+@tool
+def cleanup(project: str | None = None, dry_run: bool = False) -> dict:
+    """Free disk: delete cached renders no live project (session, open or handed-in takes) would use again."""
+    return api.cleanup(project, dry_run)
 
 
 def apply_seat() -> list[str]:

@@ -354,7 +354,7 @@ def test_infer_splits_a_bar_with_two_chords():
 def test_mcp_tools_end_to_end(song):
     from tunetrack import mcp_server
     names = {t.name for t in asyncio.run(mcp_server.mcp.list_tools())}
-    assert {"harmony", "score"} <= names and len(names) == 75
+    assert {"harmony", "score"} <= names and len(names) == 78
 
     def call(name, args):
         r = asyncio.run(mcp_server.mcp.call_tool(name, args))
@@ -373,3 +373,78 @@ def test_cli_call_score(song, capsys):
     cli.main(["call", "score", json.dumps({"start": "1:1", "end": "3:1"})])
     out = json.loads(capsys.readouterr().out)
     assert out["bars"] == "1-2" and "Dm(i)" in out["score"]
+
+
+# ---- rules from the theory notes: tendency tones, chromatic pre-dominants, leaps, the loop seam ---------------------
+
+@pytest.fixture()
+def cmaj(tmp_path):
+    api.project_new("Cadence", folder=str(tmp_path / "c"), tempo=100, key="C major")
+    api.track_add("Bass", "synth:analog_bass", role="bass")
+    api.track_add("Lead", "synth:lead", role="lead")
+    return tmp_path
+
+
+def test_the_leading_tone_rises_at_a_cadence(cmaj):
+    api.harmony("IV V I", at="1:1")
+    api.write("Bass", "F2:w | G2:w | C2:w", at="1:1")
+    api.write("Lead", "A4:w | B4:w | C5:w", at="1:1")
+    assert _warnings() == []
+    api.write("Lead", "A4:w | B4:w | G4:w", at="1:1")
+    w = _warnings()
+    assert len(w) == 1 and w[0].startswith("3:1 Lead B4, the leading tone of G(V), goes to G4 at C(I)") and "C5" in w[0]
+
+
+def test_the_seventh_of_v7_falls_by_step(cmaj):
+    api.harmony("V7 I", at="1:1")
+    api.write("Bass", "G2:w | C2:w", at="1:1")
+    api.write("Lead", "F4:w | E4:w", at="1:1")
+    assert _warnings() == []
+    api.write("Lead", "F4:w | G4:w", at="1:1")
+    w = _warnings()
+    assert len(w) == 1 and "F4, the 7th of G7(V7), goes to G4" in w[0] and "E4 there" in w[0]
+
+
+def test_a_doubled_leading_tone_in_the_outer_voices(cmaj):
+    api.harmony("V I", at="1:1")
+    api.write("Bass", "B2:w | C3:w", at="1:1")
+    api.write("Lead", "B4:w | C5:w", at="1:1")
+    w = _warnings()
+    assert any("the leading tone B is doubled in Bass and Lead over G(V)" in x for x in w), w
+
+
+def test_augmented_sixth_and_neapolitan_go_to_the_dominant(cmaj):
+    api.harmony("Ger+6 V I", at="1:1")
+    api.write("Bass", "Ab2:w | G2:w | C2:w", at="1:1")
+    assert _warnings() == []
+    api.harmony("Ger+6 IV I", at="1:1")
+    w = _warnings()
+    assert any(x.startswith("2:1 Ger+6 goes to F(IV): an augmented sixth leads to the dominant") for x in w), w
+    api.harmony("N6 I64 V I", at="1:1")
+    api.write("Bass", "F2:w | G2:w | G2:w | C2:w", at="1:1")
+    assert _warnings() == []
+    api.harmony("Ger+6 V I", at="1:1")
+    api.write("Bass", "C2:w | G2:w | C2:w", at="1:1")
+    assert any("Bass plays C2 under Ger+6: put Ab" in x for x in _warnings())
+
+
+def test_melodic_leaps_wider_than_an_octave(cmaj):
+    api.harmony("I", at="1:1", end="3:1")
+    api.write("Lead", "C4:q E5:q D5:h | C5:q E5 D5 C5", at="1:1")
+    w = _warnings()
+    assert len(w) == 1 and w[0].startswith("1:2 Lead leaps a major 10th (C4 to E5)") and "take E4" in w[0]
+    api.write("Lead", "C4:q G4:q E5:h | D5:q E5 D5 C5", at="1:1")  # two leaps up, but an arpeggio of C
+    assert _warnings() == []
+    api.write("Lead", "C4:q A4:q F5:h | E5:q E5 D5 C5", at="1:1")  # two leaps up, not the chord
+    assert any("leaps twice the same way" in x for x in _warnings())
+
+
+def test_a_loop_that_closes_on_a_full_cadence(cmaj):
+    api.project_set(loop="1:1-5:1")
+    api.harmony("I IV V I", at="1:1")
+    api.write("Bass", "C2:w | F2:w | G2:w | C2:w", at="1:1")
+    w = _warnings()
+    assert len(w) == 1 and w[0].startswith("3:1-5:1 the loop closes with a full G(V)-C(I) and restarts on C(I)")
+    api.harmony("I vi IV V", at="1:1")
+    api.write("Bass", "C2:w | A2:w | F2:w | G2:w", at="1:1")
+    assert _warnings() == []

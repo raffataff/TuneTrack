@@ -68,6 +68,16 @@ const snapB = (b, snap = S.snap) => snap > 0 ? Math.round(b / snap) * snap : b;
 const floorB = (b, snap = S.snap) => snap > 0 ? Math.floor(b / snap + 1e-9) * snap : b;
 const noteName = (p) => NOTE_NAMES[p % 12] + (Math.floor(p / 12) - 1);
 const trackColor = (t, i) => t.color || PALETTE[i % PALETTE.length];
+// The canvases' palette, matching style.css's tokens. UI_FONT/MONO are what the canvases write labels in.
+const CV = {
+  bg: "#0d0f12", band: "rgba(255,255,255,.014)", beat: "#14171b", bar: "#1d2126", phrase: "#2a2f36",
+  lane: "#08090b", laneHi: "rgba(255,255,255,.025)", sel: "rgba(255,178,36,.05)", loop: "rgba(79,220,132,.045)",
+  ruler: "#121417", rulerTxt: "#8e8b84", tick: "#2c3138", tickMinor: "#1f2328", marker: "#ffb224", play: "#ff5545",
+  vfd: "#7cf0d6", vfdBg: "#0a1716", dim: "#64625c",
+};
+const UI_FONT = "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif", MONO = "'Cascadia Mono', Consolas, ui-monospace, monospace";
+// a rounded rectangle path (r per corner: [tl, tr, br, bl] or one number)
+function rrect(g, x, y, w, h, r) { g.beginPath(); g.roundRect(x, y, Math.max(0, w), Math.max(0, h), r); }
 const songEnd = () => {
   let e = 0; for (const t of S.doc.tracks) for (const c of t.clips) e = Math.max(e, c.start + c.length);
   if (S.doc.loop) e = Math.max(e, S.doc.loop.end); if (S.doc.length) e = Math.max(e, S.doc.length); return e;
@@ -161,16 +171,32 @@ $("#takeNew").onclick = () => {
   const board = window.Studio?.board(); if (!board) return;
   const mine = board.seats.filter((s) => s.occupant && s.occupant.kind === "human");
   const tasksOf = (seat) => board.tasks.filter((t) => t.seat === seat && ["queued", "working", "needs_you"].includes(t.state));
-  const box = modal(`<h2>Cut a take</h2>
-    <p class="hint">A take is a private copy of the session. The desk edits the copy, nobody hears it until you hand it in, and accepting it merges only what you changed.</p>
-    <div class="formgrid"><span>For seat</span><select id="ctSeat"><option value="">No seat (your own take)</option>${board.seats.map((s) => `<option value="${s.seat}" ${mine[0] && mine[0].seat === s.seat ? "selected" : ""}>${esc(s.title)}${s.occupant && s.occupant.kind === "human" ? " · you sit here" : s.occupant ? " · " + esc(s.label || s.occupant.kind) : ""}</option>`).join("")}</select>
-      <span>For task</span><select id="ctTask"></select>
-      <span>Name</span><input id="ctName" placeholder="What this take tries, e.g. “Busier bass in the B section” (optional)"></div>
-    <div class="row"><button class="ghost" id="ctCancel">Cancel</button><button class="key go" id="ctOk">CUT THE TAKE</button></div>`);
-  const fill = () => { $("#ctTask").innerHTML = `<option value="">No task</option>` + tasksOf($("#ctSeat").value).map((t) => `<option value="${esc(t.id)}">${esc(t.id)} · ${esc(t.title)}${t.take ? " (continues " + esc(t.take) + ")" : ""}</option>`).join(""); };
-  $("#ctSeat").onchange = fill; fill();
-  $("#ctCancel").onclick = closeModal;
-  $("#ctOk").onclick = () => { const args = { seat: $("#ctSeat").value || null, task: $("#ctTask").value || null, name: $("#ctName").value.trim() || null }; closeModal(); cutTake(args); };
+  // A sheet: the seat it is for (tiles), that seat's open tasks (rows), a name.
+  const P = { seat: mine[0] ? mine[0].seat : "", task: "" };
+  const who = (s) => s.occupant ? (s.occupant.kind === "human" ? "You sit here" : s.label || s.occupant.kind) : "Empty";
+  const el = Sheet.open({ title: "Cut a take", size: "seat", body: `<form class="sform" autocomplete="off">
+      <p class="spWhy">A take is a private copy of the session. The Desk edits the copy, nobody hears it until you hand it in, and accepting it merges only what you changed.</p>
+      <div class="phH sub">For seat</div>
+      <div class="tiles ctSeats"><button type="button" data-seat=""><b>NO SEAT</b><span>Your own take</span></button>
+        ${board.seats.map((s) => `<button type="button" data-seat="${esc(s.seat)}"><b>${esc(s.title)}</b><span>${esc(who(s))}</span></button>`).join("")}</div>
+      <div class="phH sub">For task</div>
+      <div class="spRows ctTasks" role="radiogroup"></div>
+      <label class="fld"><span>Name</span><input id="ctName" placeholder="What this take tries, e.g. busier bass in the B section (optional)"></label>
+    </form>`, foot: `<span class="spacer"></span><button class="key" id="ctCancel">CANCEL</button><button class="key go" id="ctOk">CUT THE TAKE</button>` });
+  const draw = () => {
+    el.querySelectorAll("[data-seat]").forEach((b) => b.classList.toggle("on", b.dataset.seat === P.seat));
+    const ts = P.seat ? tasksOf(P.seat) : [];
+    if (!ts.some((t) => t.id === P.task)) P.task = "";
+    el.querySelector(".ctTasks").innerHTML = [{ id: "", title: P.seat ? "No task: try something of your own" : "No task" }, ...ts].map((t) => `<button type="button" role="radio" data-task="${esc(t.id)}" class="${P.task === t.id ? "on" : ""}" aria-checked="${P.task === t.id}">
+      <span class="spM"><i class="dot"></i>${t.id ? `<b>${esc(t.id)}</b>&nbsp;` : ""}${esc(t.title)}</span><span>${t.take ? `<em class="tag cy">CONTINUES ${esc(t.take)}</em>` : ""}</span></button>`).join("");
+    el.querySelectorAll("[data-task]").forEach((b) => b.onclick = () => { P.task = b.dataset.task; draw(); });
+  };
+  el.querySelectorAll("[data-seat]").forEach((b) => b.onclick = () => { P.seat = b.dataset.seat; draw(); });
+  draw();
+  const go = () => { const args = { seat: P.seat || null, task: P.task || null, name: $("#ctName").value.trim() || null }; Sheet.close(true); cutTake(args); };
+  el.querySelector("#ctCancel").onclick = () => Sheet.close();
+  el.querySelector("#ctOk").onclick = go;
+  el.querySelector(".sform").onsubmit = (e) => { e.preventDefault(); go(); };
 };
 function changeList(d) {
   const board = window.Studio?.board(), seat = board && board.seats.find((s) => s.seat === d.seat);
@@ -246,6 +272,7 @@ function renderAll() {
   }
   $("#loopBtn").classList.toggle("on", S.loopOn);
   audioTag();
+  window.TTMix?.refresh();  // the MIX room or the Desk's Mixer tab, when one shows
   if (document.body.dataset.room !== "desk") return;  // canvases have no size while the desk is hidden
   drawHeaders(); drawArrangement(); drawRoll(); renderPanel();
 }
@@ -292,6 +319,7 @@ document.querySelectorAll("#tabs button[data-tab]").forEach((b) => b.onclick = (
   S.tab = b.dataset.tab;
   document.querySelectorAll("#tabs button[data-tab]").forEach((x) => x.classList.toggle("active", x === b));
   document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === "panel-" + S.tab));
+  if (S.tab === "mixer") window.TTMix?.show();
   renderPanel(); drawRoll();
 });
 
@@ -372,15 +400,18 @@ function drawArrangement() {
   const lay = laneLayout(), endB = songEnd() + bpb() * 8;
   const W = Math.max(lanesWrap.clientWidth, endB * S.zoom), H = Math.max(lanesWrap.clientHeight - 2, lay.total);
   const g = fitCanvas(lanes, W, H);
-  g.fillStyle = "#101011"; g.fillRect(0, 0, W, H);
-  if (S.doc.loop) { g.fillStyle = "rgba(95,224,122,0.06)"; g.fillRect(S.doc.loop.start * S.zoom, 0, (S.doc.loop.end - S.doc.loop.start) * S.zoom, H); }
+  g.fillStyle = CV.bg; g.fillRect(0, 0, W, H);
+  const barW = bpb() * S.zoom;
+  for (let b = 0, ph = 0; b <= endB; b += bpb() * 4, ph++) if (ph % 2) { g.fillStyle = CV.band; g.fillRect(b * S.zoom, 0, barW * 4, H); }  // every other 4-bar phrase
+  if (S.doc.loop) { g.fillStyle = CV.loop; g.fillRect(S.doc.loop.start * S.zoom, 0, (S.doc.loop.end - S.doc.loop.start) * S.zoom, H); }
+  if (S.zoom >= 12) for (let b = 0; b <= endB; b += 1) { g.fillStyle = CV.beat; g.fillRect(Math.round(b * S.zoom), 0, 1, H); }
   for (let b = 0, bar = 0; b <= endB; b += bpb(), bar++) {
-    g.fillStyle = bar % 4 ? "#1b1b1d" : "#27272a"; g.fillRect(Math.round(b * S.zoom), 0, 1, H);
+    g.fillStyle = bar % 4 ? CV.bar : CV.phrase; g.fillRect(Math.round(b * S.zoom), 0, 1, H);
   }
   S.doc.tracks.forEach((t, i) => {
     const { y, h: L } = lay[i];
-    if (S.sel.track === t.id) { g.fillStyle = "rgba(255,176,0,0.05)"; g.fillRect(0, y, W, L); }
-    g.fillStyle = "#202022"; g.fillRect(0, y + L - 1, W, 1);
+    if (S.sel.track === t.id) { g.fillStyle = CV.sel; g.fillRect(0, y, W, L); }
+    g.fillStyle = CV.lane; g.fillRect(0, y + L - 1, W, 1); g.fillStyle = CV.laneHi; g.fillRect(0, y + L, W, 1);
     const col = trackColor(t, i);
     for (const c of t.clips) drawClip(g, t, c, y, L, col);
   });
@@ -389,10 +420,11 @@ function drawArrangement() {
     const d = S.drag.ghost, r = lay[d.row] || { y: d.row * laneH(), h: laneH() }; g.strokeStyle = "#fff"; g.setLineDash([4, 3]);
     g.strokeRect(d.start * S.zoom + 0.5, r.y + 3.5, d.length * S.zoom - 1, r.h - 8); g.setLineDash([]);
   }
-  for (const m of S.doc.markers) { g.fillStyle = "rgba(255,176,0,.45)"; g.fillRect(m.at * S.zoom, 0, 1, H); }
+  for (const m of S.doc.markers) { g.fillStyle = "rgba(255,178,36,.38)"; g.fillRect(Math.round(m.at * S.zoom), 0, 1, H); }
   window.Picture?.overlay(g, H);
   window.Tracking?.overlay(g, lay);
-  g.fillStyle = "#ff4a3a"; g.fillRect(S.playhead * S.zoom, 0, 1.5, H);
+  const phx = Math.round(S.playhead * S.zoom);
+  g.fillStyle = "rgba(255,85,69,.18)"; g.fillRect(phx - 1.5, 0, 4, H); g.fillStyle = CV.play; g.fillRect(phx, 0, 1.25, H);
   drawRuler();
 }
 // Recording passes share a stretch of time (tracking.js): a track that has them shows each pass on a row of its
@@ -409,16 +441,18 @@ function clipBox(t, lane, y, L) {
 }
 function drawClip(g, t, c, y, L, col) {
   const x = c.start * S.zoom, w = Math.max(3, c.length * S.zoom), sel = S.sel.clip === c.id;
-  const [cy, ch] = clipBox(t, c.lane, y, L), band = ch >= 34 ? 14 : 0;  // a pass row has no room for a title band
+  const [cy, ch] = clipBox(t, c.lane, y, L), band = ch >= 34 ? 15 : 0;  // a pass row has no room for a title band
+  const R = Math.min(4, w / 3, ch / 3);
   g.globalAlpha = c.muted ? 0.35 : 1;
-  g.fillStyle = col + "33"; g.fillRect(x + 1, cy, w - 2, ch);
-  g.fillStyle = col; g.fillRect(x + 1, cy, w - 2, band || 2);
-  g.strokeStyle = sel ? "#ffffff" : col; g.lineWidth = sel ? 2 : 1; g.strokeRect(x + 1.5, cy + 0.5, w - 3, ch - 1); g.lineWidth = 1;
+  rrect(g, x + 1, cy, w - 2, ch, R); g.fillStyle = "#0b0c0f"; g.fill(); g.fillStyle = col + "26"; g.fill();
+  if (band) { rrect(g, x + 1, cy, w - 2, band, [R, R, 0, 0]); g.fillStyle = col + "d9"; g.fill(); }
+  else { g.fillStyle = col; g.fillRect(x + 1 + R, cy, Math.max(0, w - 2 - 2 * R), 2); }
+  rrect(g, x + 1.5, cy + 0.5, w - 3, ch - 1, R); g.strokeStyle = sel ? "#ffffff" : col + "b3"; g.lineWidth = sel ? 1.5 : 1; g.stroke(); g.lineWidth = 1;
   g.save(); g.beginPath(); g.rect(x + 2, cy, w - 4, ch); g.clip();
   if (band) {
-    g.fillStyle = "#0c0c0d"; g.font = "11px Segoe UI, system-ui, sans-serif";
+    g.fillStyle = "rgba(6,7,9,.92)"; g.font = `600 10.5px ${UI_FONT}`;
     g.fillText((c.name || (c.kind === "audio" ? (c.file || "").split("/").pop() : ""))
-      + (c.bpm ? ` · ${+c.bpm.toFixed(2)} bpm` : "") + (c.pitch ? ` · ${c.pitch > 0 ? "+" : ""}${+c.pitch.toFixed(2)} st` : ""), x + 5, cy + 11);
+      + (c.bpm ? ` · ${+c.bpm.toFixed(2)} bpm` : "") + (c.pitch ? ` · ${c.pitch > 0 ? "+" : ""}${+c.pitch.toFixed(2)} st` : ""), x + 6, cy + 11);
   }
   const top = cy + (band ? band + 2 : 3), h = Math.max(2, ch - (band ? band + 4 : 5));
   if (c.kind === "midi" && c.notes.length) {
@@ -436,25 +470,36 @@ function drawClip(g, t, c, y, L, col) {
     const o = (c.offset || 0) * 40;
     g.fillStyle = col + "99"; for (let i = 0; i < w; i += 3) { const a = (Math.sin((i / S.zoom * 9 + o) * 0.37) * 0.5 + 0.5) * h; g.fillRect(x + i, top + (h - a) / 2, 2, a); }
   }
-  if (!band && w > 26) { g.fillStyle = c.muted ? col : "#ffffff"; g.font = "9px Segoe UI, system-ui, sans-serif"; g.fillText("P" + (c.lane || 0), x + 4, cy + Math.min(ch - 2, 10)); }
+  if (!band && w > 26) { g.fillStyle = c.muted ? col : "#ffffff"; g.font = `9px ${UI_FONT}`; g.fillText("P" + (c.lane || 0), x + 4, cy + Math.min(ch - 2, 10)); }
   g.restore(); g.globalAlpha = 1;
 }
 function drawRuler() {
   const W = lanesWrap.clientWidth, H = 30, g = fitCanvas(ruler, W, H), sx = lanesWrap.scrollLeft;
-  g.fillStyle = "#171718"; g.fillRect(0, 0, W, H);
+  g.fillStyle = CV.ruler; g.fillRect(0, 0, W, H);
   if (!S.doc) return;
-  if (S.doc.loop) {
-    g.fillStyle = S.loopOn ? "rgba(95,224,122,.55)" : "rgba(95,224,122,.22)";
-    g.fillRect(S.doc.loop.start * S.zoom - sx, 0, (S.doc.loop.end - S.doc.loop.start) * S.zoom, 6);
+  if (S.doc.loop) {  // the loop region: a bar along the top, lit while the loop is on
+    const lx = S.doc.loop.start * S.zoom - sx, lw = (S.doc.loop.end - S.doc.loop.start) * S.zoom;
+    rrect(g, lx, 0.5, lw, 4, 2); g.fillStyle = S.loopOn ? "rgba(79,220,132,.8)" : "rgba(79,220,132,.25)"; g.fill();
   }
-  g.font = "11px Segoe UI, system-ui, sans-serif";
-  const every = Math.max(1, Math.round(40 / (bpb() * S.zoom)));
-  for (let bar = 0; bar * bpb() * S.zoom < sx + W; bar++) {
-    const x = bar * bpb() * S.zoom - sx; if (x < -40) continue;
-    g.fillStyle = "#3b3b40"; g.fillRect(x, H - 10, 1, 10);
-    if (bar % every === 0) { g.fillStyle = "#8f897c"; g.fillText(bar + 1, x + 3, H - 12); }
+  const barPx = bpb() * S.zoom, every = Math.max(1, Math.round(44 / barPx));
+  g.font = `10px ${MONO}`; g.textBaseline = "alphabetic";
+  for (let bar = 0; bar * barPx < sx + W; bar++) {
+    const x = Math.round(bar * barPx - sx); if (x < -60) continue;
+    if (barPx >= 48) for (let k = 1; k < bpb(); k++) { g.fillStyle = CV.tickMinor; g.fillRect(x + Math.round(k * S.zoom), H - 4, 1, 4); }
+    const major = bar % every === 0;
+    g.fillStyle = major ? CV.tick : CV.tickMinor; g.fillRect(x, major ? H - 11 : H - 6, 1, major ? 11 : 6);
+    if (major) { g.fillStyle = bar % 4 ? CV.dim : CV.rulerTxt; g.fillText(bar + 1, x + 4, H - 3); }
   }
-  for (const m of S.doc.markers) { const x = m.at * S.zoom - sx; g.fillStyle = "#ffb000"; g.fillRect(x, 6, 2, H - 6); g.fillText(m.name, x + 4, 16); }
+  // section markers: a flag with the name, in the display font
+  const legend = getComputedStyle(document.documentElement).getPropertyValue("--legend");
+  g.font = `600 9.5px ${legend}`; g.textBaseline = "middle";
+  for (const m of S.doc.markers) {
+    const x = Math.round(m.at * S.zoom - sx), label = String(m.name).toUpperCase(), tw = g.measureText(label).width;
+    if (x + tw + 16 < 0 || x > W) continue;
+    rrect(g, x, 5, tw + 12, 12, [0, 3, 3, 0]); g.fillStyle = "rgba(255,178,36,.17)"; g.fill();
+    g.fillStyle = CV.marker; g.fillRect(x, 5, 1.5, H - 5); g.fillText(label, x + 6, 11.5);
+  }
+  g.textBaseline = "alphabetic";
   // tempo changes (a fit to picture hits makes many): a cyan tick at each, its bpm along the bottom where it fits
   const tempos = tempoChanges();
   if (tempos.length > 1) {
@@ -465,10 +510,9 @@ function drawRuler() {
       const label = String(+bpm.toFixed(1)), w = g.measureText(label).width + 6;
       if (x >= room && x + w > 0) { g.fillStyle = "#5cc8ff"; g.fillText(label, x + 3, H - 1); room = x + w; }
     }
-    g.font = "11px Segoe UI, system-ui, sans-serif";
   }
-  const px = S.playhead * S.zoom - sx; g.fillStyle = "#ff4a3a";
-  g.beginPath(); g.moveTo(px - 5, H - 9); g.lineTo(px + 5, H - 9); g.lineTo(px, H); g.fill();
+  const px = Math.round(S.playhead * S.zoom - sx); g.fillStyle = CV.play;
+  g.beginPath(); g.moveTo(px - 5.5, H - 10); g.lineTo(px + 6.5, H - 10); g.lineTo(px + 6.5, H - 6); g.lineTo(px + 0.5, H); g.lineTo(px - 5.5, H - 6); g.closePath(); g.fill();
   drawChords(); window.Picture?.draw(); window.Picture?.sync();
 }
 
@@ -482,24 +526,24 @@ const chordList = () => [...(S.doc.chord_track || [])].sort((a, b) => a.at - b.a
 function drawChords() {
   const W = lanesWrap.clientWidth, H = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--chordH")) - 1;
   const g = fitCanvas(chordCv, W, H), sx = lanesWrap.scrollLeft;
-  g.fillStyle = "#0d1110"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "#0a0d0d"; g.fillRect(0, 0, W, H);
   if (!S.doc) return;
   for (let bar = Math.floor(sx / (bpb() * S.zoom)); bar * bpb() * S.zoom < sx + W; bar++) {
-    g.fillStyle = bar % 4 ? "#161c1b" : "#202927"; g.fillRect(Math.round(bar * bpb() * S.zoom - sx), 0, 1, H);
+    g.fillStyle = bar % 4 ? "#121817" : "#1a2322"; g.fillRect(Math.round(bar * bpb() * S.zoom - sx), 0, 1, H);
   }
   const list = chordList(), d = S.drag && S.drag.kind === "chord" ? S.drag : null;
-  g.font = "12px Cascadia Mono, Consolas, ui-monospace, monospace"; g.textBaseline = "middle";
-  if (!list.length) { g.fillStyle = "#4d6660"; g.fillText("No chords yet: double-click a bar to write its chord, or Write… for a whole progression", 8, H / 2 + 1); }
+  g.font = `11.5px ${MONO}`; g.textBaseline = "middle";
+  if (!list.length) { g.fillStyle = "#3f5a55"; g.fillText("No chords yet: double-click a bar to write its chord, or WRITE… for a whole progression", 10, H / 2 + 1); }
   for (const c of list) {
     const len = d && d.chord === c ? d.end - c.at : c.len, x = c.at * S.zoom - sx, w = len * S.zoom;
     if (x + w < 0 || x > W) continue;
-    g.fillStyle = "#12302b"; g.fillRect(x + 1, 3, Math.max(2, w - 2), H - 6);
-    g.fillStyle = c.key ? "#ffb000" : "#74f0d6"; g.fillRect(x + 1, 3, 2, H - 6);  // amber edge: this chord is in another key
+    rrect(g, x + 1.5, 3, Math.max(2, w - 3), H - 6, 3); g.fillStyle = CV.vfdBg; g.fill(); g.strokeStyle = "rgba(124,240,214,.16)"; g.stroke();
+    g.fillStyle = c.key ? CV.marker : CV.vfd; g.fillRect(x + 1.5, 5, 2, H - 10);  // amber edge: this chord is in another key
     g.save(); g.beginPath(); g.rect(x + 3, 0, Math.max(0, w - 5), H); g.clip();
-    g.fillStyle = "#74f0d6"; g.fillText(c.chord + (c.key ? "  (" + c.key + ")" : ""), x + 7, H / 2 + 1);
+    g.fillStyle = CV.vfd; g.fillText(c.chord + (c.key ? "  (" + c.key + ")" : ""), x + 8, H / 2 + 1);
     g.restore();
   }
-  g.fillStyle = "#ff4a3a"; g.fillRect(S.playhead * S.zoom - sx, 0, 1.5, H);
+  g.fillStyle = CV.play; g.fillRect(Math.round(S.playhead * S.zoom - sx), 0, 1.25, H);
 }
 // What is under the pointer: a chord, or the empty slot there (the bar, cut short by its neighbours).
 function chordHit(e) {
@@ -757,54 +801,65 @@ function drawRoll() {
   const info = $("#rollInfo");
   const g = fitCanvas(roll, Math.max(rollWrap.clientWidth, c ? KEYW + (c.length + bpb()) * S.rollZoom : 0), 128 * S.rowH);
   const W = roll.clientWidth, sx = rollWrap.scrollLeft;
-  g.fillStyle = "#101011"; g.fillRect(0, 0, W, 128 * S.rowH);
+  g.fillStyle = CV.bg; g.fillRect(0, 0, W, 128 * S.rowH);
   if (!c || c.kind !== "midi") {
     info.textContent = "Select a MIDI clip (double-click empty lane space to create one)";
-    g.fillStyle = "#8f897c"; g.font = "13px Segoe UI"; g.fillText("No MIDI clip selected", 20 + sx, rollWrap.scrollTop + 30);
+    const cx = sx + rollWrap.clientWidth / 2, cy = rollWrap.scrollTop + rollWrap.clientHeight / 2;
+    g.textAlign = "center";
+    g.fillStyle = "#c8c5bd"; g.font = `600 13px ${UI_FONT}`; g.fillText("No clip selected", cx, cy - 6);
+    g.fillStyle = "#64625c"; g.font = `12px ${UI_FONT}`; g.fillText("Click a clip in the arrangement to edit its notes here, or double-click empty lane space to make one.", cx, cy + 14);
+    g.textAlign = "left";
     drawVel(null); return;
   }
   info.textContent = `${t.name} · ${c.name || c.id} · starts ${fmtPos(c.start)} · ${c.notes.length} notes · click: add  drag: move  edge: resize  dbl-click: delete  ctrl+wheel: zoom`;
   for (let p = 0; p < 128; p++) {
     const y = (127 - p) * S.rowH, black = [1, 3, 6, 8, 10].includes(p % 12);
-    g.fillStyle = black ? "#131314" : "#18181a"; g.fillRect(KEYW, y, W, S.rowH);
-    if (p % 12 === 0) { g.fillStyle = "#2a2a2d"; g.fillRect(KEYW, y + S.rowH - 1, W, 1); }
+    g.fillStyle = black ? "#0f1114" : "#15181c"; g.fillRect(KEYW, y, W, S.rowH);
+    g.fillStyle = p % 12 === 0 ? "#262b32" : "#0b0d0f"; g.fillRect(KEYW, y + S.rowH - 1, W, 1);
   }
   const len = c.length, X = (b) => KEYW + b * S.rollZoom;
   const step = S.snap > 0 && S.snap * S.rollZoom >= 6 ? S.snap : 0.25;
   for (let b = 0; b <= len + bpb(); b += step) {
     const isBar = Math.abs(b / bpb() - Math.round(b / bpb())) < 1e-6, isBeat = Math.abs(b - Math.round(b)) < 1e-6;
-    g.fillStyle = isBar ? "#3b3b40" : isBeat ? "#232325" : "#1c1c1e"; g.fillRect(Math.round(X(b)), 0, 1, 128 * S.rowH);
+    g.fillStyle = isBar ? "#333941" : isBeat ? "#20252b" : "#191c21"; g.fillRect(Math.round(X(b)), 0, 1, 128 * S.rowH);
   }
-  g.fillStyle = "rgba(0,0,0,.35)"; g.fillRect(X(len), 0, W, 128 * S.rowH);
+  g.fillStyle = "rgba(0,0,0,.4)"; g.fillRect(X(len), 0, W, 128 * S.rowH);
   const col = trackColor(t, S.doc.tracks.indexOf(t));
   c.notes.forEach((n, i) => {
-    const y = (127 - n[0]) * S.rowH, sel = S.sel.notes.has(i);
-    g.fillStyle = sel ? "#ffffff" : col; g.globalAlpha = 0.45 + 0.55 * n[3] / 127;
-    g.fillRect(X(n[1]) + 0.5, y + 1, Math.max(3, n[2] * S.rollZoom - 1), S.rowH - 2); g.globalAlpha = 1;
-    g.strokeStyle = sel ? "#ffb000" : "#0c0c0d"; g.strokeRect(X(n[1]) + 0.5, y + 1.5, Math.max(3, n[2] * S.rollZoom - 1), S.rowH - 3);
+    const y = (127 - n[0]) * S.rowH, sel = S.sel.notes.has(i), nw = Math.max(3, n[2] * S.rollZoom - 1);
+    rrect(g, X(n[1]) + 0.5, y + 1, nw, S.rowH - 2, Math.min(2.5, (S.rowH - 2) / 2));
+    g.fillStyle = sel ? "#ffffff" : col; g.globalAlpha = 0.5 + 0.5 * n[3] / 127; g.fill(); g.globalAlpha = 1;
+    g.strokeStyle = sel ? CV.marker : "rgba(0,0,0,.55)"; g.lineWidth = sel ? 1.5 : 1; g.stroke(); g.lineWidth = 1;
+    if (!sel && S.rowH >= 9) { g.fillStyle = "rgba(255,255,255,.22)"; g.fillRect(X(n[1]) + 2, y + 2, Math.max(0, nw - 3), 1); }
   });
   if (S.drag && S.drag.kind === "box") {
-    const d = S.drag; g.strokeStyle = "#ffb000"; g.setLineDash([3, 3]);
+    const d = S.drag; g.strokeStyle = CV.marker; g.fillStyle = "rgba(255,178,36,.06)"; g.setLineDash([3, 3]);
+    g.fillRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
     g.strokeRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0)); g.setLineDash([]);
   }
-  const ph = S.playhead - c.start; if (ph >= 0 && ph <= len) { g.fillStyle = "#ff4a3a"; g.fillRect(X(ph), 0, 1.5, 128 * S.rowH); }
-  // sticky keyboard
+  const ph = S.playhead - c.start; if (ph >= 0 && ph <= len) { g.fillStyle = CV.play; g.fillRect(Math.round(X(ph)), 0, 1.25, 128 * S.rowH); }
+  // sticky keyboard: white keys with a shade line, black keys raised, C named
+  g.fillStyle = "#0a0b0d"; g.fillRect(sx, 0, KEYW, 128 * S.rowH);
   for (let p = 0; p < 128; p++) {
     const y = (127 - p) * S.rowH, black = [1, 3, 6, 8, 10].includes(p % 12);
-    g.fillStyle = black ? "#252527" : "#cfcabd"; g.fillRect(sx, y, KEYW, S.rowH - 0.5);
-    if (p % 12 === 0) { g.fillStyle = "#101011"; g.font = "9px Segoe UI"; g.fillText(noteName(p), sx + 18, y + S.rowH - 2); }
+    g.fillStyle = black ? "#1d2025" : "#d8d4cb"; g.fillRect(sx, y, black ? KEYW - 12 : KEYW - 1, S.rowH - 0.5);
+    if (black) { g.fillStyle = "#30353c"; g.fillRect(sx, y, KEYW - 12, 1); }
+    if (p % 12 === 0) { g.fillStyle = "#3a3934"; g.font = `600 8.5px ${UI_FONT}`; g.fillText(noteName(p), sx + KEYW - 22, y + S.rowH - 2.5); }
   }
+  g.fillStyle = "#000"; g.fillRect(sx + KEYW - 1, 0, 1, 128 * S.rowH);
   drawVel(c, col);
 }
 function drawVel(c, col) {
   const W = rollWrap.clientWidth, H = 64, g = fitCanvas(velCv, W, H), sx = rollWrap.scrollLeft;
-  g.fillStyle = "#131314"; g.fillRect(0, 0, W, H);
-  g.fillStyle = "#8f897c"; g.font = "10px Segoe UI"; g.fillText("vel", 8, 14);
+  g.fillStyle = "#0e1013"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "#1a1d22"; g.fillRect(KEYW, Math.round(H / 2), W, 1);
+  g.fillStyle = "#64625c"; g.font = `9px ${getComputedStyle(document.documentElement).getPropertyValue("--legend")}`; g.fillText("VELOCITY", 6, 14);
   if (!c) return;
   c.notes.forEach((n, i) => {
-    const x = KEYW + n[1] * S.rollZoom - sx; if (x < KEYW - 2 || x > W) return;
-    const h = (H - 6) * n[3] / 127;
-    g.fillStyle = S.sel.notes.has(i) ? "#ffffff" : col; g.fillRect(x, H - h, 3, h);
+    const x = Math.round(KEYW + n[1] * S.rollZoom - sx); if (x < KEYW - 2 || x > W) return;
+    const h = (H - 8) * n[3] / 127, sel = S.sel.notes.has(i);
+    g.fillStyle = sel ? "#ffffff" : col; g.globalAlpha = 0.5; g.fillRect(x + 1, H - h, 1.5, h); g.globalAlpha = 1;
+    g.beginPath(); g.arc(x + 1.75, H - h, 2.5, 0, Math.PI * 2); g.fill();
   });
 }
 rollWrap.addEventListener("scroll", () => drawRoll());
@@ -993,13 +1048,16 @@ function liveState(st) {
   if (!st) return;
   const L = S.eng, flip = !!(L.st && L.st.available) !== !!st.available;
   L.st = st; L.at = performance.now();
-  $("#liveBtn").classList.toggle("hidden", !st.available); $("#liveBtn").classList.toggle("on", L.on);
+  // the LIVE key stays where it is; without an engine it is greyed out and says why
+  $("#liveBtn").disabled = !st.available; $("#liveBtn").classList.toggle("on", L.on && !!st.available);
+  $("#liveBtn").title = st.available ? "LIVE: play through the real-time engine (your plugins, as you edit) instead of a rendered preview"
+    : "LIVE is not available: the real-time engine is not built or could not start" + (st.error ? ` (${st.error})` : "");
   if (L.hold) st.playing = false;  // frames sent before our live_stop landed
   if (flip) renderAll();
   window.Tracking?.sync(); window.Picture?.guideSync();
   if (!liveMode()) return;
   $("#playBtn").classList.toggle("on", (!!st.playing && !st.audition) || L.busy);
-  audioTag(); liveMeters();
+  audioTag(); window.TTConsole?.meters();
   if (st.playing && !st.audition && !L.raf) L.raf = requestAnimationFrame(liveTick);
 }
 function liveTick() {
@@ -1024,13 +1082,6 @@ function liveTag(el, what) {
   el.textContent = text; el.className = cls + (st.on ? " pick" : "");  // pick: a click opens the device menu (tracking.js)
 }
 const peakPct = (p) => p > 0 ? Math.max(0, Math.min(100, (20 * Math.log10(p) + 60) / 60 * 100)) : 0;
-function liveMeters() {
-  const st = S.eng.st; if (!liveMode() || !st.on || S.tab !== "mixer") return;
-  document.querySelectorAll("#mixer .strip[data-t] .meter > div").forEach((m) => {
-    const pk = !st.audition && st.peaks && st.peaks[m.closest(".strip").dataset.t];
-    m.style.width = peakPct(pk && pk.length ? Math.max(...pk) : 0) + "%";
-  });
-}
 // A fader, pan or send being dragged on LIVE is heard at once (live_mix: the engine moves it without a reload);
 // letting go saves it as before. One call in flight at a time, carrying the latest value of each control.
 const LM = { want: new Map(), busy: false };
@@ -1055,17 +1106,10 @@ liveES.onmessage = (m) => { try { liveState(JSON.parse(m.data)); } catch { /* ba
 
 // ---------------------------------------------------------------- panels
 function renderPanel() {
-  if (S.tab === "mixer") renderMixer();
+  if (S.tab === "mixer") window.TTMix?.refresh();
   else if (S.tab === "inspector") renderInspector();
   else if (S.tab === "report") renderReport();
   else if (S.tab === "brief") renderBrief();
-}
-// A VST3 insert (on a track or the master) has a Window key while the live engine can run: it opens the plugin's own window there.
-function stripFx(list, trackRef) {
-  const liveOk = !!(S.eng.st && S.eng.st.available);
-  return `<div class="fxl">${(list || []).map((f, i) => `<div class="fx ${f.bypass ? "byp" : ""}" data-i="${i}">
-     <span title="${esc(fxLabel(f))} (click to bypass)">${esc(fxLabel(f))}</span>${f.type === "vst3" && liveOk ? `<button class="small ghost" data-win="${i}" title="Open this plugin's window in the live engine">W</button>` : ""}<button class="small ghost danger" data-rm="${i}">×</button></div>`).join("")}
-     <button class="small" data-addfx="${esc(trackRef)}">+ FX</button></div>`;
 }
 async function openLiveWindow(track, slot) {
   status("opening the plugin window…", "busy");
@@ -1075,60 +1119,6 @@ async function openLiveWindow(track, slot) {
 const fxLabel = (f) => (f.patch ? `${f.name} · ${f.patch}` : f.name) +
   (f.sidechain ? ` ← ${(S.doc.tracks.find((x) => x.id === f.sidechain) || { name: "?" }).name}` : "");
 const canSidechain = (f) => f.type === "vst3" || (f.type === "builtin" && f.name === "compressor");
-function renderMixer() {
-  const box = $("#mixer"); if (!S.doc) { box.innerHTML = ""; return; }
-  const buses = S.doc.tracks.filter((t) => t.kind === "bus");
-  const lr = S.lastRender && S.lastRender.tracks || {};
-  box.innerHTML = S.doc.tracks.map((t, i) => {
-    const m = lr[t.name], lvl = m ? Math.max(0, Math.min(100, (m.rms_dbfs + 40) * 2.5)) : 0;
-    return `<div class="strip" data-t="${t.id}"><h4 style="color:${trackColor(t, i)}" title="${esc(t.name)}">${esc(t.name)}</h4>
-      <div class="muted" style="font-size:11px">${t.kind}${t.output !== "master" && t.output ? " → " + esc((S.doc.tracks.find((x) => x.id === t.output) || {}).name) : ""}${t.automation?.volume_db?.length ? ` · <span title="${AUTO_TIP}">auto</span>` : ""}</div>
-      <div class="meter" title="last render RMS ${m ? m.rms_dbfs + " dBFS" : "-"}"><div style="width:${lvl}%"></div></div>
-      ${stripFx(t.fx, t.id)}
-      ${t.kind !== "bus" && buses.length ? `<div class="fxl">${(t.sends || []).map((s, k) => `<div class="fx"><span>→ ${esc((buses.find((b) => b.id === s.to) || {}).name)}</span>
-        <input type="range" min="-40" max="6" step="0.5" value="${s.db}" data-send="${k}" style="width:56px"></div>`).join("")}
-        <button class="small" data-addsend="1">+ Send</button></div>` : ""}
-      <input class="fader" type="range" min="-60" max="12" step="0.5" value="${t.volume_db}">
-      <div class="db">${(+t.volume_db).toFixed(1)} dB</div>
-      <input type="range" class="pan" min="-1" max="1" step="0.05" value="${t.pan}" title="pan">
-      <div style="display:flex;gap:4px;justify-content:center"><button class="small ${t.mute ? "on" : ""}" data-mute>M</button><button class="small ${t.solo ? "on" : ""}" data-solo>S</button></div>
-    </div>`;
-  }).join("") + `<div class="strip master" data-t="master"><h4>Master</h4>
-      <div class="muted" style="font-size:11px">target ${S.doc.master.target_lufs} LUFS · ceiling ${S.doc.master.ceiling_db} dB</div>
-      <div class="meter" title="live peak (LIVE engine only)"><div style="width:0%"></div></div>
-      ${stripFx(S.doc.master.fx, "master")}
-      <input class="fader" type="range" min="-24" max="12" step="0.5" value="${S.doc.master.volume_db || 0}">
-      <div class="db">${(+(S.doc.master.volume_db || 0)).toFixed(1)} dB</div></div>`;
-  box.querySelectorAll(".strip").forEach((el) => {
-    const id = el.dataset.t, t = S.doc.tracks.find((x) => x.id === id);
-    const fader = el.querySelector(".fader");
-    if (t?.automation?.volume_db?.length) fader.title = AUTO_TIP;
-    fader.oninput = () => { el.querySelector(".db").textContent = (+fader.value).toFixed(1) + " dB"; liveMix(id, { db: +fader.value }); };
-    fader.onchange = () => id === "master" ? act("project_set", { master_volume_db: +fader.value }) : act("track_update", { track: id, volume_db: +fader.value });
-    const pan = el.querySelector(".pan");
-    if (pan) { pan.oninput = () => liveMix(id, { pan: +pan.value }); pan.onchange = () => act("track_update", { track: id, pan: +pan.value }); }
-    const mu = el.querySelector("[data-mute]"); if (mu) mu.onclick = () => act("track_update", { track: id, mute: !t.mute });
-    const so = el.querySelector("[data-solo]"); if (so) so.onclick = () => act("track_update", { track: id, solo: !t.solo });
-    el.querySelectorAll(".fx[data-i] span").forEach((s) => s.onclick = () => {
-      const i = +s.parentElement.dataset.i, list = id === "master" ? S.doc.master.fx : t.fx;
-      act("fx_update", { track: id, index: i, bypass: !list[i].bypass });
-    });
-    el.querySelectorAll("[data-rm]").forEach((b) => b.onclick = () => act("fx_remove", { track: id, index: +b.dataset.rm }));
-    el.querySelectorAll(".fx [data-win]").forEach((b) => b.onclick = () => openLiveWindow(id, +b.dataset.win));
-    el.querySelectorAll("[data-addfx]").forEach((b) => b.onclick = () => openDevicePicker(false, (dev) => act("fx_add", { track: id, device: dev })));
-    el.querySelectorAll("[data-send]").forEach((r) => {
-      r.oninput = () => liveMix(id, { to: t.sends[+r.dataset.send].to, db: +r.value });
-      r.onchange = () => {
-        const sends = t.sends.map((s, k) => ({ to: s.to, db: k === +r.dataset.send ? +r.value : s.db })); act("track_update", { track: id, sends });
-      };
-    });
-    const as = el.querySelector("[data-addsend]");
-    if (as) as.onclick = (e) => menu(e, buses.filter((b) => !(t.sends || []).some((s) => s.to === b.id)).map((b) =>
-      [b.name, () => act("track_update", { track: id, sends: [...(t.sends || []), { to: b.id, db: -12 }] })]));
-  });
-  liveMeters();
-}
-
 async function ensureLibrary(force = false) {
   if (!S.library || force) {
     [S.library, S.catalog, S.sfz] = await Promise.all([api("library_status"), api("synths_list"), api("sfz_list")]);
@@ -1151,30 +1141,44 @@ async function renderInspector() {
   const synthDef = inst && inst.type === "synth" && S.catalog.synths[inst.name];
   const outs = S.doc.tracks.filter((x) => x.kind === "bus" && x.id !== t.id);
   const liveOk = !!(S.eng.st && S.eng.st.available);
-  box.innerHTML = `
-  <div class="card"><h3>${esc(t.name)} <span class="muted">(${t.kind})</span></h3>
-    <div class="grid2">
-      ${t.kind === "midi" ? `<span>Instrument</span><div><b>${inst ? esc(instLabel(inst)) : "none"}</b>
-        <button class="small" id="chooseInst">Change…</button> <button class="small" id="audBtn" ${inst ? "" : "disabled"}>Audition</button>
-        ${inst && inst.type === "vst3" ? `<button class="small" id="capBtn" title="Opens the plugin window on this computer; pick a sound, close the window">Pick sound in plugin window…</button>` : ""}
-        ${inst && inst.type === "vst3" && liveOk ? `<button class="small" data-win="inst" title="Open this plugin's window in the live engine">Window</button>` : ""}</div>` : ""}
-      <span>Role</span><input id="roleIn" value="${esc(t.role || "")}" placeholder="violin, cello, bass, pad, drums…">
-      <span>Layer</span><input id="layerIn" value="${esc(t.layer || "")}" placeholder="adaptive layer, e.g. base / combat">
-      <span>Output</span><select id="outSel"><option value="master">Master</option>${outs.map((b) => `<option value="${b.id}" ${t.output === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select>
-    </div></div>
-  ${synthDef ? `<div class="card"><h3>Synth: ${esc(inst.name)} <span class="muted">${esc(synthDef.description)}</span></h3>${paramRows(synthDef.params, inst.params, "i:")}</div>` : ""}
-  <div class="card"><h3>Effects</h3>${(t.fx || []).map((f, i) => {
-    const def = f.type === "builtin" && S.catalog.effects[f.name];
-    return `<div style="margin-bottom:10px"><b>${i + 1}. ${esc(fxLabel(f))}</b> <span class="muted">${def ? esc(def.description) : f.type}</span>
-      <button class="small" data-byp="${i}">${f.bypass ? "Enable" : "Bypass"}</button> <button class="small danger" data-del="${i}">Remove</button>
-      ${f.type === "vst3" ? `<button class="small" data-vp="${i}">Parameters…</button>${liveOk ? ` <button class="small" data-win="${i}" title="Open this plugin's window in the live engine">Window</button>` : ""}` : ""}
-      ${canSidechain(f) ? `<label class="muted" title="Another track's sound drives this effect's detector (ducking). Plugins without a sidechain input refuse.">
-        Sidechain <select data-sc="${i}"><option value="">none</option>${S.doc.tracks.filter((x) => x.kind !== "bus" && x.id !== t.id)
-          .map((x) => `<option value="${x.id}" ${f.sidechain === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>` : ""}
-      ${def ? paramRows(def.params, f.params, `f${i}:`) : ""}</div>`;
-  }).join("")}<button class="small" id="addFx">+ Add effect</button></div>`;
+  // The track's strip on the left, then its signal chain left to right: the instrument, each insert, an empty slot.
+  const color = PALETTE[S.doc.tracks.indexOf(t) % PALETTE.length];
+  const TYPE = { synth: "BUILT-IN SYNTH", vst3: "VST3", sfz: "SFZ", builtin: "BUILT-IN", patch: "SAVED SOUND" };
+  box.innerHTML = `<div class="insp">
+  <aside class="inspStrip" style="--tc:${color}">
+    <div class="inspName"><b>${esc(t.name)}</b><span class="legend">${t.kind === "midi" ? "INSTRUMENT" : t.kind.toUpperCase()} TRACK</span></div>
+    <label class="fld"><span>Role</span><input id="roleIn" value="${esc(t.role || "")}" placeholder="violin, bass, pad…"></label>
+    <label class="fld"><span>Layer</span><input id="layerIn" value="${esc(t.layer || "")}" placeholder="base, combat…"></label>
+    <label class="fld"><span>Output</span><select id="outSel"><option value="master">Master</option>${outs.map((b) => `<option value="${b.id}" ${t.output === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select></label>
+  </aside>
+  <div class="chain">
+    ${t.kind === "midi" ? `<section class="dev inst ${inst ? "" : "empty"}">
+      <header><span class="lamp ${inst ? "green" : ""}"></span><div class="dvT"><span class="legend">${inst ? TYPE[inst.patch ? "patch" : inst.type] || esc(inst.type) : "NO INSTRUMENT"}</span>
+        <b title="${inst ? esc(instLabel(inst)) : ""}">${inst ? esc(instLabel(inst)) : "Empty"}</b></div></header>
+      ${synthDef ? `<p class="dvD">${esc(synthDef.description)}</p>` : ""}
+      <div class="dvK"><button class="key" id="chooseInst">${inst ? "CHANGE" : "CHOOSE"}</button><button class="key" id="audBtn" ${inst ? "" : "disabled"}>▶ HEAR</button>
+        ${inst && inst.type === "vst3" ? `<button class="key" id="capBtn" title="Opens the plugin window on this computer: pick a sound, close the window, and it is saved as a sound you can reuse">PICK SOUND</button>` : ""}
+        ${inst && inst.type === "vst3" && liveOk ? `<button class="key" data-win="inst" title="Open this plugin's window in the live engine">WINDOW</button>` : ""}</div>
+      ${synthDef ? `<div class="dvP">${paramRows(synthDef.params, inst.params, "i:")}</div>` : ""}
+    </section><span class="wire"></span>` : ""}
+    ${(t.fx || []).map((f, i) => {
+      const def = f.type === "builtin" && S.catalog.effects[f.name];
+      return `<section class="dev ${f.bypass ? "off" : ""}">
+        <header><button class="pwr ${f.bypass ? "" : "on"}" data-byp="${i}" title="${f.bypass ? "Turn on" : "Bypass"}"></button>
+          <div class="dvT"><span class="legend">INSERT ${i + 1} · ${def ? "BUILT-IN" : esc(f.type.toUpperCase())}</span><b title="${esc(fxLabel(f))}">${esc(fxLabel(f))}</b></div>
+          <button class="mini danger" data-del="${i}" title="Remove this effect">×</button></header>
+        ${def ? `<p class="dvD">${esc(def.description)}</p>` : ""}
+        ${f.type === "vst3" ? `<div class="dvK"><button class="key" data-vp="${i}">PARAMETERS</button>${liveOk ? `<button class="key" data-win="${i}" title="Open this plugin's window in the live engine">WINDOW</button>` : ""}</div>` : ""}
+        ${canSidechain(f) ? `<label class="fld" title="Another track's sound drives this effect's detector (ducking). Plugins without a sidechain input refuse."><span>Sidechain</span>
+          <select data-sc="${i}"><option value="">none</option>${S.doc.tracks.filter((x) => x.kind !== "bus" && x.id !== t.id)
+            .map((x) => `<option value="${x.id}" ${f.sidechain === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>` : ""}
+        ${def ? `<div class="dvP">${paramRows(def.params, f.params, `f${i}:`)}</div>` : ""}
+      </section><span class="wire"></span>`;
+    }).join("")}
+    <button class="dev add" id="addFx" title="Add an effect after the last one"><b>+</b><span class="legend">ADD EFFECT</span></button>
+  </div></div>`;
   const on = (sel, ev, fn) => { const el = box.querySelector(sel); if (el) el[ev] = fn; };
-  on("#chooseInst", "onclick", () => openDevicePicker(true, (dev) => act("track_update", { track: t.id, instrument: dev })));
+  on("#chooseInst", "onclick", () => openDevicePicker(true, (dev) => act("track_update", { track: t.id, instrument: dev }), null, inst ? devString(inst) : null));
   on("#audBtn", "onclick", async () => {
     status("auditioning…", "busy");
     try { const r = await api("audition", { instrument: devString(inst) }); status(""); playFile(r.file); if (r.silent) toast("Audition was silent - the instrument has no sound loaded"); }
@@ -1269,126 +1273,330 @@ function menu(e, items) {
 }
 document.addEventListener("mousedown", (e) => { if (!e.target.closest("#menu")) $("#menu").classList.add("hidden"); });
 
-function openProjectModal(recent) {
-  const box = modal(`<h2>Projects</h2>
-    ${recent && recent.length ? `<div class="card"><h3>Recent</h3>${recent.map((r) => `<div><a href="#" data-open="${esc(r)}">${esc(r)}</a></div>`).join("")}</div>` : ""}
-    <div class="card"><h3>New project</h3><div class="grid2">
-      <span>Name</span><input id="npName" value="Menu Theme">
-      <span>Tempo</span><input id="npTempo" type="number" value="96">
-      <span>Key</span><input id="npKey" value="D minor">
-      <span>Time signature</span><input id="npSig" value="4/4">
-      <span>Genre</span><input id="npGenre" placeholder="orchestral fantasy, synthwave, chiptune…">
-      <span>Mood</span><input id="npMood" placeholder="hopeful, tense, playful…">
-      <span>Use</span><input id="npUse" placeholder="main menu loop, battle, ambience…">
-    </div></div>
-    <div class="row"><button id="npCancel" class="ghost">Close</button><button id="npCreate">Create</button></div>`);
-  box.querySelectorAll("[data-open]").forEach((a) => a.onclick = async (e) => { e.preventDefault(); leaveTake(); await act("project_open", { path: a.dataset.open }); closeModal(); });
-  $("#npCancel").onclick = closeModal;
-  $("#npCreate").onclick = async () => {
-    const brief = {}; [["genre", "#npGenre"], ["mood", "#npMood"], ["use", "#npUse"]].forEach(([k, s]) => { if ($(s).value) brief[k] = $(s).value; });
-    leaveTake();
-    await act("project_new", { name: $("#npName").value, tempo: +$("#npTempo").value, key: $("#npKey").value, time_sig: $("#npSig").value, brief });
-    closeModal();
+// The Projects screen (a sheet over the whole room): every project as a row you can search and sort, its details
+// beside the list, and a new one on the right.
+async function openProjectModal() {
+  let d = { details: [], current: null };
+  try { d = await api("project_list"); } catch (e) { toast(e.message); }
+  const cards = d.details || [];
+  const ROOTS = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+  const MODES = ["major", "minor", "dorian", "phrygian", "lydian", "mixolydian", "harmonic minor"];
+  const METERS = ["4/4", "3/4", "6/8", "2/4", "5/4", "7/8", "12/8"];
+  const IDEAS = {
+    genre: ["orchestral fantasy", "synthwave", "chiptune", "lo-fi", "ambient", "rock", "jazz", "folk"],
+    mood: ["hopeful", "tense", "playful", "melancholy", "heroic", "mysterious", "calm", "driving"],
+    use: ["main menu loop", "exploration", "battle", "boss", "town / shop", "stinger", "ambience", "credits"],
+  };
+  const el = Sheet.open({ title: "Projects", sub: `${cards.length} on this computer`, size: "full", body: `<div class="ph">
+    <div class="phLib"></div>
+    <form class="phNew" autocomplete="off">
+      <div class="phH">New project</div>
+      <label class="fld big"><span>Name</span><input id="npName" value="Menu Theme" spellcheck="false"></label>
+      <div class="phRow2">
+        <div class="fld"><span>Tempo</span><div class="unit2"><input id="npTempo" type="number" min="20" max="300" value="96"><i>BPM</i>
+          <button type="button" class="mini" id="npTap" title="Tap the beat a few times">TAP</button></div></div>
+        <div class="fld"><span>Key</span><div class="unit2"><select id="npRoot">${ROOTS.map((r) => `<option ${r === "D" ? "selected" : ""}>${r}</option>`).join("")}</select>
+          <select id="npMode">${MODES.map((m) => `<option ${m === "minor" ? "selected" : ""}>${m}</option>`).join("")}</select></div></div>
+      </div>
+      <div class="fld"><span>Meter</span><div class="seg" id="npSig">${METERS.map((m, i) => `<button type="button" class="${i ? "" : "on"}" data-v="${m}">${m}</button>`).join("")}</div></div>
+      <div class="phH sub">Brief <i>what the crew writes toward · optional</i></div>
+      ${Object.entries(IDEAS).map(([k, list]) => `<div class="fld"><span>${k}</span><input id="np_${k}" placeholder="type, or pick below">
+        <div class="ideas" data-for="np_${k}">${list.map((x) => `<button type="button" class="mini">${esc(x)}</button>`).join("")}</div></div>`).join("")}
+      <div class="phGo"><button type="submit" class="key go" id="npCreate">CREATE PROJECT</button></div>
+    </form></div>` });
+  const items = cards.map((c) => ({ ...c, id: c.path, dim: c.exists === false,
+    hay: [c.name, c.path, c.key, ...Object.values(c.brief || {}).filter((v) => typeof v === "string")].join(" ").toLowerCase(), f: {} }));
+  const bySort = { edited: (a, b) => (b.modified || 0) - (a.modified || 0), name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }) };
+  let sort = "edited";
+  const briefLine = (c) => Object.values(c.brief || {}).filter((v) => v && typeof v === "string").join(" · ");
+  const open = async (it) => {
+    if (it.exists === false) { toast("That project's folder is gone"); return; }
+    Sheet.close(true);
+    if (it.path === d.current && S.doc) return;
+    leaveTake(); await act("project_open", { path: it.path });
+  };
+  const lib = el.querySelector(".phLib");
+  const sortKeys = document.createElement("div"); sortKeys.className = "seg";
+  sortKeys.innerHTML = `<button type="button" data-s="edited" class="on">EDITED</button><button type="button" data-s="name">NAME</button>`;
+  const list = () => {
+    pickList(lib, {
+      items, current: d.current, cols: "minmax(0,1fr) 104px 58px 52px 52px 86px", sort: bySort[sort],
+      head: ["Project", "Key", "Tempo", "Meter", "Tracks", "Edited"], placeholder: "FIND A PROJECT", tip: "Double-click or Enter opens it",
+      empty: "No project matches.", none: "No projects yet. Make one on the right.",
+      row: (c) => `<span class="phN"><b>${c.path === d.current ? `<span class="lamp amber" title="Open now"></span>` : ""}${esc(c.name)}${c.exists === false ? `<em class="tag bad">MISSING</em>` : ""}</b>
+          <small>${esc(briefLine(c) || c.path)}</small></span>
+        <span>${esc(c.key || "—")}</span><span class="num">${c.tempo ? Math.round(c.tempo * 10) / 10 : "—"}</span><span class="num">${esc(c.time_sig || "—")}</span>
+        <span class="num">${c.tracks ?? "—"}</span><span class="muted">${c.modified ? ago(c.modified) : ""}</span>`,
+      detail: (c, box) => {
+        box.innerHTML = `<div class="legend">${c.path === d.current ? "OPEN NOW" : "PROJECT"}</div><h3>${esc(c.name)}</h3>
+          <dl class="facts"><dt>Key</dt><dd>${esc(c.key || "—")}</dd><dt>Tempo</dt><dd>${c.tempo ? c.tempo + " BPM" : "—"}</dd><dt>Meter</dt><dd>${esc(c.time_sig || "—")}</dd>
+            <dt>Tracks</dt><dd>${c.tracks ?? "—"}</dd><dt>Edited</dt><dd>${c.modified ? new Date(c.modified * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "—"}</dd>
+            ${Object.entries(c.brief || {}).filter(([, v]) => v && typeof v === "string").map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
+          <div class="gId" title="${esc(c.path)}">${esc(c.path)}</div>
+          <div class="keys"><button type="button" class="key go" data-k="open" ${c.exists === false ? "disabled" : ""}>${c.path === d.current ? "BACK TO IT" : "OPEN"}</button></div>`;
+        box.querySelector('[data-k="open"]').onclick = () => open(c);
+      },
+      onPick: open,
+    });
+    lib.querySelector(".plTools").appendChild(sortKeys);
+  };
+  list();
+  sortKeys.querySelectorAll("button").forEach((b) => b.onclick = () => {
+    sort = b.dataset.s; sortKeys.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); list();
+  });
+  // a new project
+  const form = el.querySelector(".phNew");
+  let sig = "4/4";
+  form.querySelectorAll("#npSig button").forEach((b) => b.onclick = () => { sig = b.dataset.v; form.querySelectorAll("#npSig button").forEach((x) => x.classList.toggle("on", x === b)); });
+  form.querySelectorAll(".ideas").forEach((g) => g.querySelectorAll("button").forEach((b) => b.onclick = () => {
+    const inp = $("#" + g.dataset.for), have = inp.value.split(",").map((s) => s.trim()).filter(Boolean);
+    const i = have.indexOf(b.textContent); if (i >= 0) have.splice(i, 1); else have.push(b.textContent);
+    inp.value = have.join(", "); b.classList.toggle("on", i < 0);
+  }));
+  let taps = [];
+  $("#npTap").onclick = () => {
+    const now = performance.now(); taps = taps.filter((t) => now - t < 2500); taps.push(now);
+    if (taps.length > 1) $("#npTempo").value = Math.round(60000 * (taps.length - 1) / (now - taps[0]));
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const name = $("#npName").value.trim(); if (!name) { toast("Give the project a name"); $("#npName").focus(); return; }
+    const brief = {}; Object.keys(IDEAS).forEach((k) => { const v = $("#np_" + k).value.trim(); if (v) brief[k] = v; });
+    Sheet.close(true); leaveTake();
+    await act("project_new", { name, tempo: +$("#npTempo").value, key: `${$("#npRoot").value} ${$("#npMode").value}`, time_sig: sig, brief });
   };
 }
-function openAddTrack(kind, init = {}) {
-  modal(`<h2>Add ${kind === "midi" ? "instrument" : kind} track</h2><div class="grid2">
-    <span>Name</span><input id="atName" value="${esc(init.name || (kind === "bus" ? "Reverb" : kind === "audio" ? "Audio" : "Strings"))}">
-    ${kind === "midi" ? `<span>Instrument</span><div><span id="atInst" class="muted">${esc(init.inst || "none")}</span> <button class="small" id="atPick">Choose…</button></div>
-    <span>Role</span><input id="atRole" value="${esc(init.role || "")}" placeholder="violin, bass, pad, drums…">` : ""}
-    ${kind === "bus" ? `<span>Effect</span><select id="atFx"><option value="builtin:reverb">Built-in reverb</option><option value="builtin:delay">Built-in delay</option><option value="">None</option></select>` : ""}
-    </div><div class="row"><button class="ghost" id="atCancel">Cancel</button><button id="atOk">Add</button></div>`);
-  $("#atCancel").onclick = closeModal;
-  if (kind === "midi") $("#atPick").onclick = () => {
-    const keep = { name: $("#atName").value, role: $("#atRole").value };
-    openDevicePicker(true, (v) => openAddTrack(kind, { ...keep, inst: v }), () => openAddTrack(kind, { ...keep, inst: init.inst }));
-  };
-  $("#atOk").onclick = async () => {
-    const args = { name: $("#atName").value, kind, instrument: init.inst || null };
-    if (kind === "midi" && $("#atRole").value) args.role = $("#atRole").value;
-    if (kind === "bus" && $("#atFx").value) args.fx = [$("#atFx").value];
-    const r = await act("track_add", args); S.sel.track = r.track; closeModal(); renderAll();
-  };
+// ---------------------------------------------------------------- choosers and forms as sheets (sheet.js)
+const DEV_SRC = { patch: "Saved sounds", vst3: "Plug-ins", sfz: "SFZ", synth: "Built-in", builtin: "Built-in" };
+const devFrom = (i) => i.by === "built-in" ? "TuneTrack" : i.by;
+async function deviceItems(instrument) {
+  const all = (await api("catalog", { kind: instrument ? "instrument" : "effect" })).items;
+  return all.map((i) => ({ ...i, dim: i.missing, f: { source: DEV_SRC[i.source], type: i.type, maker: i.maker },
+    hay: [i.name, i.by, i.maker, i.type, ...(i.tags || []), i.role || "", i.about || ""].join(" ").toLowerCase() }));
 }
-async function openDevicePicker(instrument, cb, onCancel) {
-  await ensureLibrary();
-  const L = S.library, C = S.catalog;
-  const groups = instrument ? [
-    ["Patches (saved plugin sounds)", L.patches.map((p) => [`patch:${p.id}`, `${p.name} — ${p.plugin}${p.tags.length ? " [" + p.tags.join(", ") + "]" : ""}`])],
-    ["Built-in synths", Object.entries(C.synths).map(([k, v]) => [`synth:${k}`, `${k} — ${v.description}`])],
-    ["SFZ instruments", (S.sfz.sfz || []).map((f) => [`sfz:${f}`, f.split(/[\/]/).slice(-2).join("/")])],
-    ["VST3 instruments (no saved sound)", L.vst3_instruments.map((n) => [`vst3:${n}`, n])],
-  ] : [
-    ["Built-in effects", Object.entries(C.effects).map(([k, v]) => [`builtin:${k}`, `${k} — ${v.description}`])],
-    ["VST3 effects", L.vst3_effects.map((n) => [`vst3:${n}`, n])],
-  ];
-  const box = modal(`<h2>Choose ${instrument ? "instrument" : "effect"}</h2><input id="dpQ" placeholder="filter…" style="width:100%;margin-bottom:8px">
-    <div id="dpList">${groups.map(([g, items]) => items.length ? `<div class="card"><h3>${esc(g)}</h3>${items.map(([v, l]) => `<div class="dpi"><a href="#" data-v="${esc(v)}">${esc(l)}</a></div>`).join("")}</div>` : "").join("")}</div>
-    <div class="row"><button class="ghost" id="dpCancel">Cancel</button></div>`);
-  $("#dpCancel").onclick = () => onCancel ? onCancel() : closeModal();
-  $("#dpQ").oninput = (e) => box.querySelectorAll(".dpi").forEach((d) => d.style.display = d.textContent.toLowerCase().includes(e.target.value.toLowerCase()) ? "" : "none");
-  $("#dpQ").focus();
-  box.querySelectorAll("[data-v]").forEach((a) => a.onclick = (e) => { e.preventDefault(); closeModal(); cb(a.dataset.v); });
+// The instrument / effect browser in any host: facets, a list you walk with the keys, the highlighted item's detail
+// with a preview in the project's key and tempo. opts: current (device string in use), use(item) -> the main key's
+// label, onPick(item), onHi(item) (the highlight moved), hear (an Audio the caller stops when it closes).
+function deviceBrowser(host, items, instrument, opts) {
+  let playing = null;
+  const hear = opts.hear;
+  return pickList(host, {
+    items, current: opts.current, placeholder: instrument ? "SEARCH SOUNDS, PLUG-INS, TAGS" : "SEARCH EFFECTS",
+    groups: [{ key: "source", label: "Source", order: ["Saved sounds", "Built-in", "SFZ", "Plug-ins"] }, { key: "type", label: "Type" }, { key: "maker", label: "Maker" }],
+    cols: "minmax(0,1.3fr) minmax(0,1fr) 132px", head: ["Name", "From", "Type"], tip: opts.tip || "Double-click or Enter loads it",
+    empty: "Nothing matches. Clear the search or a filter.",
+    row: (i) => `<span class="dpN">${i.id === opts.current ? `<span class="lamp amber" title="In use"></span>` : ""}<b>${esc(i.name)}</b>${i.new ? `<em class="tag stale">NEW</em>` : ""}</span>
+      <span class="muted">${esc(devFrom(i))}</span><span class="muted">${esc(i.type)}</span>`,
+    detail: (i, box) => {
+      if (opts.onHi) opts.onHi(i);
+      const loose = i.source === "vst3" && i.kind === "instrument";
+      box.innerHTML = `<div class="legend">${esc(DEV_SRC[i.source])} · ${esc(i.type)}</div><h3>${esc(i.name)}</h3>
+        <div class="by">${esc(devFrom(i))}${i.maker && i.maker !== i.by && i.maker !== devFrom(i) ? ` · ${esc(i.maker)}` : ""}</div>
+        ${i.about ? `<p class="about">${esc(i.about)}</p>` : ""}
+        ${(i.tags || []).length ? `<div class="chips">${i.tags.map((t) => `<em>${esc(t)}</em>`).join("")}</div>` : ""}
+        ${i.role ? `<dl class="facts"><dt>Role</dt><dd>${esc(i.role)}</dd></dl>` : ""}
+        ${loose ? `<p class="note">Loads with no sound chosen. Pick one in its window afterwards, or use one of its saved sounds.</p>` : ""}
+        ${i.missing ? `<p class="note bad">Its plug-in file is gone from this computer.</p>` : ""}
+        <div class="keys"><button type="button" class="key" data-k="hear" title="A short phrase in this project's key and tempo">${playing === i.id ? "■ STOP" : "▶ PREVIEW"}</button>
+          <button type="button" class="key go" data-k="use" ${i.missing ? "disabled" : ""}>${esc(opts.use(i))}</button></div>
+        <div class="gId" title="${esc(i.id)}">${esc(i.id)}</div>`;
+      box.querySelector('[data-k="use"]').onclick = () => opts.onPick(i);
+      const hb = box.querySelector('[data-k="hear"]');
+      hb.onclick = async () => {
+        if (playing === i.id) { hear.pause(); playing = null; hb.textContent = "▶ PREVIEW"; return; }
+        hb.disabled = true; hb.textContent = "RENDERING…";
+        try {
+          const r = await api("gear_audition", { item: i.id, phrase: "auto", live: false });
+          hear.src = "/api/audio?file=" + encodeURIComponent(r.file) + "&t=" + Date.now(); await hear.play(); playing = i.id;
+          if (r.silent) toast("The preview was silent: no sound is loaded in it", true);
+        } catch (e) { toast(e.message); playing = null; }
+        hb.disabled = false; hb.textContent = playing === i.id ? "■ STOP" : "▶ PREVIEW";
+        hear.onended = () => { playing = null; if (document.contains(hb)) hb.textContent = "▶ PREVIEW"; };
+      };
+    },
+    onPick: opts.onPick,
+  });
 }
+// Choose an instrument or an effect (a sheet). current: the device string in use now (marked, and the list starts
+// on it); onCancel runs when the sheet is closed without a pick.
+async function openDevicePicker(instrument, cb, onCancel, current = null) {
+  let items;
+  try { items = await deviceItems(instrument); } catch (e) { toast(e.message); return; }
+  const hear = new Audio(); let picked = false;
+  const el = Sheet.open({ title: instrument ? "Instrument" : "Insert effect", sub: `${items.length} on this computer`, size: "wide",
+    body: `<div class="dpHost"></div>`, onClose: () => { if (!picked && onCancel) onCancel(); } });
+  el._stop = () => hear.pause();
+  const pick = (it) => { if (it.missing) { toast("Its plug-in file is gone"); return; } picked = true; hear.pause(); Sheet.close(true); cb(it.id); };
+  deviceBrowser(el.querySelector(".dpHost"), items, instrument, { current, hear, onPick: pick,
+    use: (i) => i.id === current ? "KEEP" : instrument ? "LOAD" : "INSERT" });
+}
+
+// Add a track (a sheet): the kind, its name, and for an instrument track the browser right beside it; the
+// highlighted instrument is the one it gets. The name and role follow the highlight until you type your own.
+async function openAddTrack(kind = "midi") {
+  let items = [];
+  try { items = await deviceItems(true); } catch (e) { toast(e.message); }
+  const KINDS = [["midi", "INSTRUMENT", "Notes played by an instrument: a saved sound, a built-in synth, SFZ or a plug-in."],
+    ["audio", "AUDIO", "Recorded or imported sound: voice, guitar, a loop, a sound effect."],
+    ["bus", "BUS", "A shared effect other tracks send to, such as one reverb for the whole band."]];
+  const ROLES = ["melody", "strings", "pad", "bass", "drums", "percussion", "keys", "brass", "woodwinds", "fx"];
+  const hear = new Audio();
+  const el = Sheet.open({ title: "Add track", size: kind === "midi" ? "wide" : "", body: `<div class="at">
+    <form class="atForm" autocomplete="off">
+      <div class="tiles atKinds">${KINDS.map(([k, t, d]) => `<button type="button" data-kind="${k}"><b>${t}</b><span>${esc(d)}</span></button>`).join("")}</div>
+      <label class="fld big"><span>Name</span><input id="atName" spellcheck="false"></label>
+      <div class="fld atMidi"><span>Role</span><input id="atRole" placeholder="what it plays: violin, bass, pad…">
+        <div class="ideas">${ROLES.map((r) => `<button type="button" class="mini">${r}</button>`).join("")}</div></div>
+      <div class="fld atBus"><span>Effect</span><div class="seg" id="atFx"><button type="button" data-v="builtin:reverb" class="on">REVERB</button><button type="button" data-v="builtin:delay">DELAY</button><button type="button" data-v="">NONE</button></div></div>
+      <div class="atChosen atMidi"><span class="legend">Instrument</span><b id="atInst">—</b><span class="muted">Highlight one in the list. Enter or double-click adds the track.</span></div>
+      <div class="phGo"><button type="submit" class="key go">ADD TRACK</button></div>
+    </form>
+    <div class="atPick"></div></div>` });
+  el._stop = () => hear.pause();
+  const P = { kind, fx: "builtin:reverb", named: false, roled: false, browser: null, inst: null };
+  const name = el.querySelector("#atName"), role = el.querySelector("#atRole");
+  const title = (s) => s.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const defaults = { audio: "Audio", bus: "Reverb" };
+  name.oninput = () => { P.named = !!name.value.trim(); };
+  role.oninput = () => { P.roled = !!role.value.trim(); };
+  el.querySelectorAll(".atMidi .ideas button").forEach((b) => b.onclick = () => { role.value = b.textContent; P.roled = true; if (!P.named) name.value = title(b.textContent); });
+  el.querySelectorAll("#atFx button").forEach((b) => b.onclick = () => {
+    P.fx = b.dataset.v; el.querySelectorAll("#atFx button").forEach((x) => x.classList.toggle("on", x === b));
+    if (!P.named) name.value = P.fx ? title(P.fx.split(":")[1]) : "Bus";
+  });
+  const onHi = (i) => {
+    P.inst = i; el.querySelector("#atInst").textContent = `${i.name} · ${devFrom(i)}`;
+    if (!P.roled) role.value = i.role || "";
+    if (!P.named && P.kind === "midi") name.value = title(i.role || i.name);
+  };
+  function setKind(k) {
+    P.kind = k;
+    el.classList.toggle("wide", k === "midi");
+    el.querySelector(".at").classList.toggle("solo", k !== "midi");
+    el.querySelectorAll("[data-kind]").forEach((b) => b.classList.toggle("on", b.dataset.kind === k));
+    el.querySelectorAll(".atMidi").forEach((x) => x.classList.toggle("hidden", k !== "midi"));
+    el.querySelectorAll(".atBus").forEach((x) => x.classList.toggle("hidden", k !== "bus"));
+    if (k === "midi") {
+      if (!P.browser) P.browser = deviceBrowser(el.querySelector(".atPick"), items, true, { hear, onHi, onPick: add, use: () => "ADD TRACK", tip: "Double-click or Enter adds the track" });
+      else if (P.inst) onHi(P.inst);
+    } else {
+      if (!P.named) name.value = defaults[k];
+      setTimeout(() => name.focus(), 0);
+    }
+  }
+  async function add() {
+    const n = name.value.trim(); if (!n) { toast("Give the track a name"); name.focus(); return; }
+    const inst = P.kind === "midi" && P.browser ? P.browser.item : null;
+    if (inst && inst.missing) { toast("Its plug-in file is gone"); return; }
+    const args = { name: n, kind: P.kind, instrument: inst ? inst.id : null };
+    if (P.kind === "midi" && role.value.trim()) args.role = role.value.trim();
+    if (P.kind === "bus" && P.fx) args.fx = [P.fx];
+    hear.pause(); Sheet.close(true);
+    const r = await act("track_add", args); S.sel.track = r.track; renderAll();
+  }
+  el.querySelectorAll("[data-kind]").forEach((b) => b.onclick = () => setKind(b.dataset.kind));
+  el.querySelector(".atForm").onsubmit = (e) => { e.preventDefault(); add(); };
+  setKind(kind);
+}
+
+// A VST3 effect's parameters (a sheet): filter by name; moving a slider sets it.
 async function openVstParams(t, i) {
   const f = t.fx[i];
-  const box = modal(`<h2>${esc(fxLabel(f))} parameters</h2><input id="vpQ" placeholder="filter (loads plugin)…" style="width:100%"><div id="vpList" class="muted" style="margin-top:8px">loading…</div>
-    <div class="row"><button class="ghost" id="vpClose">Close</button></div>`);
-  $("#vpClose").onclick = closeModal;
-  const load = async (q) => {
+  const el = Sheet.open({ title: fxLabel(f), sub: "PARAMETERS", size: "seat", body: `<div class="vp">
+    <div class="plTools"><input class="shQ" type="search" spellcheck="false" placeholder="FILTER PARAMETERS"><span class="plCount"></span></div>
+    <div class="vpList"><p class="muted">Loading the plug-in…</p></div></div>` });
+  const q = el.querySelector(".shQ"), list = el.querySelector(".vpList"), count = el.querySelector(".plCount");
+  let seq = 0, timer = 0;
+  const load = async () => {
+    const my = ++seq;
     try {
-      const r = await api("plugin_params", { device: devString(f), query: q || null, limit: 80 });
-      $("#vpList").innerHTML = `<div class="params">${r.params.map((p) => `<label class="param"><span title="${esc(p.name)}">${esc(p.name)}</span>
-        <input type="range" min="0" max="1" step="0.001" value="${f.params[p.name] ?? p.value}" data-n="${esc(p.name)}"><span class="muted">${esc(p.text)}</span></label>`).join("")}</div>
-        <div class="muted">${r.total} parameters${r.total > r.params.length ? " (filter to see more)" : ""}</div>`;
-      box.querySelectorAll("[data-n]").forEach((el) => el.onchange = () => act("fx_update", { track: t.id, index: i, params: { [el.dataset.n]: +el.value } }));
-    } catch (e) { $("#vpList").textContent = e.message; }
+      const r = await api("plugin_params", { device: devString(f), query: q.value.trim() || null, limit: 120 });
+      if (my !== seq || !document.contains(list)) return;
+      count.textContent = `${r.params.length} / ${r.total}`;
+      list.innerHTML = r.params.length ? `<div class="params">${r.params.map((p) => `<label class="param"><span title="${esc(p.name)}">${esc(p.name)}</span>
+        <input type="range" min="0" max="1" step="0.001" value="${(f.params || {})[p.name] ?? p.value}" data-n="${esc(p.name)}"><span class="muted">${esc(p.text)}</span></label>`).join("")}</div>
+        ${r.total > r.params.length ? `<p class="muted">${r.total - r.params.length} more: type to narrow the list.</p>` : ""}` : `<p class="muted">No parameter matches.</p>`;
+      list.querySelectorAll("[data-n]").forEach((x) => x.onchange = () => act("fx_update", { track: t.id, index: i, params: { [x.dataset.n]: +x.value } }));
+    } catch (e) { list.innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
   };
-  $("#vpQ").onchange = (e) => load(e.target.value); load("");
+  q.oninput = () => { clearTimeout(timer); timer = setTimeout(load, 250); };
+  load(); setTimeout(() => q.focus(), 0);
 }
+
+// Save a sound from a plug-in's own window as a reusable patch (a sheet).
 function openCapture(t) {
   const inst = t.instrument;
-  modal(`<h2>Pick a sound in ${esc(inst.name)}</h2>
-    <p class="muted">The plugin's own window opens on this computer. Load a preset / program, tweak it, then <b>close the plugin window</b>. The sound is saved as a reusable patch the agent can use by name.</p>
-    <div class="grid2"><span>Patch name</span><input id="cpName" placeholder="Warm Strings">
-    <span>Tags</span><input id="cpTags" placeholder="strings, legato, warm">
-    <span>Description</span><input id="cpDesc" placeholder="what it sounds like / best used for">
-    <span>Role</span><input id="cpRole" value="${esc(t.role || "")}" placeholder="violin, bass, pad, drums…">
-    <span>Dynamics CC</span><select id="cpCC"><option value="">velocity only</option><option value="1">CC1 (mod wheel)</option><option value="11">CC11 (expression)</option></select></div>
-    <div class="row"><button class="ghost" id="cpCancel">Cancel</button><button id="cpGo">Open plugin window</button></div>`);
-  $("#cpCancel").onclick = closeModal;
-  $("#cpGo").onclick = async () => {
-    const name = $("#cpName").value.trim(); if (!name) { toast("Give the patch a name"); return; }
+  const el = Sheet.open({ title: "Pick a sound", sub: esc(inst.name), body: `<form class="sform" autocomplete="off">
+      <ol class="steps"><li>The plug-in's own window opens on this computer.</li><li>Load a preset or program and shape it.</li>
+        <li><b>Close the plug-in window.</b> The sound is saved as a patch this track uses, and the crew can call it by name.</li></ol>
+      <label class="fld big"><span>Patch name</span><input id="cpName" placeholder="Warm Strings"></label>
+      <div class="phRow2"><label class="fld"><span>Role</span><input id="cpRole" value="${esc(t.role || "")}" placeholder="violin, bass, pad…"></label>
+        <label class="fld"><span>Tags</span><input id="cpTags" placeholder="strings, legato, warm"></label></div>
+      <label class="fld"><span>Description</span><input id="cpDesc" placeholder="what it sounds like, what it is best for"></label>
+      <div class="fld"><span>Dynamics</span><div class="seg" id="cpCC"><button type="button" data-v="" class="on" title="Loudness follows how hard notes are played">VELOCITY</button>
+        <button type="button" data-v="1" title="Loudness follows the mod wheel (most orchestral libraries)">CC1 · MOD WHEEL</button><button type="button" data-v="11" title="Loudness follows expression">CC11 · EXPRESSION</button></div></div>
+    </form>`, foot: `<span class="spacer"></span><button class="key" id="cpCancel">CANCEL</button><button class="key go" id="cpGo">OPEN PLUG-IN WINDOW</button>` });
+  let cc = "";
+  el.querySelectorAll("#cpCC button").forEach((b) => b.onclick = () => { cc = b.dataset.v; el.querySelectorAll("#cpCC button").forEach((x) => x.classList.toggle("on", x === b)); });
+  el.querySelector("#cpCancel").onclick = () => Sheet.close();
+  setTimeout(() => $("#cpName").focus(), 0);
+  const go = async () => {
+    const name = $("#cpName").value.trim(); if (!name) { toast("Give the patch a name"); $("#cpName").focus(); return; }
     const args = { plugin: inst.name, name, tags: $("#cpTags").value.split(",").map((s) => s.trim()).filter(Boolean),
-      description: $("#cpDesc").value, role: $("#cpRole").value || null, dynamics_cc: $("#cpCC").value ? +$("#cpCC").value : null,
-      base_patch: inst.patch || null };
-    closeModal(); status("waiting for the plugin window to close…", "busy");
+      description: $("#cpDesc").value, role: $("#cpRole").value || null, dynamics_cc: cc ? +cc : null, base_patch: inst.patch || null };
+    Sheet.close(true); status("waiting for the plugin window to close…", "busy");
     try {
       const meta = await api("patch_capture", args); status("");
       if (meta.warning) toast(meta.warning); else toast(`Saved patch "${meta.id}"`, true);
       S.library = null; await act("track_update", { track: t.id, instrument: `patch:${meta.id}` });
     } catch (e) { toast(e.message); status("", ""); }
   };
+  el.querySelector("#cpGo").onclick = go;
+  el.querySelector(".sform").onsubmit = (e) => { e.preventDefault(); go(); };
 }
+
+// Export (a sheet): file type, how the loop is cut, extras, where it goes.
 function openExportModal() {
   if (!S.doc) return;
-  modal(`<h2>Export</h2><div class="grid2">
-    <span>Output</span><input id="exOut" placeholder="(default: project renders folder) or C:\\Game\\Audio\\Music\\menu.ogg">
-    <span>Format</span><select id="exFmt"><option>wav</option><option>ogg</option><option>flac</option><option>mp3</option></select>
-    <span>Bit depth (wav)</span><select id="exBits"><option>24</option><option>16</option><option>32</option></select>
-    <span>Loop</span><select id="exLoop"><option value="auto">auto (use loop region)</option><option value="off">off (one-shot with tail)</option><option value="loop">loop body only</option><option value="intro+loop">intro + loop (loop points)</option></select>
-    <span>Normalise</span><label><input type="checkbox" id="exNorm" checked> to ${S.doc.master.target_lufs} LUFS</label>
-    <span>Extras</span><div><label><input type="checkbox" id="exStems"> stems</label> <label><input type="checkbox" id="exLayers"> layers</label> <label><input type="checkbox" id="exMidi"> MIDI</label></div>
-  </div><div class="row"><button class="ghost" id="exCancel">Cancel</button><button id="exGo">Render</button></div>`);
-  $("#exCancel").onclick = closeModal;
-  $("#exGo").onclick = async () => {
-    const args = { format: $("#exFmt").value, bits: +$("#exBits").value, loop: $("#exLoop").value, normalize: $("#exNorm").checked,
-      stems: $("#exStems").checked, layers: $("#exLayers").checked, midi: $("#exMidi").checked };
+  const LOOPS = [["auto", "AUTO", S.doc.loop ? "Uses the loop region: a seamless loop with loop points" : "No loop region set: plays once with its tail"],
+    ["off", "ONE-SHOT", "Plays once and lets the tail ring out"], ["loop", "LOOP BODY", "Only the loop, tail folded into its start"],
+    ["intro+loop", "INTRO + LOOP", "From the top, with loop points around the loop"]];
+  const EXTRAS = [["norm", "NORMALISE", `Brings it to ${S.doc.master.target_lufs} LUFS`, true], ["stems", "STEMS", "Each track as its own file", false],
+    ["layers", "LAYERS", "Each adaptive layer as its own file", false], ["midi", "MIDI", "A .mid of every part", false]];
+  const P = { fmt: "wav", bits: 24, loop: "auto", norm: true, stems: false, layers: false, midi: false };
+  const el = Sheet.open({ title: "Export", sub: esc(S.doc.name), body: `<form class="sform" autocomplete="off">
+      <div class="phRow2"><div class="fld"><span>File type</span><div class="seg" id="exFmt">${["wav", "ogg", "flac", "mp3"].map((f) => `<button type="button" data-v="${f}">${f.toUpperCase()}</button>`).join("")}</div></div>
+        <div class="fld exBits"><span>Bit depth</span><div class="seg" id="exBits">${[16, 24, 32].map((b) => `<button type="button" data-v="${b}">${b}-BIT</button>`).join("")}</div></div></div>
+      <div class="phH sub">Loop</div>
+      <div class="tiles" id="exLoop">${LOOPS.map(([k, t, d]) => `<button type="button" data-v="${k}"><b>${t}</b><span>${esc(d)}</span></button>`).join("")}</div>
+      <div class="phH sub">Also</div>
+      <div class="tiles" id="exExtra">${EXTRAS.map(([k, t, d]) => `<button type="button" data-v="${k}" aria-pressed="false"><b>${t}</b><span>${esc(d)}</span></button>`).join("")}</div>
+      <div class="phH sub">Where</div>
+      <label class="fld"><span>Save to</span><input id="exOut" spellcheck="false" placeholder="the project's renders folder"></label>
+      <p class="muted sNote">Or a full path into your game, such as C:\\Game\\Audio\\Music\\menu.ogg: its extension sets the file type.</p>
+    </form>`, foot: `<span class="spacer"></span><button class="key" id="exCancel">CANCEL</button><button class="key go" id="exGo">RENDER</button>` });
+  const draw = () => {
+    el.querySelectorAll("#exFmt button").forEach((b) => b.classList.toggle("on", b.dataset.v === P.fmt));
+    el.querySelectorAll("#exBits button").forEach((b) => b.classList.toggle("on", +b.dataset.v === P.bits));
+    el.querySelector(".exBits").classList.toggle("off", P.fmt !== "wav");
+    el.querySelectorAll("#exLoop button").forEach((b) => b.classList.toggle("on", b.dataset.v === P.loop));
+    el.querySelectorAll("#exExtra button").forEach((b) => { b.classList.toggle("on", P[b.dataset.v]); b.setAttribute("aria-pressed", P[b.dataset.v]); });
+  };
+  el.querySelectorAll("#exFmt button").forEach((b) => b.onclick = () => { P.fmt = b.dataset.v; draw(); });
+  el.querySelectorAll("#exBits button").forEach((b) => b.onclick = () => { P.bits = +b.dataset.v; draw(); });
+  el.querySelectorAll("#exLoop button").forEach((b) => b.onclick = () => { P.loop = b.dataset.v; draw(); });
+  el.querySelectorAll("#exExtra button").forEach((b) => b.onclick = () => { P[b.dataset.v] = !P[b.dataset.v]; draw(); });
+  draw();
+  el.querySelector("#exCancel").onclick = () => Sheet.close();
+  const go = async () => {
+    const args = { format: P.fmt, bits: P.bits, loop: P.loop, normalize: P.norm, stems: P.stems, layers: P.layers, midi: P.midi };
     if ($("#exOut").value.trim()) args.out = $("#exOut").value.trim();
-    closeModal(); status("rendering…", "busy");
+    Sheet.close(true); status("rendering…", "busy");
     try { S.lastRender = await api("render", args); status("exported"); document.querySelector('#tabs button[data-tab="report"]').click(); }
     catch (e) { toast(e.message); status("render failed", "err"); }
   };
+  el.querySelector("#exGo").onclick = go;
+  el.querySelector(".sform").onsubmit = (e) => { e.preventDefault(); go(); };
 }
 
 loadState();

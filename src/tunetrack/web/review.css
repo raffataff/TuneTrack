@@ -1,0 +1,99 @@
+/* The review sheet (review.js): the Review seat's bench when a person sits there. The listening strip uses the
+   Desk's colours: a red playhead, a green loop; sections are quiet graphite and your findings are amber. */
+.benchBody:has(.rv) { max-height: 74vh; }
+.rv { display: grid; gap: 12px; container-type: inline-size; }
+.rv .id { font-family: var(--mono); color: var(--amber); font-weight: 400; }
+.rv kbd { font: 9.5px var(--mono); padding: 0 4px; border: 1px solid var(--line3); border-radius: 3px; color: var(--ink2); background: var(--face3); }
+.rv .bad { color: var(--red); }
+
+/* sent, and nothing to review */
+.rvSent { border: 1px solid var(--line); border-left: 2px solid var(--green); background: var(--face); border-radius: var(--r-s); padding: 8px 11px; }
+.rvSent p { margin: 6px 0 0; color: var(--ink2); }
+.rvSent b { font-weight: 600; color: var(--ink); }
+.rvDot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px rgba(79,220,132,.7); }
+.rvIdle { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; border: 1px solid var(--line); border-left: 2px solid var(--line3); background: var(--face); border-radius: var(--r-s); padding: 10px 12px; }
+.rvIdle h4 { margin: 4px 0 0; font-size: 13px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; }
+.rvIdle .meta { margin: 4px 0 0; }
+
+/* what you are asked */
+.rvAsk { display: grid; gap: 6px; }
+.rvAsk b { font-weight: 600; }
+.rvAsk p { margin: 0; color: var(--ink2); white-space: pre-wrap; overflow-wrap: anywhere; max-width: 110ch; }
+.rvBrief { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink2); }
+.rvBrief i { font: 9px var(--legend); letter-spacing: var(--legend-sp); text-transform: uppercase; font-style: normal; color: var(--muted); margin-right: 6px; }
+.rv p.rvWarn { color: var(--amber); border-left: 2px solid var(--amber); padding-left: 8px; font-size: 12px; }
+
+/* the listening strip */
+.rvDeck { display: grid; gap: 8px; background: var(--well); border: 1px solid #000; border-radius: var(--r-s); padding: 10px; box-shadow: inset 0 0 14px #000; }
+.rvPlay { min-width: 86px; }
+.rvPos { min-width: 132px; text-align: center; padding: 4px 8px; }
+.rvSec { font: 10px var(--legend); letter-spacing: var(--legend-sp); text-transform: uppercase; color: var(--amber); min-width: 4ch; }
+.rvVia { font: 9px var(--legend); letter-spacing: var(--legend-sp); color: var(--cyan); }
+.rvTl { position: relative; height: 64px; background: #060708; border: 1px solid #000; border-radius: 3px; overflow: hidden; cursor: crosshair; user-select: none; touch-action: none; }
+.rvTl .secs { position: absolute; left: 0; right: 0; top: 0; height: 18px; border-bottom: 1px solid #000; }
+.rvTl .sec { position: absolute; top: 0; bottom: 0; background: var(--face3); color: var(--ink2); font: 10px/18px var(--mono); font-style: normal; padding: 0 6px; border-left: 1px solid #000; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rvTl .sec:nth-child(even) { background: var(--face4); }
+.rvTl .sec.none { color: var(--dim); background: transparent; }
+.rvTl .lane { position: absolute; left: 0; right: 0; top: 19px; height: 30px; }
+.rvTl .loop { position: absolute; top: 0; bottom: 0; background: rgba(79,220,132,.06); border-top: 1px solid rgba(79,220,132,.35); border-bottom: 1px solid rgba(79,220,132,.35); }
+.rvTl .fl { position: absolute; top: 5px; bottom: 5px; min-width: 14px; background: rgba(255,178,36,.16); border: 1px solid rgba(255,178,36,.6); border-radius: 2px; color: var(--amber); font: 10px/18px var(--mono); font-style: normal; padding: 0 4px; cursor: pointer; overflow: hidden; }
+.rvTl .fl:hover { background: rgba(255,178,36,.3); }
+.rvTl .fl.blank { border-style: dashed; background: rgba(255,178,36,.06); }
+.rvTl .nums { position: absolute; left: 0; right: 0; bottom: 0; height: 14px; border-top: 1px solid #000; }
+.rvTl .nums span { position: absolute; top: 0; padding-left: 3px; border-left: 1px solid var(--line3); font: 9px/13px var(--mono); color: var(--dim); }
+.rvTl .sel { position: absolute; top: 19px; height: 30px; border: 1px dashed var(--amber); background: var(--amber-s); font: 9px/28px var(--legend); letter-spacing: var(--legend-sp); color: var(--amber); padding: 0 5px; white-space: nowrap; overflow: hidden; pointer-events: none; }
+.rvTl .ph { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -.5px; background: var(--red); box-shadow: 0 0 6px rgba(255,85,69,.6); pointer-events: none; }
+.rvHint { font-size: 11.5px; color: var(--dim); }
+
+/* the sheet beside what was measured */
+.rvGrid { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 16px; align-items: start; }
+@container (max-width: 780px) { .rvGrid { grid-template-columns: minmax(0, 1fr); } .rvSide { position: static; } }
+.rvSheet { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.rvH { display: flex; gap: 10px; align-items: baseline; margin-top: 4px; }
+.rvH .legend { color: var(--ink2); }
+.rvList { display: flex; flex-direction: column; gap: 6px; }
+.rvF { background: var(--face); border: 1px solid var(--line); border-left: 2px solid var(--amber); border-radius: var(--r-s); padding: 7px 9px 8px; }
+.rvF.blank { border-left-color: var(--line3); }
+.rvFh { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.rvN { font: 12px var(--mono); color: var(--amber); min-width: 16px; }
+.rvBars, .rvFor { display: inline-flex; gap: 5px; align-items: center; }
+.rvBars span, .rvFor span { font: 9px var(--legend); letter-spacing: var(--legend-sp); color: var(--muted); }
+.rvBars input { width: 66px; height: 22px; font: 12px var(--mono); }
+.rvBars.bad input { border-color: var(--red); }
+.rvFor select { height: 22px; max-width: 170px; }
+.rvTrk { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.rvF textarea { display: block; margin-top: 6px; min-height: 42px; line-height: 1.45; }
+.rvTracks { margin-top: 6px; }
+.rvTracks .chip { cursor: pointer; }
+.rvTracks .chip:hover { border-color: var(--line3); }
+.rvEarlier { border: 1px solid var(--line); border-left: 2px solid var(--cyan); background: var(--face); border-radius: var(--r-s); padding: 6px 10px 4px; }
+.rvE { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 5px 0; border-top: 1px solid var(--line); }
+.rvE .tx { color: var(--ink2); overflow-wrap: anywhere; }
+.rvE.fixed .tx { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--green); }
+.rvE.still .tx { color: var(--amber); }
+.rvE .seg button.on[data-e="fixed"] { color: var(--green); background: linear-gradient(#14261b, #0e1a13); }
+@container (max-width: 560px) { .rvE { grid-template-columns: 18px minmax(0, 1fr); } .rvE .meta, .rvE .seg { grid-column: 2; } }
+.rvSheet > textarea { min-height: 60px; line-height: 1.45; }
+.rvSend { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }
+.rvSend .legend { color: var(--ink2); }
+.rvRoute { margin: 0; color: var(--ink2); font-size: 12.5px; }
+.rvRoute b { color: var(--ink); font-weight: 600; }
+.rvSaved { margin-right: 4px; }
+.rvSide { position: sticky; top: 0; display: grid; gap: 8px; background: var(--face); border: 1px solid var(--line); border-radius: var(--r-s); padding: 10px 12px; }
+.rvSide .tag { justify-self: start; }
+.rvRead { display: flex; gap: 16px; }
+.rvRead span { font: 17px var(--mono); color: var(--vfd); text-shadow: 0 0 6px rgba(124,240,214,.25); }
+.rvRead i { display: block; font: 8.5px var(--legend); letter-spacing: var(--legend-sp); font-style: normal; color: var(--muted); text-shadow: none; }
+.rvLv { display: grid; gap: 3px; }
+.rvLv > div { display: grid; grid-template-columns: 88px minmax(0, 1fr) 38px; gap: 6px; align-items: center; font-size: 11px; }
+.rvLv span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); }
+.rvLv b { height: 6px; background: var(--well); border: 1px solid #000; border-radius: 1px; overflow: hidden; }
+.rvLv b i { display: block; height: 100%; }
+.rvLv em { font: 11px var(--mono); font-style: normal; color: var(--muted); text-align: right; }
+.rvWarnL { margin: 0; padding-left: 14px; color: var(--amber); font-size: 11.5px; }
+.rvWarnL li { margin-bottom: 2px; overflow-wrap: anywhere; }
+/* IT'S READY: the session measured now, and the final mix once it is sent */
+.rvChecks { display: block; margin-top: 6px; color: var(--ink2); }
+.rvChecks ul { margin: 4px 0 0; padding-left: 16px; color: var(--amber); }
+.rvChecks .ok { color: var(--green); }
+.rvSent p.rvFinal { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

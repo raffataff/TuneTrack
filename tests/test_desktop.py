@@ -75,6 +75,7 @@ def test_make_shortcut_command(monkeypatch, tmp_path):
     exe = Path(sys.executable)
     target = exe.with_name("pythonw.exe") if exe.with_name("pythonw.exe").exists() else exe
     assert f"$s.TargetPath = '{target}'" in script
+    assert f"$s.IconLocation = '{desktop.ICON},0'" in script and desktop.ICON.is_file()
     assert not lnk.exists()
 
 

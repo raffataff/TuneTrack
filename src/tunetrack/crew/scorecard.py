@@ -29,7 +29,7 @@ from ..model import _atomic_write
 _QUOTA = re.compile(r"usage limit|rate.?limit|too many requests|quota|\b429\b|out of credit|insufficient credit|billing", re.I)
 # metered: runs that reported tokens; priced: runs that reported dollars (cost_usd is kept beside the counts)
 _COUNTS = ("runs", "ok", "out_of_usage", "failed", "stopped", "tool_calls", "handed_in", "accepted", "first_time",
-           "returned", "tasks_done", "asked_you", "tokens", "metered", "priced")
+           "returned", "rejected", "tasks_done", "asked_you", "tokens", "metered", "priced")
 _WHO = ("runner", "model", "effort")
 _RUNNERS = ("claude", "codex", "kilo", "script")  # crew.runners.RUNNERS, without importing the launcher
 
@@ -51,11 +51,13 @@ def _with_cost(r: dict) -> dict:
     return r
 
 
-def _per_take(r: dict) -> str:
+def _per_take(r: dict, unit: bool = False) -> str:
+    """Cost per accepted take; unit=True names it ('/take', or '/task' for a seat that hands in no takes)."""
+    per = ("/take" if r.get("handed_in") else "/task") if unit else ""
     if "usd_per_take" in r:
-        return f"${r['usd_per_take']:.2f}"
+        return f"${r['usd_per_take']:.2f}{per}"
     if "tokens_per_take" in r:
-        return f"{r['tokens_per_take'] / 1000:.0f}k tok"
+        return f"{r['tokens_per_take'] / 1000:.0f}k tok{per}"
     return "-"
 
 
@@ -111,13 +113,15 @@ def crew_scorecard(session: str | None = None) -> dict:
                   "stopped" if err.startswith("it was stopped") else "failed"] += 1
         elif kind == "take" and seat in roles.ROLES:
             state = e.get("state")
-            if state == "submitted":
-                if e["id"] not in owner:
-                    owner[e["id"]] = (seat, who.get(seat) or "unknown")
-                    row(seat)["handed_in"] += 1
-            elif state in ("accepted", "returned") and e["id"] in owner:
+            if state in ("submitted", "rejected") and e["id"] not in owner:
+                # a take closed without ever being submitted still counts as handed in (and rejected)
+                owner[e["id"]] = (seat, who.get(seat) or "unknown")
+                row(seat)["handed_in"] += 1
+            if state in ("accepted", "returned", "rejected") and e["id"] in owner:
                 r = rows[owner[e["id"]]]
-                if state == "returned":
+                if state == "rejected":
+                    r["rejected"] += 1
+                elif state == "returned":
                     r["returned"] += 1
                     came_back.add(e["id"])
                 else:
@@ -140,19 +144,19 @@ def as_markdown(card: dict) -> str:
     run reported usage: cost per accepted take, or per finished task for a seat that hands in no takes."""
     cost = any(r.get("metered") or r.get("priced") for r in card["rows"])
     head = ("| Seat | Agent | Runs (ok) | Out of usage | Failed | Tool calls | Minutes | Takes in / accepted / first time "
-            "/ returned | Tasks done | Asked you |" + (" Per take |" if cost else ""))
+            "/ returned / rejected | Tasks done | Asked you |" + (" Cost per |" if cost else ""))
     lines = [head, "|" + "---|" * (11 if cost else 10)]
     for r in card["rows"]:
         lines.append(f"| {roles.get(r['seat']).title} | {r['agent']} | {r['runs']} ({r['ok']}) | {r['out_of_usage']} | "
                      f"{r['failed']} | {r['tool_calls']} | {r['minutes']} | {r['handed_in']} / {r['accepted']} / "
-                     f"{r['first_time']} / {r['returned']} | {r['tasks_done']} | {r['asked_you']} |"
-                     + (f" {_per_take(r)} |" if cost else ""))
+                     f"{r['first_time']} / {r['returned']} / {r.get('rejected', 0)} | {r['tasks_done']} | "
+                     f"{r['asked_you']} |" + (f" {_per_take(r, unit=True)} |" if cost else ""))
     t = card["totals"]
     spent = (f" Usage reported by {t['metered']} runs: {round(t['tokens'] / 1000)}k tokens"
              + (f", ${t['cost_usd']:.2f}" if t["priced"] else "") + "." if t["metered"] or t["priced"] else "")
     lines += ["", f"Totals: {t['runs']} runs ({t['ok']} ended ok, {t['out_of_usage']} out of usage, {t['failed']} failed), "
                   f"{t['tool_calls']} tool calls, {t['minutes']} minutes at work, {t['accepted']} of {t['handed_in']} "
-                  f"takes accepted ({t['first_time']} first time)." + spent]
+                  f"takes accepted ({t['first_time']} first time, {t['rejected']} rejected)." + spent]
     return "\n".join(lines)
 
 
@@ -295,7 +299,12 @@ def crew_review(session: str | None = None) -> dict:
             "keep or swap (and for what); the one thing that cost most, with the take or task; the one instruction "
             "that would have avoided it. Then the crew you would pick, one line per seat. Work from the counts and "
             "the returns above and from what you remember hearing: do not re-read every report and take, and do "
-            "not render again. Say \"cannot tell\" where you cannot. Nothing in talkback.", session=session)
+            "not render again. Say \"cannot tell\" where you cannot. Nothing in talkback.\n\n"
+            "Then keep what this session taught: each \"instruction that would have avoided it\" that holds beyond "
+            "this cue becomes a lesson for that seat - lessons(seat=\"composer\", add=[\"...\"]), seat=\"all\" for "
+            "the whole crew. One line each: the rule and why. lessons(seat) first shows what is there: remove "
+            "(by number) lines this session proved wrong or that a new line replaces. Nothing about one cue's "
+            "bars or tracks; no lesson at all is fine.", session=session)
         out["task"] = t["id"]
     else:
         out["note"] = "No agent sits in the Producer seat, so only the scorecard was filed."

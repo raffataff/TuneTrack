@@ -352,13 +352,24 @@ def _time_stretch(src: np.ndarray, sr: int, segs: list[tuple[int, float]], pitch
     return out
 
 
+def _stretch_key(c, f: Path, tm, sr: int) -> str:
+    """The cache key of a stretched audio clip (cache/stretch-<key>.wav)."""
+    import pedalboard
+    span = int(round((tm.sec(c.end) - tm.sec(c.start)) * sr))
+    src_len, segs = _stretch_plan(c, tm, sr)
+    st = f.stat()
+    return hashlib.sha1(json.dumps({"file": str(f.resolve()), "mtime": st.st_mtime_ns, "size": st.st_size,
+                                    "offset": c.offset, "src": src_len, "bpm": c.bpm, "pitch": c.pitch, "sr": sr,
+                                    "segs": segs, "span": span, "pedalboard": pedalboard.__version__, "v": 1},
+                                   sort_keys=True).encode()).hexdigest()[:20]
+
+
 def _stretched_clip(p: Project, c, f: Path, tm, sr: int) -> np.ndarray | None:
     """An audio clip with `bpm` (follows the tempo map) and/or `pitch` (semitones), fitted to its song span,
     before gain and fades. Stretched audio is cached as cache/stretch-<key>.wav. None: nothing to play."""
     import os
     import uuid
 
-    import pedalboard
     span = int(round((tm.sec(c.end) - tm.sec(c.start)) * sr))
     if span <= 0:
         return None
@@ -370,12 +381,7 @@ def _stretched_clip(p: Project, c, f: Path, tm, sr: int) -> np.ndarray | None:
             y = np.pad(y, ((0, 0), (0, span - y.shape[1])))
         return np.ascontiguousarray(y[:, :span], dtype=np.float32)
 
-    st = f.stat()
-    key = hashlib.sha1(json.dumps({"file": str(f.resolve()), "mtime": st.st_mtime_ns, "size": st.st_size,
-                                   "offset": c.offset, "src": src_len, "bpm": c.bpm, "pitch": c.pitch, "sr": sr,
-                                   "segs": segs, "span": span, "pedalboard": pedalboard.__version__, "v": 1},
-                                  sort_keys=True).encode()).hexdigest()[:20]
-    out = p.root / "cache" / f"stretch-{key}.wav"
+    out = p.root / "cache" / f"stretch-{_stretch_key(c, f, tm, sr)}.wav"
     if not passthrough and out.exists():
         try:
             return fit(sf.read(str(out), dtype="float32", always_2d=True)[0].T)

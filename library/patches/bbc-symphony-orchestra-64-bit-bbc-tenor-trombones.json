@@ -1,0 +1,29 @@
+{
+ "id": "bbc-symphony-orchestra-64-bit-bbc-tenor-trombones",
+ "name": "BBC Tenor Trombones",
+ "plugin": "BBC Symphony Orchestra (64 Bit)",
+ "kind": "instrument",
+ "tags": [
+  "brass",
+  "trombone",
+  "trombones",
+  "orchestral",
+  "bbc"
+ ],
+ "description": "BBC SO Discover Tenor Trombones a3, all articulations",
+ "state": "bbc-symphony-orchestra-64-bit-bbc-tenor-trombones.state",
+ "created": "2026-11-18 15:43",
+ "param_count": 2126,
+ "role": "brass",
+ "dynamics_cc": 1,
+ "audition": {
+  "instrument": "BBC Symphony Orchestra (64 Bit) [bbc-symphony-orchestra-64-bit-bbc-tenor-trombones]",
+  "phrase": "chords",
+  "peak_dbfs": 0.1,
+  "rms_dbfs": -17.4,
+  "warnings": [],
+  "silent": false,
+  "brightness_hz": 535,
+  "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\bbc-symphony-orchestra-64-bit-bbc-symphony-orchestra-64-bit-.wav"
+ }
+}
