@@ -13,6 +13,8 @@ window.TTLinks = (() => {
   const STATE = { queued: "#3f7a98", working: "#5cc8ff", submitted: "#4fdc84", needs_you: "#ff5545" };
   const KIND = { talk: "#ffb224", task: "#5cc8ff", take: "#4fdc84", need: "#ff5545" };
   const SAID = { queued: "queued", working: "working", submitted: "handed in, waiting for review", needs_you: "waiting on you" };
+  const motionOff = () => document.documentElement.dataset.motion === "off";
+  const digital = () => document.documentElement.dataset.wiring === "digital";
   const still = matchMedia("(prefers-reduced-motion: reduce)");
   let svg = null, gCab, gJack, gPk, board = null, geo = null, sig = "", first = true, raf = 0;
   const cabs = new Map(), jacks = new Map();
@@ -79,6 +81,11 @@ window.TTLinks = (() => {
   // seat to seat: out over the rail, a loop through the gutter, back in to the other jack
   function loop(a, b, lane, hitOnly) {
     const A = geo.at[a], B = geo.at[b], d = geo.dir, x = geo.g0, k = bulge(lane) / 0.75, sag = Math.min(14, Math.abs(B.y - A.y) * 0.05);
+    if (digital()) {
+      const laneX = x + d * bulge(lane), turn = Math.min(7, Math.abs(B.y - A.y) / 4), sign = Math.sign(B.y - A.y);
+      const trace = `H${laneX - d * turn} L${laneX} ${A.y + sign * turn} V${B.y - sign * turn} L${laneX - d * turn} ${B.y} H${x}`;
+      return hitOnly ? `M${x} ${A.y} ${trace}` : `M${A.x} ${A.y} H${x} ${trace} H${B.x}`;
+    }
     const c = `C${x + d * k} ${A.y + sag} ${x + d * k} ${B.y + sag} ${x} ${B.y}`;
     return hitOnly ? `M${x} ${A.y} ${c}` : `M${A.x} ${A.y} H${x} ${c} H${B.x}`;
   }
@@ -105,7 +112,7 @@ window.TTLinks = (() => {
     geo = measure();
     const want = wanted(), list = [...want.values()];
     lanes(list);
-    const s = JSON.stringify([geo.dir, Math.round(geo.g0), Math.round(geo.g1), geo.order.map((id) => [id, Math.round(geo.at[id].x), Math.round(geo.at[id].y)]),
+    const s = JSON.stringify([digital(), geo.dir, Math.round(geo.g0), Math.round(geo.g1), geo.order.map((id) => [id, Math.round(geo.at[id].x), Math.round(geo.at[id].y)]),
       list.map((c) => [c.key, c.from, c.state, c.lane, c.tasks.map((t) => t.id + t.state + t.title).join()])]);
     if (s === sig) return;
     sig = s;
@@ -134,7 +141,7 @@ window.TTLinks = (() => {
       el.querySelector(".hit").addEventListener("click", () => api.onOpen && api.onOpen(el.dataset.to));
       el.busy = 0;
       cabs.set(c.key, el);
-      if (!first && !still.matches) plugIn(el, c);
+      if (!first && !still.matches && !motionOff()) plugIn(el, c);
     }
     el.dataset.from = c.from; el.dataset.to = c.to; el.unplug = false;
     el.style.setProperty("--c", STATE[c.state]);
@@ -198,7 +205,7 @@ window.TTLinks = (() => {
       if (ghost) { ghost.classList.add("gone"); setTimeout(() => ghost.remove(), 850); }
     };
     if (el) lit(el, true);
-    if (still.matches || gPk.childElementCount > 16) { setTimeout(() => { arrive(); done(); }, 300); return; }
+    if (still.matches || motionOff() || gPk.childElementCount > 16) { setTimeout(() => { arrive(); done(); }, 300); return; }
     const len = path.getTotalLength(), dur = Math.min(1500, 420 + len * 1.3), box = kind === "take", tail = 7;
     const g = mk("g", { class: "pk" }, gPk); g.style.setProperty("--c", col);
     const dots = [0, 1, 2, 3].map((i) => box
@@ -252,6 +259,7 @@ window.TTLinks = (() => {
   }
   function reset() { if (svg) clear(); first = true; }
 
+  addEventListener("tt-appearance", soon);
   const api = { draw, events, pulse, broadcast, reset, onOpen: null };
   return api;
 })();

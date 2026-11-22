@@ -13,7 +13,7 @@ const DESK_TAB = { plan: "brief", picture: "brief", notes: "roll", sound: "inspe
 const OPEN_STATES = ["queued", "working", "submitted", "needs_you"];
 const ST = {
   board: null, crew: null, project: null, open: null, tab: {}, units: {}, act: {}, feed: [], lastSeq: 0, es: null,
-  target: "producer", wake: true, talkOnly: false, diffs: {}, agents: null, tickets: {}, benchSig: {}, bench: {},
+  target: "producer", wake: true, talkOnly: false, diffs: {}, agents: null, benchSig: {}, bench: {},
 };
 const AB = { el: new Audio(), key: null, cache: {} };
 const store = {
@@ -50,10 +50,10 @@ async function call(fn, args, busy) {
 function seatAct(id) { return ST.act[id] || (ST.act[id] = { lines: [], hits: [], last: "", started: null }); }
 const isLong = (html) => html.length > 340 || (html.match(/\n/g) || []).length > 3;  // folded in the log; click to read
 function line(seat, at, cls, html, plain) {
-  const a = seatAct(seat); a.lines.push({ at, cls: cls + (isLong(html) ? " long" : ""), html }); if (a.lines.length > 300) a.lines.splice(0, 100);
+  const a = seatAct(seat); a.lines.push({ at, seat, cls: cls + (isLong(html) ? " long" : ""), html }); if (a.lines.length > 300) a.lines.splice(0, 100);
   if (plain) a.last = plain;
 }
-function feed(at, cls, html) { ST.feed.push({ at, cls: cls + (isLong(html) ? " long" : ""), html }); if (ST.feed.length > 500) ST.feed.splice(0, 150); }
+function feed(at, cls, html, seat = "") { ST.feed.push({ at, seat, cls: cls + (isLong(html) ? " long" : ""), html }); if (ST.feed.length > 500) ST.feed.splice(0, 150); }
 // Whatever was said in full: older events carry a shortened copy, the board keeps the whole message.
 const fullText = (e) => { const m = e.id && ST.board && ST.board.messages.find((x) => x.id === e.id); return (m && m.text) || e.text || ""; };
 document.addEventListener("click", (ev) => {
@@ -69,34 +69,34 @@ function ingest(events) {
     const who = e.seat ? `<b>${esc(title(e.seat))}</b>` : "";
     if (e.kind === "run") {
       const a = seatAct(e.seat);
-      if (e.what === "start") { a.started = e.at; a.hits = []; line(e.seat, e.at, "note", `run starts on ${esc(e.task)} · ${esc(e.agent || "")}${e.take ? " · take " + esc(e.take) : ""}`, "starting…"); feed(e.at, "", `${who} starts ${esc(e.task)}${e.take ? " in " + esc(e.take) : ""}`); }
+      if (e.what === "start") { a.started = e.at; a.hits = []; line(e.seat, e.at, "note", `run starts on ${esc(e.task)} · ${esc(e.agent || "")}${e.take ? " · take " + esc(e.take) : ""}`, "starting…"); feed(e.at, "", `${who} starts ${esc(e.task)}${e.take ? " in " + esc(e.take) : ""}`, e.seat || e.sender || e.from || ""); }
       else if (e.what === "tool") { a.hits.push(e.at); line(e.seat, e.at, "tool", `› <b>${esc(e.tool)}</b>`, "› " + e.tool); }
       else if (e.what === "says") line(e.seat, e.at, "say", esc(e.text), e.text.replace(/\s+/g, " "));
-      else if (e.what === "end") { a.started = null; line(e.seat, e.at, e.ok ? "good" : "bad", e.ok ? `run ended · ${e.tools} tool calls` : `run ended early: ${esc(e.error || "no reason given")}`, e.ok ? "run ended" : "ended early: " + (e.error || "")); feed(e.at, e.ok ? "" : "bad", `${who} ${e.ok ? "finished its run" : "stopped early: " + esc(e.error || "no reason given")}`); }
+      else if (e.what === "end") { a.started = null; line(e.seat, e.at, e.ok ? "good" : "bad", e.ok ? `run ended · ${e.tools} tool calls` : `run ended early: ${esc(e.error || "no reason given")}`, e.ok ? "run ended" : "ended early: " + (e.error || "")); feed(e.at, e.ok ? "" : "bad", `${who} ${e.ok ? "finished its run" : "stopped early: " + esc(e.error || "no reason given")}`, e.seat || e.sender || e.from || ""); }
     } else if (e.kind === "task") {
       const t = `${esc(e.id)} “${esc(e.title)}” → ${esc(String(e.state).replace("_", " "))}${e.reason ? " (" + esc(e.reason) + ")" : ""}`;
       line(e.seat, e.at, e.state === "done" ? "good" : e.state === "needs_you" ? "note" : "", t);
-      feed(e.at, e.state === "needs_you" ? "note" : "", `${who} ${t}`);
+      feed(e.at, e.state === "needs_you" ? "note" : "", `${who} ${t}`, e.seat || e.sender || e.from || "");
     } else if (e.kind === "take") {
       const t = `take ${esc(e.id)} ${esc(e.state)}${e.summary ? ": " + esc(e.summary) : ""}${e.reason ? ": " + esc(e.reason) : ""}`;
       if (e.seat) line(e.seat, e.at, e.state === "accepted" ? "good" : e.state === "returned" ? "note" : "", t);
-      feed(e.at, e.state === "accepted" ? "good" : "", `${who} ${t}`);
+      feed(e.at, e.state === "accepted" ? "good" : "", `${who} ${t}`, e.seat || e.sender || e.from || "");
       delete ST.diffs[e.id]; delete AB.cache[e.id];
     } else if (e.kind === "message") {
       const text = fullText(e);
-      feed(e.at, "say" + (e.sender === "you" ? " you" : ""), `<i>${esc(title(e.sender))} → ${esc(title(e.to))}</i>  ${esc(text)}`);
+      feed(e.at, "say" + (e.sender === "you" ? " you" : ""), `<i>${esc(title(e.sender))} → ${esc(title(e.to))}</i>  ${esc(text)}`, SHORT[e.sender] ? e.sender : e.to);
       for (const s of [e.sender, e.to]) if (SHORT[s]) line(s, e.at, "say", `<i>${esc(title(e.sender))} → ${esc(title(e.to))}:</i> ${esc(text)}`);
       if (window.Voice) window.Voice.heard(e, text, title(e.sender));  // voice.js reads new ones aloud (old history too comes through here)
     } else if (e.kind === "attention") {
-      feed(e.at, e.state === "open" ? "note" : "", e.state === "open" ? `Needs you: ${esc(e.title)}` : `Answered: ${esc(e.title)}${e.answer ? " → " + esc(e.answer) : ""}`);
+      feed(e.at, e.state === "open" ? "note" : "", e.state === "open" ? `Needs you: ${esc(e.title)}` : `Answered: ${esc(e.title)}${e.answer ? " → " + esc(e.answer) : ""}`, e.seat || e.sender || e.from || "");
     } else if (e.kind === "report") {
       const t = `filed a ${esc(e.what || "report")}: <u data-report="${esc(e.id)}" title="Read it">${esc(e.title)}</u>`;
-      feed(e.at, "good", `<b>${esc(title(e.sender))}</b> ${t}`);
+      feed(e.at, "good", `<b>${esc(title(e.sender))}</b> ${t}`, e.seat || e.sender || e.from || "");
       if (SHORT[e.sender]) line(e.sender, e.at, "good", t);
     } else if (e.kind === "crew") {
-      feed(e.at, e.error ? "bad" : "note", e.what === "start" ? "Crew running" : `Crew stopped${e.error ? ": " + esc(e.error) : ""}`);
+      feed(e.at, e.error ? "bad" : "note", e.what === "start" ? "Crew running" : `Crew stopped${e.error ? ": " + esc(e.error) : ""}`, e.seat || e.sender || e.from || "");
     } else if (e.kind === "seat") {
-      feed(e.at, "", `${who} seat: ${esc(e.occupant)}${e.paused ? " · on hold" : ""}`);
+      feed(e.at, "", `${who} seat: ${esc(e.occupant)}${e.paused ? " · on hold" : ""}`, e.seat || e.sender || e.from || "");
     }
   }
   // the open seat's bench follows its work: every tool call may have changed what it shows
@@ -152,6 +152,7 @@ function renderHeader() {
   const reps = ST.board ? (ST.board.reports || []).length : 0;
   $("#repBtn").textContent = reps ? `REPORTS ${reps}` : "REPORTS"; $("#repBtn").classList.toggle("on", reps > 0); $("#repBtn").disabled = !ST.board;
   $("#needs h2 .lamp").className = "lamp" + (n ? " red blink" : "");
+  if (window.TTNeeds) { TTNeeds.renderInvolve(); TTNeeds.update(); }  // the INVOLVE key, and the sheet if it is open
 }
 $("#crewBtn").onclick = async () => {
   if (ST.crew && ST.crew.running) { await call("crew_stop", {}, "stopping the crew…"); return; }
@@ -187,7 +188,7 @@ function openBrief() {
     await call("crew_start", { brief, parallel: +$("#brPar").value || 3, max_runs: +$("#brMax").value || 40 }, "starting the crew…");
   };
 }
-$("#needsBtn").onclick = () => { setRoom("studio"); $("#needs").scrollIntoView({ block: "nearest" }); const f = $("#needsList .key"); if (f) f.focus(); };
+$("#needsBtn").onclick = () => { if (window.TTNeeds) TTNeeds.open(); };
 function setRoom(room) {
   document.body.dataset.room = room; store.set("room", room);
   document.querySelectorAll("#rooms button").forEach((b) => b.classList.toggle("active", b.dataset.room === room));
@@ -199,15 +200,22 @@ const ROOMS = ["studio", "desk", "mix", "cables"];
 document.querySelectorAll("#rooms button").forEach((b) => b.onclick = () => setRoom(b.dataset.room));
 
 // ---------------------------------------------------------------- the rack
+const SIGN_TIP = {
+  producer: "Co-Producer: the Producer's decisions on takes, and the plans it hands out, wait for your OK",
+  review: "Sign off: the fix tasks Review files wait for your OK",
+  take: "Sign off: this seat's hand-ins stop at you before the Producer hears them",
+};
 function seatState(s) {
   const run = ST.crew && ST.crew.active && ST.crew.active[s.seat], t = taskOf(s.task), kind = s.occupant && s.occupant.kind;
   if (run) return ["working", "amber pulse", "WORKING"];
+  if (ST.board.needs_you.some((a) => a.from === s.seat && a.kind !== "blocker")) return ["needs", "amber blink", "WAITS ON YOU"];
   if (t && t.state === "needs_you") return ["needs", "red blink", "NEEDS YOU"];
   if (!s.occupant) return t ? ["needs", "red", "NO ONE SEATED"] : ["vacant", "", "VACANT"];
   if (s.paused) return ["hold", "dimamber", "ON HOLD"];
   if (t && t.state === "submitted") return ["handed", "cyan", "TAKE HANDED IN"];
   if (t && t.state === "working") return ["working", kind === "agent" ? "dimamber" : "amber", kind === "human" ? "YOU · WORKING" : "WORKING"];
   if (t && t.state === "queued") {
+    if (t.held) return ["queued", "dimamber", "WAITS ON YOUR OK"];
     if (t.waiting_for) return ["queued", "dimamber", "WAITS ON " + t.waiting_for.join(" ")];  // not your move yet either
     if (kind === "human") return ["yours", "amber blink", "YOUR MOVE"];
     if (t.not_before) return ["queued", "dimamber", "TRIES AGAIN " + new Date(t.not_before * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })];
@@ -226,7 +234,7 @@ function buildUnits() {
         <div class="lampcol"><i class="lamp"></i><span class="state"></span></div>
         <div class="vfd screen" title="Open this seat"><div class="l1"><span class="occ"></span><span class="clk dimv"></span></div><div class="l2"></div><div class="l3"></div></div>
         <div class="meter" title="Activity: tool calls in the last half minute">${"<i></i>".repeat(12)}</div>
-        <div class="keys"><button class="key" data-k="seat" title="Choose who sits here">SEAT</button><button class="key toggle" data-k="hold" title="Hold this seat: stop its agent and start nothing new until released">HOLD</button><button class="key toggle" data-k="open" title="Open this seat's workstation">OPEN</button></div>
+        <div class="keys"><button class="key" data-k="seat" title="Choose who sits here">SEAT</button><button class="key toggle" data-k="hold" title="Hold this seat: stop its agent and start nothing new until released">HOLD</button><button class="key toggle sign" data-k="sign">SIGN OFF</button><button class="key toggle" data-k="open" title="Open this seat's workstation">OPEN</button></div>
         <div class="ear"><i class="screw" style="--r:${(s.seat.length * 53) % 180}deg"></i><i class="screw" style="--r:${(s.seat.length * 19) % 180}deg"></i></div>
       </div>
       <div class="bench hidden"><div class="tabsB">${TABS.map((t) => `<button data-tab="${t}">${t === "bench" ? BENCH_NAME[VIEW[s.seat]] : t}</button>`).join("")}<span class="purpose"></span></div><div class="benchBody"></div></div>
@@ -234,6 +242,7 @@ function buildUnits() {
     const q = (sel) => u.querySelector(sel);
     q('[data-k="seat"]').onclick = () => openSeatPicker(s.seat);
     q('[data-k="hold"]').onclick = () => { const cur = seatOf(s.seat); call("seat_hold", { seat: s.seat, paused: !cur.paused }); };
+    q('[data-k="sign"]').onclick = async () => { const cur = seatOf(s.seat), r = await call("seat_signoff", { seat: s.seat, on_: !cur.signoff }); if (r && r.note) toast(r.note, true); };
     const toggle = () => { ST.open = ST.open === s.seat ? null : s.seat; store.set("open", ST.open || ""); renderUnits(); if (ST.open) u.scrollIntoView({ block: "nearest", behavior: "smooth" }); };
     q('[data-k="open"]').onclick = toggle; q(".screen").onclick = toggle;
     u.querySelectorAll(".tabsB button").forEach((b) => b.onclick = () => { ST.tab[s.seat] = b.dataset.tab; delete ST.benchSig[s.seat]; renderUnits(); });
@@ -250,11 +259,14 @@ function renderUnits() {
   for (const s of ST.board.seats) {
     const u = ST.units[s.seat], q = (sel) => u.querySelector(sel), [state, lamp, label] = seatState(s), t = taskOf(s.task), a = seatAct(s.seat);
     u.dataset.state = state; u.classList.toggle("vacant", !s.occupant); u.classList.toggle("open", ST.open === s.seat);
-    q(".lamp").className = "lamp " + lamp; q(".state").textContent = label; q(".state").title = label;
+    q(".lamp").className = "lamp " + lamp; q(".state").textContent = ({ handed: "HANDED IN", queued: "WAITING", needs: "NEEDS YOU", yours: "YOUR MOVE" })[state] || label; q(".state").title = label; q(".lampcol").setAttribute("aria-label", label); q(".lampcol").title = label;
     q(".occ").innerHTML = s.occupant ? esc((s.label || s.occupant.kind).toUpperCase()) : `<span class="dimv">— VACANT —</span>`;
     q(".l2").innerHTML = t ? `<span class="amb">${esc(t.id)}</span> ${esc(t.title)}${s.open_tasks > 1 ? ` <span class="dimv">+${s.open_tasks - 1}</span>` : ""}` : `<span class="dimv">no open tasks</span>`;
     q(".l3").textContent = s.occupant ? (a.last || "·") : s.purpose;
     q('[data-k="hold"]').classList.toggle("on", s.paused); q('[data-k="hold"]').disabled = !s.occupant || s.occupant.kind !== "agent";
+    const sk = q('[data-k="sign"]'), mine = s.occupant && s.occupant.kind === "human";
+    sk.classList.toggle("on", !!s.signoff); sk.disabled = mine;
+    sk.title = mine ? "You sit here: your own work needs no sign-off" : SIGN_TIP[s.seat] || SIGN_TIP.take;
     q('[data-k="open"]').classList.toggle("on", ST.open === s.seat);
     const bt = q('.tabsB [data-tab="bench"]'); if (bt.textContent !== benchName(s)) bt.textContent = benchName(s);
     q(".bench").classList.toggle("hidden", ST.open !== s.seat);
@@ -400,6 +412,11 @@ LAYOUT_KEY.onclick = (e) => {
     [L.side === "left" ? "Side column on the right" : "Side column on the left", set(() => { L.side = L.side === "left" ? "right" : "left"; })],
     ["Reset layout", set(() => setLayout(null))]]);
 };
+window.TTStudioLayout = {
+  get: () => structuredClone(L),
+  set: (v) => { setLayout({ ...L, ...v }); saveLayout(); relayout(); },
+  reset: () => { setLayout(null); saveLayout(); relayout(); },
+};
 applySide();
 api("ui_prefs", {}, null).then((p) => { setLayout(p && p.studio_layout); relayout(); }).catch(() => { /* defaults */ });
 
@@ -524,17 +541,17 @@ function workRoll(box, d, B, s) {
   g.fillStyle = "#07090a"; g.fillRect(0, 0, W, H);
   for (let p = lo; p <= hi; p++) {
     if ([1, 3, 6, 8, 10].includes(p % 12)) { g.fillStyle = "rgba(255,255,255,.022)"; g.fillRect(GUT, Y(p), W, rh); }
-    if (p % 12 === 0) { g.fillStyle = "#1e2422"; g.fillRect(GUT, Y(p) + rh - 1, W, 1); g.fillStyle = "#5a564d"; g.font = "9px Consolas, monospace"; g.fillText(noteName(p), 6, Y(p) + rh); }
+    if (p % 12 === 0) { g.fillStyle = "#1e2422"; g.fillRect(GUT, Y(p) + rh - 1, W, 1); g.fillStyle = "#5a564d"; g.font = `9px ${MONO}`; g.fillText(noteName(p), 6, Y(p) + rh); }
   }
   if (f.loop) { g.fillStyle = "rgba(95,224,122,.5)"; g.fillRect(X(f.loop.start), 0, X(f.loop.end) - X(f.loop.start), 2); }
   const barW = X(f.bpb) - X(0), every = barW >= 26 ? 1 : barW >= 13 ? 2 : 4;
-  g.font = "9px Consolas, monospace";
+  g.font = `9px ${MONO}`;
   for (let b = 0, bar = 0; b <= end + 1e-6; b += f.bpb, bar++) {
     g.fillStyle = bar % 4 ? "#141918" : "#232a28"; g.fillRect(Math.round(X(b)), 14, 1, H);
     if (bar % every === 0 && b < end) { g.fillStyle = "#5a564d"; g.fillText(bar + 1, X(b) + 3, 11); }
   }
-  for (const m of f.markers) { g.fillStyle = "#ffb000"; g.fillRect(Math.round(X(m.at)), 0, 1, H); g.font = "9px Bahnschrift, 'Segoe UI', sans-serif"; g.fillText(String(m.name).toUpperCase(), X(m.at) + 16, 11); }
-  g.font = "10px Consolas, monospace";
+  for (const m of f.markers) { g.fillStyle = "#ffb000"; g.fillRect(Math.round(X(m.at)), 0, 1, H); g.font = `9px ${LEGEND}`; g.fillText(String(m.name).toUpperCase(), X(m.at) + 16, 11); }
+  g.font = `10px ${MONO}`;
   for (const c of f.chords) { g.fillStyle = "#0d1614"; g.fillRect(X(c.at) + 1, 17, X(c.at + c.len) - X(c.at) - 2, 14); g.fillStyle = "#74f0d6"; g.fillText(c.name, X(c.at) + 5, 28); }
   for (const { t, col } of vis) {
     for (const n of t.notes || []) {
@@ -549,8 +566,8 @@ function workRoll(box, d, B, s) {
   let py = TOP + rows * rh + 10;
   for (const { t, col, ps } of passT) {
     g.fillStyle = "#1e2422"; g.fillRect(GUT, py - 2, W - GUT, 1);
-    g.fillStyle = "#8f897c"; g.font = "9px Bahnschrift, 'Segoe UI', sans-serif"; g.fillText(String(t.name).toUpperCase() + " · PASSES", GUT + 2, py + 8);
-    py += 11; g.font = "8px Consolas, monospace";
+    g.fillStyle = "#8f897c"; g.font = `9px ${LEGEND}`; g.fillText(String(t.name).toUpperCase() + " · PASSES", GUT + 2, py + 8);
+    py += 11; g.font = `8px ${MONO}`;
     for (const p of ps) {
       g.fillStyle = "#5a564d"; g.fillText("P" + p, 6, py + PR - 1);
       g.fillStyle = col;
@@ -559,7 +576,7 @@ function workRoll(box, d, B, s) {
     }
     py += 2;
   }
-  if (!vis.some((x) => (x.t.notes || []).length) && !passT.length) { g.fillStyle = "#5a564d"; g.font = "12px 'Segoe UI', sans-serif"; g.fillText(parts.length ? "Nothing written yet." : "No tracks yet.", GUT + 14, TOP + 26); }
+  if (!vis.some((x) => (x.t.notes || []).length) && !passT.length) { g.fillStyle = "#5a564d"; g.font = `12px ${UI_FONT}`; g.fillText(parts.length ? "Nothing written yet." : "No tracks yet.", GUT + 14, TOP + 26); }
 }
 // Mix: the console (console.js). The bench shows the Mix seat's take, else the session, and every edit goes there;
 // a take shows each moved control next to where it was.
@@ -600,7 +617,7 @@ function workPlan(box, d) {
     <div class="tl">${lane("FORM", sect.map((m) => `<i class="sec" style="left:${pct(m.at)};width:${pct(m.to - m.at)}">${esc(m.name)} <span>${Math.round(m.at / f.bpb) + 1}</span></i>`).join("") || `<span class="meta">no sections marked yet</span>`)}
       ${lane("CHORDS", f.chords.map((c) => `<i class="chd" style="left:${pct(c.at)};width:${pct(c.len)}">${esc(c.name)}</i>`).join("") || `<span class="meta">no chord track yet</span>`)}
       ${d.tracks.map((t, i) => lane(esc(t.name), t.clips.map((c) => `<i class="clp" style="left:${pct(c[0])};width:${pct(c[1])};background:${trackColor(t, i)}"></i>`).join("") || (t.kind === "bus" ? `<span class="meta">bus</span>` : `<span class="meta">nothing written</span>`), t.clips.length || t.kind === "bus" ? "" : "bare")).join("")}</div>
-    <div class="flow">${tasks.map((t) => `<div class="fl ${OPEN_STATES.includes(t.state) ? "" : "done"}"><span class="id">${esc(t.id)}</span><span class="st">${SHORT[t.seat] || esc(t.seat)}</span><span class="ti" title="${esc(t.detail || "")}">${esc(t.title)}</span>${(t.depends || []).length ? `<span class="dep">after ${esc(t.depends.join(" "))}</span>` : ""}<span class="tag ${TAG[t.state] || ""}">${esc(t.state.replace("_", " "))}</span></div>`).join("") || `<div class="empty">No tasks yet. BRIEF starts the session.</div>`}</div>`;
+    <div class="flow">${tasks.map((t) => `<div class="fl ${OPEN_STATES.includes(t.state) ? "" : "done"}"><span class="id">${esc(t.id)}</span><span class="st">${SHORT[t.seat] || esc(t.seat)}</span><span class="ti" title="${esc(t.detail || "")}">${esc(t.title)}</span>${(t.depends || []).length ? `<span class="dep">after ${esc(t.depends.join(" "))}</span>` : ""}${t.held ? `<span class="tag stale">your OK</span>` : ""}<span class="tag ${TAG[t.state] || ""}">${esc(t.state.replace("_", " "))}</span></div>`).join("") || `<div class="empty">No tasks yet. BRIEF starts the session.</div>`}</div>`;
 }
 // Spotting: the picture as the music meets it. A timeline (film strip, cuts, loud production sound, bars, hits),
 // then the cue sheet with a frame per hit, the cuts and the stills. Read-only: hits are marked on the Desk.
@@ -656,14 +673,14 @@ function workPicture(box, d, B, s) {
       g.fillStyle = "rgba(255,255,255,.8)";
       for (const [t] of P.cuts) { g.fillRect(Math.round(X(t)), SY - 3, 1, 5); g.fillRect(Math.round(X(t)), SY + SH - 2, 1, 5); }
     }
-    g.font = "9px Consolas, monospace"; g.textBaseline = "alphabetic";
+    g.font = `9px ${MONO}`; g.textBaseline = "alphabetic";
     const barW = P.bars.length > 1 ? X(P.bars[1][0]) - X(P.bars[0][0]) : W, every = barW >= 22 ? 1 : barW >= 11 ? 2 : barW >= 5 ? 4 : 8;
     for (const [t, n] of P.bars) {
       g.fillStyle = (n - 1) % 4 ? "rgba(255,255,255,.08)" : "rgba(255,255,255,.16)"; g.fillRect(Math.round(X(t)), 12, 1, H - 12);
       if ((n - 1) % every === 0) { g.fillStyle = "#5a564d"; g.fillText(n, X(t) + 3, 10); }
     }
     // hits: a line down the whole timeline, the label in the first row it fits in
-    g.font = "10px Consolas, monospace"; g.textBaseline = "top";
+    g.font = `10px ${MONO}`; g.textBaseline = "top";
     const ends = new Array(LAB).fill(-1e9), LY = SY + SH + 9;
     for (const [h, gone] of [...P.hits.map((x) => [x, false]), ...(P.gone || []).map((x) => [x, true])]) {
       const x = Math.round(X(h.t)), col = gone ? "#ff4a3a" : h.on ? "#5fe07a" : h.soft ? "#b98a2c" : "#ffb000";
@@ -710,7 +727,7 @@ function benchTasks(body, s, tasks) {
   // a take that was sent back: whoever sits here reads why on the task itself, not in the log
   const cameBack = (t) => { const k = t.take && ST.board.takes.find((x) => x.id === t.take && x.state === "open" && x.returns && x.reason); return k ? `<p class="back"><b>${esc(k.id.toUpperCase())} came back${k.returns > 1 ? ` (${k.returns}×)` : ""}:</b> ${esc(k.reason)}</p>` : ""; };
   const card = (t) => `<div class="item ${OPEN_STATES.includes(t.state) ? "hot" : "done"}" data-task="${esc(t.id)}">
-      <h4><span class="id">${esc(t.id)}</span>${esc(t.title)}<span class="tag ${TAG[t.state] || ""}">${esc(t.state.replace("_", " "))}</span>${t.waiting_for ? `<span class="tag">after ${esc(t.waiting_for.join(", "))}</span>` : ""}${t.take ? `<span class="tag cy">${esc(t.take)}</span>` : ""}</h4>
+      <h4><span class="id">${esc(t.id)}</span>${esc(t.title)}<span class="tag ${TAG[t.state] || ""}">${esc(t.state.replace("_", " "))}</span>${t.held ? `<span class="tag stale" title="Part of a plan waiting for your OK on Needs You">YOUR OK</span>` : ""}${t.options ? `<span class="tag" title="The seat hands in this many versions and you choose">${t.options} VERSIONS</span>` : ""}${t.waiting_for ? `<span class="tag">after ${esc(t.waiting_for.join(", "))}</span>` : ""}${t.take ? `<span class="tag cy">${esc(t.take)}</span>` : ""}</h4>
       ${t.detail ? `<p>${esc(t.detail)}</p>` : ""}${t.result ? `<p class="meta">Result: ${esc(t.result)}</p>` : ""}${cameBack(t)}
       <div class="row" style="margin-top:8px">${OPEN_STATES.includes(t.state)
         ? `${byTake && t.state !== "submitted" && !t.waiting_for ? `<button class="key go" data-do="take" title="Do this task on the desk in a take, then hand it in">${openTakeOf(t) ? `CONTINUE ${esc(openTakeOf(t).toUpperCase())} ON THE DESK` : "WORK IN A TAKE"}</button>` : ""}${reviewing(s) ? `<button class="key go" data-do="review" title="Listen and write the review on the review sheet; sending it closes this task">${t.waiting_for ? "START IT NOW" : "WRITE THE REVIEW"}</button>` : human && t.state !== "submitted" ? `<button class="key" data-do="done">MARK DONE</button>` : ""}${t.state === "needs_you" ? `<button class="key" data-do="queued">BACK IN THE QUEUE</button>` : ""}<button class="key warn" data-do="cancelled">CANCEL TASK</button>`
@@ -770,7 +787,7 @@ function benchTakes(body, s, takes) {
     else toast(`${take} merged into the session (one undo step).`, true);
   });
 }
-function logHtml(lines) { return lines.map((l) => `<div class="${l.cls}"><time>${clock(l.at)}</time>${l.html}</div>`).join(""); }
+function logHtml(lines) { return lines.map((l) => `<div class="${l.cls}" data-seat="${esc(l.seat || "")}"><time>${clock(l.at)}</time>${l.html}</div>`).join(""); }
 function benchLog(body, a) {
   const stick = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
   body.innerHTML = a.lines.length ? `<div class="log">${logHtml(a.lines.slice(-200))}</div>` : `<div class="empty">Nothing has happened in this seat yet.</div>`;
@@ -780,12 +797,17 @@ function benchSetup(body, s) {
   body.innerHTML = `<div class="formgrid">
       <span>In the seat</span><div class="row"><b>${s.occupant ? esc(s.label || s.occupant.kind) : "nobody"}</b>${s.occupant && s.occupant.audition_model ? `<span class="tag" title="Audition-only runs use this model; planning and the final listen use the one in the seat">auditions on ${esc(s.occupant.audition_model)}</span>` : ""}<button class="key" data-do="pick">CHANGE…</button></div>
       <span>Works</span><select data-f="mode"><option value="propose" ${s.mode === "propose" ? "selected" : ""}>in takes: nothing is heard until you or the Producer accept it</option><option value="direct" ${s.mode === "direct" ? "selected" : ""}>directly on the session: changes are live at once</option></select>
+      <span>${s.seat === "producer" ? "Co-Producer" : "Sign off"}</span><select data-f="signoff"><option value="">off: ${s.seat === "producer" ? "its decisions and plans go ahead" : s.seat === "review" ? "its fix tasks go ahead" : "its hand-ins go straight to the Producer"}</option><option value="1" ${s.signoff ? "selected" : ""}>on: ${esc(SIGN_TIP[s.seat] ? SIGN_TIP[s.seat].replace(/^[^:]*: /, "") : SIGN_TIP.take.replace(/^[^:]*: /, ""))}</option></select>
+      ${s.owns.length && !["producer", "review"].includes(s.seat) ? `<span>Versions</span><select data-f="options" title="How many takes the seat's agent hands in for each task, for you to choose from"><option value="0">one take per task</option><option value="2" ${s.options === 2 ? "selected" : ""}>two versions per task: you choose</option><option value="3" ${s.options === 3 ? "selected" : ""}>three versions per task: you choose</option></select>` : ""}
       <span>Standing notes</span><textarea data-f="notes" rows="3" placeholder="Instructions this seat always gets, e.g. “no brass”, “keep it under 8 voices”">${esc(s.notes || "")}</textarea>
       <span>Department</span><div class="muted">${s.owns.length ? esc(s.owns.join(", ")) : "changes nothing: listens and reports"} · suggested model tier: ${esc(s.tier)}</div>
     </div><div class="row end" style="margin-top:10px"><button class="key go" data-do="save">SAVE</button></div>`;
   body.querySelector('[data-do="pick"]').onclick = () => openSeatPicker(s.seat);
   body.querySelector('[data-do="save"]').onclick = async () => {
-    await call("seat_assign", { seat: s.seat, mode: body.querySelector('[data-f="mode"]').value, notes: body.querySelector('[data-f="notes"]').value });
+    const opt = body.querySelector('[data-f="options"]');
+    const r = await call("seat_assign", { seat: s.seat, mode: body.querySelector('[data-f="mode"]').value, notes: body.querySelector('[data-f="notes"]').value,
+      signoff: !!body.querySelector('[data-f="signoff"]').value, ...(opt ? { options: +opt.value } : {}) });
+    if (r && r.note) toast(r.note, true);
     toast("Saved. It applies from the seat's next run.", true); renderBench(s.seat, true);
   };
 }
@@ -806,7 +828,7 @@ async function openSeatPicker(seat, opts = {}) {
   // A sheet: who sits here (four kinds), and for an AI agent the app on the left and its models as a table;
   // effort, audition model and how the seat works along the bottom.
   const P = { who: cur.kind || "none", rid: cur.kind === "agent" ? cur.runner : null, mid: cur.kind === "agent" ? cur.model : null,
-    effort: cur.kind === "agent" ? cur.effort || "" : "", aud: cur.audition_model || "", mode: s.mode, q: "" };
+    effort: cur.kind === "agent" ? cur.effort || "" : "", aud: cur.audition_model || "", mode: s.mode, sign: !!s.signoff, q: "" };
   if (!P.rid) P.rid = (runners.find((r) => r.available && r.auth !== "missing") || runners.find((r) => r.available) || runners[0] || {}).id || null;
   const WHO = [["none", "Nobody", "Leave the seat empty"], ["human", "You", "Do this seat's work yourself and hand it in"],
     ["external", "Outside app", "Claude Desktop, Codex… joins over MCP with seat_join"], ["agent", "AI agent", "A model on an app here runs the seat"]];
@@ -886,9 +908,12 @@ async function openSeatPicker(seat, opts = {}) {
       ${isProd && P.who === "agent" ? `<label class="fld" title="Runs whose only job is to audition handed-in takes. Planning, and the audition that may close the last open work (where the final listen happens), stay on the model chosen above."><span>Auditions on</span>
         <select id="spAud" ${others.length ? "" : "disabled"}><option value="">the same model</option>${others.map((x) => `<option value="${esc(x.id)}" ${P.aud === x.id ? "selected" : ""}>${esc(x.label || x.id)}${x.cost ? ` · ${esc(x.cost)}` : ""}</option>`).join("")}</select></label>` : ""}
       ${many1 && P.who !== "none" ? `<div class="fld"><span>Works</span><div class="seg"><button data-mode="propose" class="${P.mode === "propose" ? "on" : ""}" title="Proposes changes in takes that you or the Producer accept">IN TAKES</button>
-        <button data-mode="direct" class="${P.mode === "direct" ? "on" : ""}" title="Edits the session itself">ON THE SESSION</button></div></div>` : ""}`;
+        <button data-mode="direct" class="${P.mode === "direct" ? "on" : ""}" title="Edits the session itself">ON THE SESSION</button></div></div>` : ""}
+      ${many1 && P.who === "agent" ? `<div class="fld" title="${esc(SIGN_TIP[seat] || SIGN_TIP.take)}"><span>${isProd ? "Co-Producer" : "Your sign-off"}</span><div class="seg">
+        <button data-sign="" class="${P.sign ? "" : "on"}">${isProd ? "OFF" : "STRAIGHT ON"}</button><button data-sign="1" class="${P.sign ? "on" : ""}">${isProd ? "MY OK FIRST" : "STOPS AT ME"}</button></div></div>` : ""}`;
     el.querySelectorAll("[data-eff]").forEach((b) => b.onclick = () => { P.effort = b.dataset.eff; draw(); });
     el.querySelectorAll("[data-mode]").forEach((b) => b.onclick = () => { P.mode = b.dataset.mode; draw(); });
+    el.querySelectorAll("[data-sign]").forEach((b) => b.onclick = () => { P.sign = !!b.dataset.sign; draw(); });
     const aud = el.querySelector("#spAud"); if (aud) aud.onchange = () => { P.aud = aud.value; };
     const go = el.querySelector("#spOk"); go.disabled = P.who === "agent" && !P.mid;
   }
@@ -899,7 +924,7 @@ async function openSeatPicker(seat, opts = {}) {
     if (P.who === "agent" && isProd) who.audition_model = P.aud;  // "" turns it off
     Sheet.close(true);
     // several seats: each keeps its own way of working (takes or direct); only who sits there changes
-    for (const x of many) await call("seat_assign", { seat: x, ...who, ...(many1 ? { mode: P.mode } : {}) });
+    for (const x of many) await call("seat_assign", { seat: x, ...who, ...(many1 ? { mode: P.mode } : {}), ...(many1 && P.who === "agent" ? { signoff: P.sign } : {}) });
     if (opts.done) opts.done(P.mid || (P.who === "human" ? "you" : P.who));
   }
   draw();
@@ -962,68 +987,72 @@ function rewriteTask(id, then) {
     try { await api("task_update", args); then(); } catch (e) { toast(e.message); }
   };
 }
+// One item as a ticket with the answers that fit it (the Needs You sheet shows these for questions and blockers).
+function ticketEl(a) {
+  const takes = ticketTakes(a);
+  const audition = !!a.take, fromSeat = a.from !== "you", kind = LISTEN.test(`${a.title} ${a.detail || ""}`) ? "listen" : "ask";
+  const hear = audition ? "" : takes.length ? takes.slice(0, 2).map(abKeys).join("") + takes.slice(0, 1).map((t) => `<button class="key" data-desk="${esc(t)}" title="See this take on the desk">DESK</button>`).join("")
+    : fromSeat ? `<span class="ab"><button class="key" data-ab="session" title="Render and play the session as it is now">▶ SESSION</button></span>` : "";
+  const el = h(`<div class="ticket ${esc(a.kind)}">
+    <div class="from"><span>${esc(fromSeat ? title(a.from) : "Floor")} · ${esc(a.kind)}${a.task ? " · " + esc(a.task) : ""}</span><span>${esc(a.id)}</span></div>
+    <h3>${esc(a.title)}</h3>${a.detail ? `<p>${esc(a.detail)}</p>` : ""}
+    ${hear ? `<div class="opts hear">${hear}</div>` : ""}
+    <div class="opts">${audition ? `${abKeys(a.take)}<button class="key" data-desk="${esc(a.take)}" title="See and edit this take in the arrangement, piano roll and mixer">DESK</button><button class="key go" data-opt="a">ACCEPT</button><button class="key" data-ret>RETURN…</button><button class="key warn" data-discard title="Close this take without merging it">DISCARD</button>`
+      : a.options.map((o, i) => `${o.take && !takes.includes(o.take) ? "" : ""}${o.audio ? `<button class="key" data-audio="${esc(o.audio)}" title="Hear it">▶</button>` : ""}<button class="key ${i === 0 && !fromSeat ? "go" : ""}" data-opt="${esc(o.id)}" data-do="${esc(o.do || "")}" title="${esc(o.detail || "")}">${esc(o.label)}</button>`).join("")
+        + (!a.options.length && !fromSeat ? `<button class="key go" data-say="Sorted. Try again.">TRY AGAIN</button>` : "")
+        + (!a.options.length && fromSeat ? REPLIES[kind].map(([label, say, more]) => `<button class="key" data-reply="${esc(say)}" ${more ? "data-more" : ""} title="${esc(say)}">${esc(label)}</button>`).join("") : "")}</div>
+    <textarea rows="2" class="${audition ? "hidden" : ""}" placeholder="${audition ? "What has to change: bars, tracks, what you heard" : a.options.length ? "Add a note to go with your choice (optional)" : "Or answer in your own words"}"></textarea>
+    <div class="opts ${audition ? "hidden" : ""}" data-send><button class="key" data-go>${audition ? "SEND IT BACK" : "SEND ANSWER"}</button></div>
+    <div class="err hidden"></div></div>`);
+  const text = el.querySelector("textarea"), err = el.querySelector(".err");
+  const resolve = async (option, say) => {
+    err.classList.add("hidden");
+    try { await api("attention_resolve", { item: a.id, option: option || null, text: say ?? text.value.trim() }); refresh(true); }
+    catch (e) { err.textContent = e.message; err.classList.remove("hidden"); refresh(true); }
+  };
+  el.querySelectorAll("[data-opt]").forEach((b) => b.onclick = () => {
+    const act = b.dataset.do, seats = a.seats && a.seats.length ? a.seats : [(taskOf(a.task) || {}).seat].filter(Boolean);
+    if (act === "seat" && seats.length) openSeatPicker(seats[0], { seats, done: (who) => resolve(b.dataset.opt, text.value.trim() || `Now in the seat: ${who}.`) });
+    else if (act === "edit" && a.task) rewriteTask(a.task, () => resolve(b.dataset.opt, text.value.trim() || "The task was rewritten."));
+    else if (act === "cancel" && !confirm(`Cancel ${a.task}?`)) return;
+    else resolve(b.dataset.opt);
+  });
+  el.querySelectorAll("[data-say]").forEach((b) => b.onclick = () => resolve(null, text.value.trim() || b.dataset.say));
+  el.querySelectorAll("[data-reply]").forEach((b) => b.onclick = () => {
+    if (b.hasAttribute("data-more")) { text.value = b.dataset.reply; text.focus(); text.setSelectionRange(text.value.length, text.value.length); return; }
+    resolve(null, [b.dataset.reply, text.value.trim()].filter(Boolean).join(" "));
+  });
+  el.querySelectorAll("[data-audio]").forEach((b) => b.onclick = () => { hush(); playFile(b.dataset.audio); });
+  el.querySelectorAll("[data-desk]").forEach((b) => b.onclick = () => { hush(); openTake(b.dataset.desk); });
+  const drop = el.querySelector("[data-discard]");
+  if (drop) drop.onclick = async () => {
+    if (!confirm(`Discard ${a.take}? Its work stays on disk but is not merged.`)) return;
+    err.classList.add("hidden");
+    try { await api("take_discard", { take: a.take }); refresh(true); }
+    catch (e) { err.textContent = e.message; err.classList.remove("hidden"); refresh(true); }
+  };
+  const ret = el.querySelector("[data-ret]");
+  if (ret) ret.onclick = () => { text.classList.remove("hidden"); el.querySelector("[data-send]").classList.remove("hidden"); text.focus(); };
+  el.querySelector("[data-go]").onclick = () => {
+    if (!text.value.trim()) { err.textContent = audition ? "Say what has to change so the seat can act on it." : "Write an answer, or choose one above."; err.classList.remove("hidden"); return; }
+    resolve(audition ? "b" : null);
+  };
+  wireAb(el);
+  return el;
+}
+// The bay in the Studio room: one row per item, headed with what it needs from you. A row opens the Needs You
+// sheet (needs.js) on it, where it is answered.
 function renderNeeds() {
-  const box = $("#needsList"), items = ST.board ? ST.board.needs_you : [], seen = new Set(items.map((a) => a.id));
-  for (const id of Object.keys(ST.tickets)) if (!seen.has(id)) { ST.tickets[id].remove(); delete ST.tickets[id]; }
-  let empty = box.querySelector(".empty");
-  if (!items.length) { if (!empty) box.appendChild(h(`<div class="empty">Nothing is waiting on you.</div>`)); return; }
-  if (empty) empty.remove();
-  for (const a of items) {
-    const takes = ticketTakes(a), sig = JSON.stringify([a.title, a.detail, a.seats, a.options, takes]);
-    const old = ST.tickets[a.id];
-    if (old && (old.dataset.sig === sig || focusedIn(old))) continue;  // a ticket can grow (more seats on a dry model)
-    const audition = !!a.take, fromSeat = a.from !== "you", kind = LISTEN.test(`${a.title} ${a.detail || ""}`) ? "listen" : "ask";
-    const hear = audition ? "" : takes.length ? takes.slice(0, 2).map(abKeys).join("") + takes.slice(0, 1).map((t) => `<button class="key" data-desk="${esc(t)}" title="See this take on the desk">DESK</button>`).join("")
-      : fromSeat ? `<span class="ab"><button class="key" data-ab="session" title="Render and play the session as it is now">▶ SESSION</button></span>` : "";
-    const el = h(`<div class="ticket ${esc(a.kind)}">
-      <div class="from"><span>${esc(fromSeat ? title(a.from) : "Floor")} · ${esc(a.kind)}${a.task ? " · " + esc(a.task) : ""}</span><span>${esc(a.id)}</span></div>
-      <h3>${esc(a.title)}</h3>${a.detail ? `<p>${esc(a.detail)}</p>` : ""}
-      ${hear ? `<div class="opts hear">${hear}</div>` : ""}
-      <div class="opts">${audition ? `${abKeys(a.take)}<button class="key" data-desk="${esc(a.take)}" title="See and edit this take in the arrangement, piano roll and mixer">DESK</button><button class="key go" data-opt="a">ACCEPT</button><button class="key" data-ret>RETURN…</button><button class="key warn" data-discard title="Close this take without merging it">DISCARD</button>`
-        : a.options.map((o, i) => `${o.take && !takes.includes(o.take) ? "" : ""}${o.audio ? `<button class="key" data-audio="${esc(o.audio)}" title="Hear it">▶</button>` : ""}<button class="key ${i === 0 && !fromSeat ? "go" : ""}" data-opt="${esc(o.id)}" data-do="${esc(o.do || "")}" title="${esc(o.detail || "")}">${esc(o.label)}</button>`).join("")
-          + (!a.options.length && !fromSeat ? `<button class="key go" data-say="Sorted. Try again.">TRY AGAIN</button>` : "")
-          + (!a.options.length && fromSeat ? REPLIES[kind].map(([label, say, more]) => `<button class="key" data-reply="${esc(say)}" ${more ? "data-more" : ""} title="${esc(say)}">${esc(label)}</button>`).join("") : "")}</div>
-      <textarea rows="2" class="${audition ? "hidden" : ""}" placeholder="${audition ? "What has to change: bars, tracks, what you heard" : a.options.length ? "Add a note to go with your choice (optional)" : "Or answer in your own words"}"></textarea>
-      <div class="opts ${audition ? "hidden" : ""}" data-send><button class="key" data-go>${audition ? "SEND IT BACK" : "SEND ANSWER"}</button></div>
-      <div class="err hidden"></div></div>`);
-    el.dataset.sig = sig;
-    const text = el.querySelector("textarea"), err = el.querySelector(".err");
-    const resolve = async (option, say) => {
-      err.classList.add("hidden");
-      try { await api("attention_resolve", { item: a.id, option: option || null, text: say ?? text.value.trim() }); refresh(true); }
-      catch (e) { err.textContent = e.message; err.classList.remove("hidden"); refresh(true); }
-    };
-    el.querySelectorAll("[data-opt]").forEach((b) => b.onclick = () => {
-      const act = b.dataset.do, seats = a.seats && a.seats.length ? a.seats : [(taskOf(a.task) || {}).seat].filter(Boolean);
-      if (act === "seat" && seats.length) openSeatPicker(seats[0], { seats, done: (who) => resolve(b.dataset.opt, text.value.trim() || `Now in the seat: ${who}.`) });
-      else if (act === "edit" && a.task) rewriteTask(a.task, () => resolve(b.dataset.opt, text.value.trim() || "The task was rewritten."));
-      else if (act === "cancel" && !confirm(`Cancel ${a.task}?`)) return;
-      else resolve(b.dataset.opt);
-    });
-    el.querySelectorAll("[data-say]").forEach((b) => b.onclick = () => resolve(null, text.value.trim() || b.dataset.say));
-    el.querySelectorAll("[data-reply]").forEach((b) => b.onclick = () => {
-      if (b.hasAttribute("data-more")) { text.value = b.dataset.reply; text.focus(); text.setSelectionRange(text.value.length, text.value.length); return; }
-      resolve(null, [b.dataset.reply, text.value.trim()].filter(Boolean).join(" "));
-    });
-    el.querySelectorAll("[data-audio]").forEach((b) => b.onclick = () => { hush(); playFile(b.dataset.audio); });
-    el.querySelectorAll("[data-desk]").forEach((b) => b.onclick = () => { hush(); openTake(b.dataset.desk); });
-    const drop = el.querySelector("[data-discard]");
-    if (drop) drop.onclick = async () => {
-      if (!confirm(`Discard ${a.take}? Its work stays on disk but is not merged.`)) return;
-      err.classList.add("hidden");
-      try { await api("take_discard", { take: a.take }); refresh(true); }
-      catch (e) { err.textContent = e.message; err.classList.remove("hidden"); refresh(true); }
-    };
-    const ret = el.querySelector("[data-ret]");
-    if (ret) ret.onclick = () => { text.classList.remove("hidden"); el.querySelector("[data-send]").classList.remove("hidden"); text.focus(); };
-    el.querySelector("[data-go]").onclick = () => {
-      if (!text.value.trim()) { err.textContent = audition ? "Say what has to change so the seat can act on it." : "Write an answer, or choose one above."; err.classList.remove("hidden"); return; }
-      resolve(audition ? "b" : null);
-    };
-    wireAb(el);
-    if (old) old.replaceWith(el); else box.appendChild(el);
-    ST.tickets[a.id] = el;
-  }
+  const box = $("#needsList"), items = ST.board ? ST.board.needs_you.slice().sort((x, y) => x.created - y.created) : [];
+  const sig = JSON.stringify(items.map((a) => [a.id, a.title, a.stage || a.kind]));
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  const N = window.TTNeeds;
+  box.innerHTML = items.length ? items.map((a) => { const k = N ? N.kindOf(a) : "answer"; return `<button class="nyLine" data-id="${esc(a.id)}" title="Open it on the Needs You sheet">
+      <span class="nyVerb k-${k}">${N ? N.VERB[k] : "ANSWER"}</span><b>${esc(a.title)}</b>
+      <span class="nyFrom">${esc(a.from === "you" ? (a.kind === "blocker" ? "Floor" : "Studio") : title(a.from))} · ${esc(a.id)}</span></button>`; }).join("")
+    : `<div class="empty">Nothing is waiting on you.</div>`;
+  box.querySelectorAll(".nyLine").forEach((b) => b.onclick = () => N && N.open(b.dataset.id));
 }
 
 // ---------------------------------------------------------------- monitor / talkback
@@ -1159,7 +1188,7 @@ window.Studio = {
     ST.board = board; ST.crew = crew;
     const project = board ? board.session : null;
     if (project !== ST.project) {
-      ST.project = project; ST.units = {}; $("#units").innerHTML = ""; $("#needsList").innerHTML = ""; ST.tickets = {}; AB.cache = {}; hush();
+      ST.project = project; ST.units = {}; $("#units").innerHTML = ""; $("#needsList").innerHTML = ""; delete $("#needsList").dataset.sig; AB.cache = {}; hush();
       window.TTLinks?.reset();
       const open = store.get("open", ""); ST.open = board && board.seats.some((s) => s.seat === open) ? open : null;
       connect();
@@ -1168,6 +1197,9 @@ window.Studio = {
   },
   render, hush, listen, room: setRoom, board: () => ST.board,
 };
+// what the Needs You sheet (needs.js, loaded next) draws with
+window.TTStudio = { ST, AB, h, title, seatOf, taskOf, focusedIn, abKeys, wireAb, hush, workRoll, workPicture, ticketEl,
+  refresh, call };
 setRoom(ROOMS.includes(store.get("room", "studio")) ? store.get("room", "studio") : "studio");
 if (S.path || S.doc) loadState();  // app.js loaded the state before this file defined Studio
 })();

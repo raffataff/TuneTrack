@@ -12,7 +12,9 @@
 <link rel="stylesheet" href="/web/crewlinks.css">
 <link rel="stylesheet" href="/web/review.css">
 <link rel="stylesheet" href="/web/sheet.css">
-<script>try { const f = localStorage.getItem("tt.font"); if (f) document.documentElement.dataset.font = f; } catch (e) { /* no storage */ }</script>
+<link rel="stylesheet" href="/web/needs.css">
+<link rel="stylesheet" href="/web/appearance.css">
+<script>try { const c = JSON.parse(localStorage.getItem("tt.fontcss") || "{}"); for (const k in c) document.documentElement.style.setProperty(k, c[k]); } catch (e) { /* no storage */ }</script>
 </head>
 <body data-room="studio">
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -53,7 +55,7 @@
   </div>
   <div class="zone zr">
     <div class="grp crew" title="The crew: the agents you have put in seats">
-      <button id="crewBtn" class="key switch" title="Let the seated agents work / stop them">RUN</button><span id="crewRead" class="vfd small">STANDBY</span><button id="briefBtn" class="key" title="Give the Producer a new brief">BRIEF</button>
+      <button id="crewBtn" class="key switch" title="Let the seated agents work / stop them">RUN</button><span id="crewRead" class="vfd small">STANDBY</span><button id="briefBtn" class="key" title="Give the Producer a new brief">BRIEF</button><button id="involveBtn" class="key involve" title="How much of the crew's work stops at you"><i class="lamp"></i><span>HANDS OFF</span></button>
     </div>
     <button id="needsBtn" class="key needs" title="What is waiting on you"><i class="lamp"></i>NEEDS YOU <b id="needsCount">0</b></button>
     <button id="gearBtn" class="key" title="Gear: every instrument and effect you have, new ones marked. Audition them and put them on a track."><i class="lamp"></i>GEAR <b id="gearCount"></b></button>
@@ -72,6 +74,8 @@
   <p class="popHint">Recording needs LIVE: switch it on to arm tracks and record.</p>
 </div>
 
+<div id="involvePop" class="pop invPop hidden" role="dialog" aria-label="What stops at you"></div>
+
 <aside id="rail">
   <nav id="rooms" aria-label="Rooms">
     <button data-room="studio" class="active" title="Studio: the crew rack, Needs You and talkback"><svg><use href="#i-studio"/></svg><span>STUDIO</span></button>
@@ -79,7 +83,7 @@
     <button data-room="mix" title="Mix: the console"><svg><use href="#i-mix"/></svg><span>MIX</span></button>
     <button data-room="cables" title="Cables: how the signal flows, and where to patch it"><svg><use href="#i-cables"/></svg><span>CABLES</span></button>
   </nav>
-  <button id="setBtn" class="railKey" title="Settings: display font"><svg><use href="#i-gear"/></svg><span>SETUP</span></button>
+  <button id="setBtn" class="railKey" title="Setup: appearance, seat colours, layout and typography"><svg><use href="#i-gear"/></svg><span>SETUP</span></button>
 </aside>
 
 <main id="studio" class="room">
@@ -215,6 +219,7 @@
 <div id="menu" class="hidden"></div>
 <div id="toast" class="hidden"></div>
 <script src="/web/app.js"></script>
+<script src="/web/appearance.js"></script>
 <script src="/web/sheet.js"></script>
 <script src="/web/cables.js"></script>
 <script src="/web/picture.js"></script>
@@ -224,6 +229,7 @@
 <script src="/web/crewlinks.js"></script>
 <script src="/web/review.js"></script>
 <script src="/web/studio.js"></script>
+<script src="/web/needs.js"></script>
 <script src="/web/voice.js"></script>
 <script src="/web/gear.js"></script>
 <script src="/web/shell.js"></script>

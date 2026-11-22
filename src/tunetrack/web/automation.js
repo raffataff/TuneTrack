@@ -228,12 +228,12 @@ const Automation = (() => {
         g.fillStyle = on ? "#ffffff" : typeof v === "number" ? col : "#8f897c";
         g.fillRect(Math.round(x) - 3, Math.round(y) - 3, 6, 6);
         g.strokeStyle = "#0c0c0d"; g.strokeRect(Math.round(x) - 3.5, Math.round(y) - 3.5, 7, 7);
-        if (typeof v !== "number") { g.fillStyle = "#8f897c"; g.font = "9px Cascadia Mono, Consolas, monospace"; g.fillText(v, x + 6, y - 4); }
+        if (typeof v !== "number") { g.fillStyle = "#8f897c"; g.font = `9px ${MONO}`; g.fillText(v, x + 6, y - 4); }
       }
       if (live) {
         // the value under the pointer, beside the point being dragged
         const [b, v] = drag.pts[drag.idx], text = `${fmt(l, v)} · ${fmtPos(b)}`;
-        g.font = "10px Cascadia Mono, Consolas, monospace";
+        g.font = `10px ${MONO}`;
         const w = g.measureText(text).width + 8, x = Math.min(b * S.zoom + 8, W - w), y = Math.max(y0 + 1, Math.min(yOf(v, y0, rng) - 8, y0 + LANE_H - 15));
         g.fillStyle = "#030d0b"; g.fillRect(x, y, w, 14); g.strokeStyle = "#1f4f47"; g.strokeRect(x + 0.5, y + 0.5, w - 1, 13);
         g.fillStyle = "#74f0d6"; g.fillText(text, x + 4, y + 10);
