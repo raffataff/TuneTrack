@@ -16,6 +16,7 @@ server, each with its seat's tools.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import threading
@@ -23,7 +24,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .. import config, roles, studio, styles, takes
+from .. import config, roles, signoff, studio, styles, takes
 from ..model import LockTimeout, Project, _os_lock, _os_unlock
 from . import briefs, runners
 
@@ -35,6 +36,7 @@ SAYS_LIMIT = studio.EVENT_TEXT  # what an agent says is read in the monitor: kee
 # An agent that ended because its model has no usage left (a free tier's daily limit, a rate limit, no credit).
 # Every seat on that model will fail the same way, so it is one thing to tell the user, not one per seat.
 _QUOTA = re.compile(r"usage limit|rate.?limit|too many requests|quota|\b429\b|out of credit|insufficient credit|billing", re.I)
+_CLOSED = ("done", "cancelled", "failed")  # an audition task in one of these whose take still waits was left undecided
 _RETRY = {"label": "Try again now"}
 _RESEAT = {"label": "Put someone else in this seat\u2026", "do": "seat"}
 
@@ -93,6 +95,7 @@ class Floor:
         self._stopping = threading.Event()
         self._limit_step, self._limit_item = max_launches, None
         self.usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        self._plan_changes: dict[str, list[str]] = {}  # seat -> what its last run changed on the session (plan ticket)
 
     # ---- what the board needs from us ------------------------------------------------------------------------------
 
@@ -106,6 +109,8 @@ class Floor:
                 r["timed_out"] = True
                 r["run"].stop()
         self._route_takes()
+        signoff.gather_plans(self.session, set(running), self._plan_changes)
+        signoff.away_pass(self.session)
         started, waiting, paused = [], [], []
         st = studio.read(self.session)
         # A task can gain a dependency after its agent started (the Producer accepts a take, which frees the next
@@ -118,6 +123,19 @@ class Floor:
             if t and t["state"] == "working" and behind and not r.get("paused") and not r.get("held"):
                 r["held"] = behind
                 r["run"].stop()
+            elif t and not (r.get("paused") or r.get("held") or r.get("dropped")):
+                # Its work has nowhere to go: the take was discarded under it, or the task was cancelled.
+                # Seen live: a Sound run went on for 18 minutes on a cancelled task and a discarded take.
+                gone = None
+                if r.get("take"):
+                    tk = next((k for k in studio.take_index(self.path) if k["id"] == r["take"]), None)
+                    if tk and tk.get("state") == "rejected":
+                        gone = f"its take {tk['id']} was discarded"
+                if not gone and t["state"] == "cancelled" and not t.get("audition"):
+                    gone = "its task was cancelled"
+                if gone:
+                    r["dropped"] = gone
+                    r["run"].stop()
         quota = self._quota_items(st)
         for t in studio.ready_tasks(self.session):
             occ = st["seats"][t["seat"]]["occupant"]
@@ -178,7 +196,9 @@ class Floor:
                 while not self._stopping.is_set():
                     state = self.tick()
                     if not state["running"] and not state["started"] and not keep_alive:
+                        # a run that ended during this pass was still running when the pass looked: look again
                         self._route_takes()
+                        signoff.gather_plans(self.session, set(self.active()), self._plan_changes)
                         if not self._launchable():
                             break
                     self._stopping.wait(poll)
@@ -344,13 +364,15 @@ class Floor:
             env = {"TUNETRACK_SEAT": seat, "TUNETRACK_SESSION": self.session, "TUNETRACK_PROJECT": str(project),
                    "TUNETRACK_HOME": str(config.HOME), "TUNETRACK_PROJECTS": str(config.PROJECTS_DIR)}
             done = {t["id"]: t for t in st["tasks"] if t["state"] == "done"}
+            n = signoff.options_for(st, task)
+            told = {**task, "options": n} if n else {k: v for k, v in task.items() if k != "options"}
             work = self.path / "studio" / "work" / seat  # an empty folder: agents have no business in the repo
             (self.path / "studio" / "logs").mkdir(parents=True, exist_ok=True)
             work.mkdir(parents=True, exist_ok=True)
             launch = runners.Launch(
                 runner=occ["runner"], model=model, effort=occ.get("effort"),
                 system=briefs.system(seat, in_take, s.get("notes", ""), self._style()),
-                prompt=briefs.task_prompt(task, studio.studio_status(self.session), take,
+                prompt=briefs.task_prompt(told, studio.studio_status(self.session), take,
                                           [done[d] for d in task.get("depends", []) if d in done],
                                           unread, audition, asked, more),
                 cwd=str(work), env=env, allow_tools=["mcp__tunetrack"],
@@ -376,6 +398,9 @@ class Floor:
                    **({"also": [t["id"] for t, _a, _q in more]} if more else {}))
         rec = {"run": run, "task": task["id"], "started": time.time(), "take": take["id"] if take else None,
                "seen": [m["id"] for m in unread], "also": [t["id"] for t, _a, _q in more]}
+        if seat in signoff.PLAN_SEATS and not in_take and s.get("signoff"):
+            # what this run changes on the session itself goes on its plan ticket (live already, but seen)
+            rec["before"] = (self.path / "project.json").read_text(encoding="utf-8")
         rec["thread"] = threading.Thread(target=self._watch, args=(seat, rec), daemon=True,
                                          name=f"floor-{seat}-{task['id']}")
         with self._lock:
@@ -422,6 +447,9 @@ class Floor:
         requeued, and a stop does not count the attempt."""
         for tid in rec.get("also") or []:
             t = next((x for x in studio.read(self.session)["tasks"] if x["id"] == tid), None)
+            if t and t["state"] in _CLOSED and not paused:  # closed by the Producer with its take still waiting
+                self._undecided(t, said)
+                continue
             if not t or t["state"] != "working":
                 continue
             if ok and self._undecided(t, said):
@@ -475,25 +503,39 @@ class Floor:
         studio.seat_presence(seat, None, session=self.session)
         task = next(t for t in studio.read(self.session)["tasks"] if t["id"] == tid)
         said = (done.get("result") or last_text or "").strip()
-        held = rec.get("held")
+        held, dropped = rec.get("held"), rec.get("dropped")
         why = ("it ran past the time limit" if rec.get("timed_out") else
                "it was stopped (the seat was put on hold, or the crew was stopped)" if rec.get("paused") else
                f"it was stopped: its task now waits on {', '.join(held)}" if held else
+               f"it was stopped: {dropped}" if dropped else
                (errors[-1] if errors else ""))
         studio.log("run", self.session, seat=seat, task=tid, what="end", ok=bool(done.get("ok")), tools=tools,
                    error=why or None, **rec.get("used", {}))
+        if rec.get("before"):
+            try:
+                moved = takes.changes(json.loads(rec["before"]),
+                                      json.loads((self.path / "project.json").read_text(encoding="utf-8")))
+                if moved:
+                    self._plan_changes[seat] = self._plan_changes.get(seat, []) + [
+                        f"{c['where']}: {c['what']}" for c in moved]
+            except (OSError, ValueError):
+                pass
         if done.get("ok") and not why:  # the messages in its task message have been read: not sent again next time
             studio.messages_read(seat, rec.get("seen") or [], self.session)
-        self._settle_also(rec, bool(done.get("ok")) and not why, bool(rec.get("paused") or held), said)
+        stopped = bool(rec.get("paused") or held or dropped)  # by the user, the plan or the board: not a fault
+        self._settle_also(rec, bool(done.get("ok")) and not why, stopped, said)
+        if task.get("audition") and task["state"] in _CLOSED and not stopped and self._undecided(task, said):
+            return  # the Producer closed its audition itself, but never accepted or returned the take
         if task["state"] != "working":
             return  # the agent moved its task itself (submitted, done, needs_you, failed): nothing to tidy
-        if rec.get("paused") or held:  # stopped by the user or the plan, not by a fault: requeued, attempt not counted
+        if stopped:  # requeued, attempt not counted (a discarded take: the next run cuts a fresh one)
             with studio._Board(self.session) as b:
                 t = b.task(tid)
                 t["state"], t["updated"] = "queued", round(time.time(), 3)
                 t["attempts"] = max(0, t.get("attempts", 0) - 1)
                 b.emit("task", id=tid, seat=seat, state="queued", title=t["title"], by="floor",
-                       reason="paused" if rec.get("paused") else f"now waits on {', '.join(held)}")
+                       reason="paused" if rec.get("paused") else
+                       f"now waits on {', '.join(held)}" if held else dropped)
             return
         if done.get("ok") and not rec.get("timed_out"):
             if rec["take"]:
@@ -546,8 +588,8 @@ class Floor:
         the take would stay handed in with nobody asked. Once, the Producer is started again and told so; if that
         run decides nothing either, the take goes to the user's Needs You list. False: the take is not waiting."""
         tk = next((t for t in studio.take_index(self.path) if t["id"] == task["audition"]), None)
-        if not tk or tk.get("state") != "submitted":
-            return False
+        if not tk or tk.get("state") != "submitted" or tk.get("proposal"):
+            return False  # decided, or (Co-Producer) its decision waits for the user
         with studio._Board(self.session) as b:
             t, now = b.task(task["id"]), round(time.time(), 3)
             if t.get("attempts", 0) < 2:
@@ -568,15 +610,7 @@ class Floor:
     @staticmethod
     def _ask_user(b, tk: dict, title: str, note: str = "") -> None:
         """Put a handed-in take on the user's Needs You list as an audition: accept, return or discard."""
-        seat = tk.get("seat") if tk.get("seat") in roles.ROLES else None
-        a = {"id": b.new_id("N"), "kind": "decision", "from": seat or roles.YOU, "task": None, "title": title,
-             "detail": "\n\n".join(x for x in (tk.get("summary") or "", note) if x), "take": tk["id"],
-             "options": [{"id": "a", "label": "Accept", "take": tk["id"]}, {"id": "b", "label": "Return"},
-                         {"id": "c", "label": "Discard"}],
-             "blocks": [], "state": "open", "answer": None, "created": round(time.time(), 3), "resolved": None}
-        b.st["attention"].append(a)
-        b.emit("attention", id=a["id"], state="open", what="decision", sender=seat or roles.YOU, title=title,
-               take=tk["id"])
+        signoff.take_ticket(b, tk, title, note)
 
     def _blocker(self, task: dict, title: str, detail: str, hold: bool = True, options: list | None = None,
                  **extra) -> str:
@@ -609,7 +643,7 @@ class Floor:
         if self._left_behind(index, st):
             index = {t["id"]: t for t in studio.take_index(self.path)}
             st = studio.read(self.session)
-        stale = any(a["state"] == "open" and a.get("take") and index.get(a["take"], {}).get("state") != "submitted"
+        stale = any(a["state"] == "open" and (a.get("take") or a.get("takes")) and not signoff.waiting(a, index)
                     for a in st["attention"])
 
         def routed(board: dict, tk: dict) -> bool:  # per hand-in: a take that came back and is handed in again is new
@@ -617,37 +651,41 @@ class Floor:
                     or any(t.get("routed") == [tk["id"], tk.get("submitted")] for t in board["tasks"]))  # older boards
 
         fresh = [tk for tk in index.values() if tk.get("state") == "submitted" and not routed(st, tk)]
-        if not stale and not fresh:
+        # Options (signoff.options_for): a seat offering several takes for one task hands them in one by one in
+        # one run. They wait until that run is over and are then put to the user together.
+        with self._lock:
+            busy = {(seat, r["task"]) for seat, r in self._runs.items()}
+        tasks = {t["id"]: t for t in st["tasks"]}
+        sets: dict[str, list] = {}
+        for tk in list(fresh):
+            t = tasks.get(tk.get("task") or "")
+            if t and signoff.options_for(st, t):
+                fresh.remove(tk)
+                if (tk.get("seat"), t["id"]) not in busy:
+                    sets.setdefault(t["id"], []).append(tk)
+        if not stale and not fresh and not sets:
             return  # nothing to do: leave the board file alone
         with studio._Board(self.session) as b:
-            producer = b.st["seats"]["producer"]["occupant"]
             now = round(time.time(), 3)
             for a in b.st["attention"]:
-                if a["state"] == "open" and a.get("take") and index.get(a["take"], {}).get("state") != "submitted":
+                if a["state"] == "open" and (a.get("take") or a.get("takes")) and not signoff.waiting(a, index):
                     a["state"], a["resolved"] = "resolved", now
-                    a["answer"] = {"option": None, "text": f"take {index.get(a['take'], {}).get('state', 'gone')}"}
+                    gone = index.get(a["take"], {}).get("state", "gone") if a.get("take") else "decided"
+                    a["answer"] = {"option": None, "text": f"take {gone}"}
                     b.emit("attention", id=a["id"], state="resolved", title=a["title"])
-            tasks = {t["id"]: t for t in b.st["tasks"]}
             for tk in fresh:
                 if routed(b.st, tk):
                     continue
                 b.st["routed"][tk["id"]] = tk.get("submitted")
-                t = tasks.get(tk.get("task") or "")
-                seat = tk.get("seat") if tk.get("seat") in roles.ROLES else None
-                who = roles.get(seat).title if seat else "The user"
-                title = f"Audition take {tk['id']}: {t['title'] if t else tk.get('name') or tk['id']}"
-                detail = (f"{who} handed in {tk['id']}" + (f" for task {t['id']}" if t else "") + ".\n"
-                          f"Their summary: {tk.get('summary') or '(none)'}\n"
-                          f"Listen to it against the brief, then take_accept(\"{tk['id']}\") or "
-                          f"take_reject(\"{tk['id']}\", reason).")
-                if producer and producer["kind"] == "agent" and seat != "producer":
-                    task = {"id": b.new_id("T"), "seat": "producer", "title": title, "detail": detail,
-                            "state": "queued", "depends": [], "scope": {}, "by": "floor", "take": None, "result": "",
-                            "audition": tk["id"], "created": now, "updated": now, "attempts": 0}
-                    b.st["tasks"].append(task)
-                    b.emit("task", id=task["id"], seat="producer", state="queued", title=title, by="floor")
-                else:
-                    self._ask_user(b, tk, title)
+                signoff.route(b, tk)
+            for tid, tks in sets.items():
+                tks = [tk for tk in tks if not routed(b.st, tk)]
+                for tk in tks:
+                    b.st["routed"][tk["id"]] = tk.get("submitted")
+                if len(tks) > 1:
+                    signoff.choose_ticket(b, b.task(tid), tks)
+                elif tks:
+                    signoff.route(b, tks[0])
 
     def _left_behind(self, index: dict, st: dict) -> bool:
         """Open takes whose task is over and whose seat is not at work. One that changed nothing is clutter (a Mix

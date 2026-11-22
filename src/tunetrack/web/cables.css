@@ -6,7 +6,7 @@
 #cables .cbHint { font-size: 11px; color: var(--dim); margin-left: 8px; }
 #cables .cbHint b { font: 600 9.5px var(--legend); letter-spacing: .12em; color: var(--muted); }
 #cables .cbKey { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px;
-  font: 9.5px var(--legend); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  font: 9.5px var(--legend); letter-spacing: .14em; text-transform: var(--legend-case); color: var(--muted); }
 #cables .cbKey i { width: 20px; height: 0; border-top: 2px solid var(--ink); }
 #cables .cbKey i.s { border-top: 1px dashed var(--ink); }
 #cables .cbKey i.k { border-top: 1px solid var(--cyan); }

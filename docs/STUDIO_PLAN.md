@@ -17,7 +17,8 @@ recording, passes, comping, punch, keyboards, devices, nothing recorded through 
 Desk's automation lanes, console effect settings, crew audition model and pick-a-crew, MIDI group comp, stage 6's
 first cut, the AGPL-3.0 `LICENSE`). Uncommitted on `main` (2026-11-17, later): stage 6's second cut, the redesign
 (new shell, MIX room, CABLES room, GEAR grouping, icon, display font); see stage 6 in section 6. Also uncommitted
-(2026-11-18): the review sheet, for a person in the Review seat (stage 6, "A person's review").
+(2026-11-18): the review sheet, for a person in the Review seat (stage 6, "A person's review"), and sign-off and
+Co-Producer with the Needs You sheet (stage 6, "Sign-off and Co-Producer").
 
 ---
 
@@ -119,12 +120,13 @@ On `main`.
 | `src/tunetrack/crew/craft.py` | How each seat does good work, written per seat (2026-11-14) instead of cut from `skill/SKILL.md`: the Composer gets melody, harmony and the notation; Mix gets levels, EQ engines, sidechain and loudness; and so on. A test keeps each text to the tools that seat has. Briefs went from 5,500-15,500 characters to 3,500-12,000 (Composer 14,700 to 6,100). |
 | `src/tunetrack/crew/floor.py` | The floor manager: `Floor(session).run()` starts agents on ready tasks, logs their activity, routes handed-in takes, handles failure. `kickoff(brief)` gives the Producer its first task. Holds the one-manager lock (`FloorBusy`, `managed()`), skips seats on hold, `stop()` / `stop_seat()` requeue without counting the attempt, and `_recover()` requeues tasks a dead manager left "working". |
 | `src/tunetrack/review.py` | A person's review from the Review seat. `review_send(verdict, findings, notes, task, again, checked)` files it as a report (kind "review", by "review") with its findings kept as data in `studio/reviews/R<n>.json`, gives each seat one task with all its findings (Mix's waits for the others), gives the Producer one task for the findings left to it (or a note alone), closes the review task with a result, and queues a second listen (`recheck`) that waits on every fix. `review_draft(task, draft)` keeps the sheet's draft in `studio/drafts/`. Both are editor calls (`server.STUDIO`), not MCP tools: an agent in Review still uses `report_write` and `task_add`. |
+| `src/tunetrack/signoff.py` | Where the user signs off the crew's work: each seat's SIGN OFF switch (`seat_signoff`, presets `crew_involve`, `away_set`), the stops on Needs You (`stage` signoff / confirm / plan / choose, built by `take_ticket`, `hold`, `plan_ticket`, `choose_ticket`), routing a hand-in (`route`, `audition_task`), `gather_plans` and `away_pass` (each floor tick), and `carry()`, which does what the user answered (`attention_resolve` calls it). Stage 6, "Sign-off and Co-Producer". |
 | `src/tunetrack/crew/host.py` | The crew hosted in a long-lived process (the editor's server): `crew_start(brief)`, `crew_stop()`, `crew_state()`, `seat_hold(seat)`. Runs `Floor.run(keep_alive=True)` in a thread per session. |
 | `src/tunetrack/bench.py` | `seat_bench(seat)`: a read-only snapshot of a seat's work (its take in progress, else its handed-in take, else the session) with what the take changed marked: notes added and removed, each mix value next to what it was, instruments, form, last render. What the seat's first workstation tab draws. The Mix console's controls edit through the Desk's own calls, not through this module. |
 | `src/tunetrack/crew/scorecard.py` | `crew_scorecard()` counts each seat and agent from the activity log (runs and how they ended, tool calls, minutes, takes handed in / accepted / first time / returned, asks). `crew_review()` files it as a report and tasks the Producer with the written review. `remember()` / `crew_history(seat)` keep it across sessions in `<library>/crew_history.json`; the seat picker shows it per model. |
 | `src/tunetrack/mcp_server.py` | 20 new tools (70 total; `report_write / report_list / report_read` for every seat, `take_discard` for the Producer). `apply_seat()` strips a seated agent's server down to its seat's tools; seated agents also get seat instructions. |
 | `src/tunetrack/server.py` | `/api/events` (server-sent events: project version + board activity, and with `?take=` the version of the take the Desk has open), board and crew functions callable from the editor (`STUDIO`), `board` and `crew` in `/api/state`, `studio_view()` for cheap redraws. A take on the Desk: `/api/state?take=tk3` and `/api/version?take=tk3`, a `take` field on `/api/call` that points the Desk's own calls at that take, and `take_cut()`. Stops hosted crews on exit. |
-| `src/tunetrack/web/` | The studio UI. `index.html` (the shell: one fixed top bar, a rail of four rooms, a status bar), `style.css` (the design tokens and every part; no fonts or images fetched; the display font is a setting that uses fonts installed on the computer), `shell.js` (record options, SETUP font menu, status bar, `?room=` links), `studio.js` (Studio room: rack, seat workstations, Needs You, monitor/talkback, A/B audition), `app.js` (Desk room: arrangement / piano roll, and the take bar that says whether the Desk is editing the session or a take), `console.js` + `console.css` (the one mixing console: MIX room, the Desk's Mixer tab, the Mix seat's bench), `cables.js` + `cables.css` (CABLES room: the signal flow, patchable), `crewlinks.js` + `crewlinks.css` (the task cables between the rack's units, and the lights that run along them when seats talk), `icon.svg` / `icon.ico`. |
+| `src/tunetrack/web/` | The studio UI. `index.html` (the shell: one fixed top bar, a rail of four rooms, a status bar), `style.css` (the design tokens and every part; no fonts or images fetched; the display font is a setting that uses fonts installed on the computer), `shell.js` (record options, SETUP font menu, status bar, `?room=` links), `studio.js` (Studio room: rack, seat workstations, Needs You, monitor/talkback, A/B audition), `app.js` (Desk room: arrangement / piano roll, and the take bar that says whether the Desk is editing the session or a take), `console.js` + `console.css` (the one mixing console: MIX room, the Desk's Mixer tab, the Mix seat's bench), `cables.js` + `cables.css` (CABLES room: the signal flow, patchable), `crewlinks.js` + `crewlinks.css` (the task cables between the rack's units, and the lights that run along them when seats talk), `needs.js` + `needs.css` (the Needs You sheet, and the top bar's INVOLVE key), `icon.svg` / `icon.ico`. |
 | `src/tunetrack/cli.py` | `tunetrack crew detect / status / run [--brief] [--parallel] [--max-runs]`; `tunetrack takes clean [--project] [--days N] [--yes]`; `call` and `functions` now reach `studio` and `takes` too. |
 | `src/tunetrack/picture.py` | Stage 5: the video the music is written to (`set_video`, `probe`, `scan` for cuts and production sound, `sheet` for frames, `mux`), hit points (`edit_hits`, `hit_rows`), the tempo that catches them (`fit_constant`, `fit_map`, `best_start`), timecode (`timecode`, `parse_time`, `tc_args`: drop-frame too) and the guide (`guide_stem`). `web/picture.js` is its lane and video window on the Desk; `bench._picture` and `studio.js workPicture` the Spotting seat's CUES. |
 | `src/tunetrack/tracking.py` | Stage 4: what a recording becomes (`passes`, `place_audio`, `place_midi`, `commit`) and comping (`comp`, `split_clip`). `livehost.py` holds what is armed and runs `record` / `record_stop`; `web/tracking.js` is the Desk's side. |
@@ -1097,9 +1099,12 @@ virtualised there), voice talkback (needs a microphone and the browser's speech 
   palette (`CV` in app.js): rounded clips with a title band, phrase shading, beat lines, a ruler with the loop on
   top, section flags and bar numbers that do not collide, a VFD chord lane, a piano roll with real keys and
   rounded notes, a velocity lane with stems, a centred empty state.
-- **Display font** (SETUP): Bahnschrift (built in), Cyber Astra or Nexaro Display, loaded with CSS `local()` from
-  the owner's installed fonts: the font files are never in the repo (no licence text in them; the repo is public).
-  The choice is `display_font` in ui_prefs, so the app window and every browser agree.
+- **Fonts** (SETUP): a font per role, each a CSS variable: Labels (`--legend`), Text (`--ui`), Displays
+  (`--screen`: rack screens, playhead; defaults to Numbers) and Numbers (`--mono`, also the canvases' labels), plus
+  label spacing, width and capitals. The pickers list the fonts installed on this computer (`font_list` reads the
+  Windows font registry; the page keeps the ones it can draw): font files are never in the repo (the repo is
+  public). The choice is `fonts` in ui_prefs (the old `display_font` is carried over), so the app window and every
+  browser agree.
 - **Icon**: `web/icon.svg` (favicon) and `web/icon.ico` (16 to 256 px); `desktop.make_shortcut` sets it.
 - **The console** (`console.js`, `console.css`): one component for the MIX room (full height), the Desk's Mixer
   tab (compact: pan, fader, M/S; a strip's summary opens it in MIX) and the Mix seat's bench (take ghosts). It
@@ -1176,6 +1181,57 @@ the 2 s before T29 got its depends on T28, and the resumed run mixed and summari
   scorecard counts rejected takes and shows `$x/take` or `$x/task`; `cleanup.py` + MCP tool `cleanup` (prunes
   cache renders no live project uses; dry run on that session: 5.2 GB of 5.3 GB). 511 tests.
 Not checked in the browser: the sheet's MEASURED NOW block and final-mix banner.
+
+**Sign-off and Co-Producer** (2026-11-18, uncommitted). The owner asked for more say: to hear and confirm a seat's
+work before it goes on (e.g. Sound's instruments before the Producer), to change it themselves, or to send it back
+with notes; to be Co-Producer; and one clear place for whatever needs them. Agreed design and what was built:
+- **SIGN OFF, one switch per seat** (board seat field `signoff`, `signoff.seat_signoff`, also in `seat_assign`, the
+  seat picker, SETUP and a key on every rack unit). On a seat that makes takes: its agent's hand-in stops at the user
+  first (stage `signoff`: PASS TO PRODUCER with a note, SEND BACK, ACCEPT, which skips the Producer's run, or
+  DISCARD). Turning it on for a seat that works on the session moves it to takes. A person's own take has no stop.
+- **Co-Producer = SIGN OFF on the Producer**, not a stop on every seat: the Producer's own calls already cover each
+  seat's work, so the user hears each take once, with the verdict attached. `takes.take_accept / take_reject /
+  take_discard` by the Producer record a `proposal` on the take and put up stage `confirm` (CONFIRM, OVERRULE: send it
+  back or accept instead, ASK AGAIN: a new audition task with the user's note). The audition task closes as
+  "accept proposed, waiting on the user", so the Producer's run ends normally (`_undecided` treats a proposal as
+  decided). A clash is answered before anything is held. A take the user already passed is accepted straight away.
+- **Plans**: tasks a signed-off Producer or Review adds (`task_add`) are `held` ("plan") and `_ready` skips them;
+  `signoff.gather_plans` (each floor tick) puts them up as one stage `plan` item once that seat's run is over and it
+  has no ready task (an outside app: 3 s after its last task). The item carries what the Producer's run changed on
+  the session itself (live, undoable, not held). APPROVE releases them; SEND BACK keeps them held and gives the
+  Producer "Revise your plan", whose new tasks join the next plan item. The user can edit, drop and add tasks in the
+  plan (`task_add(plan=)`).
+- **Versions to choose from**: a seat (`options` 2 or 3, SETUP) or one task (`task_update(options=)`, or "two
+  versions next time" when sending back) asks an agent seat for several takes; the brief says how (`briefs.OPTIONS`).
+  The floor holds those hand-ins until the run is over, then stage `choose`: KEEP one (the rest are discarded; the kept
+  one goes to the Producer, or is accepted when there is none) or NONE OF THESE (the first goes back, the rest go).
+- **Presets and away**: `signoff.crew_involve` (HANDS OFF, CO-PRODUCER, EVERY HAND-IN; the board says which, or
+  `custom`) and `signoff.away_set` (a stop that waited N minutes goes through as if its switch were off; a choice
+  between versions and a hand-in with no Producer agent still wait). The top bar's INVOLVE key opens both.
+- **The Needs You sheet** (`web/needs.js`, `needs.css`): full-width sheet from the NEEDS YOU key or any row of the
+  room's bay (now compact rows, each headed with what it needs: LISTEN & SIGN OFF, CONFIRM, APPROVE PLAN, CHOOSE,
+  ANSWER, UNBLOCK). The workspace is the take as its seat's bench draws it (Sound: slots with was/now, a phrase per
+  sound, CHANGE… swaps an instrument in the take from the device browser inline; note seats: the roll; Mix: the
+  console, editable), the Producer's verdict, A/B, OPEN ON DESK, and the take's diff; a plan as editable rows; the
+  versions side by side. Questions and blockers use `ticketEl` (the old ticket) flat in the workspace. `studio.js`
+  hands its helpers over as `window.TTStudio` (it is one closure). What the user changes in a take after its hand-in
+  (`handed.json`, `signoff.your_changes`) is told to the Producer when they pass it.
+- One line each in the briefs (`CO_AUDITION`, `CO_PLAN`, Review's), nothing for a signed-off seat itself.
+22 tests in `tests/test_signoff.py`, scripted agents. Checked in the browser (`output/_preview/signoff_check.py`,
+port 7390, no device, no crew launched): every kind of item renders; CHANGE swapped Pads in tk1 and PASS told the
+Producer "They changed: Pads: instrument synth:pad -> synth:dark_pad"; a plan edit, an added task and APPROVE
+released all three; KEEP B discarded A and sent B to the Producer; ASK AGAIN without a note is refused; presets and
+AWAY switch the rack keys and the top bar. Not checked: a real crew through these stops, anything heard.
+
+**Songs that grow** (2026-11-18, uncommitted). The owner found songs stuck at about four parts and short: the
+Producer planned the smallest cast and form, and nothing asked for more. Now: `brief.length` (s or m:ss) and
+`brief.size` (small / medium / full, typical part counts in `craft.PRODUCER`, not limits) size the plan, with a
+`brief.arrangement` map of which parts enter and leave per section (Brief tab fields for all three). Composer,
+Arranger and Rhythm may add a part their bars need (`craft.GROW`, the one exception to "stay in your task's
+tracks"); when the take is accepted, `studio.new_parts_to_sound` puts the new instrument tracks on Sound's queued
+task, or a new Sound task that queued Mix tasks wait for (`take_accept` reports it as `new_parts`). Prompt budget
+raised to 14,000 for the Producer (owner OK'd). `tests/test_new_parts.py`. Not tried with a real crew yet.
+`test_signoff.py::test_a_plan_sent_back_is_revised_and_comes_back_as_one` is flaky (about 1 in 3 runs).
 
 Left:
 

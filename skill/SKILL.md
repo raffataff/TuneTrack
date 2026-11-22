@@ -19,8 +19,9 @@ Before writing a note, find out what the music is for:
   colours, existing audio folders and file naming, the engine (Godot `project.godot`, Unity `Assets/`, Unreal `.uproject`, web).
 - Settle on: **genre/palette, mood (2-3 adjectives), energy, tempo, key/mode, cue type, length, loop form, delivery format and path.**
   If the user gave intent ("dark synthwave menu, 100 bpm") it wins over your inference. Ask only if the project gives no clue.
-- Record it: `project_new(name, tempo, key, time_sig, brief={genre, mood, use, game, references, notes}, eq_engine=...)`
-  (eq_engine: see section 6).
+- Record it: `project_new(name, tempo, key, time_sig, brief={genre, mood, use, game, references, notes, length, size}, eq_engine=...)`
+  (eq_engine: see section 6). length: seconds or m:ss; size: small (3-5 parts), medium (6-9) or full (10-16) - a starting
+  cast, not a cap: add a part whenever a section needs one.
 
 ## 2. Check the instrument library
 
@@ -46,11 +47,12 @@ keep their bars when it moves. Give every hit something a viewer hears there (a 
 change, silence), keep the music thin where `sound.loud` shows dialogue, and deliver with `render(out="cue.mp4")`.
 
 Set `markers()` for sections and `project_set(loop="5:1-21:1")` for the loop region, then put each section's harmony on
-the chord track (section 4). Typical forms:
+the chord track (section 4). Typical forms (check bars against seconds: 16 bars of 4/4 at 100 bpm is only 38 s). Sections should grow: plan which
+parts enter and leave in each section, holding some back so A' and B arrive, rather than every part playing throughout.
 
 | Cue | Length | Form and notes |
 |---|---|---|
-| Main menu | 45-120 s loop | Optional 2-4 bar intro (played once) then an A(8) B(8) or A A' B A loop. Memorable motif, medium density, leaves room for UI sounds. |
+| Main menu | 45-120 s loop | Optional 2-4 bar intro (played once) then A A' B A'' (8 bars each at most tempos). Memorable motif, medium density, leaves room for UI sounds. |
 | Exploration / overworld | 1.5-3 min loop | Long arcs, sparse texture, breathing room, slow harmonic rhythm (1-2 bars per chord). |
 | Town / shop | 40-90 s loop | Warm, rhythmic, small ensemble, catchy. |
 | Battle | 60-120 s loop | 130-170 bpm, driving ostinato, strong bass, accents and hits, short phrases; B section raises intensity. |

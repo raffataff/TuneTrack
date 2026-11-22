@@ -33,11 +33,11 @@
 .ch.moved { box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 0 0 1px var(--cyan); }
 .ch.muted .fad, .ch.muted .pan { opacity: .5; }
 .chTop { display: flex; flex-direction: column; gap: 1px; padding: 6px 7px 6px; border-top: 3px solid var(--c); background: linear-gradient(color-mix(in srgb, var(--c) 10%, transparent), transparent); }
-.chTop .kind { font: 8.5px var(--legend); letter-spacing: var(--legend-sp); text-transform: uppercase; color: var(--muted); }
+.chTop .kind { font: 8.5px var(--legend); letter-spacing: var(--legend-sp); text-transform: var(--legend-case); color: var(--muted); }
 .chTop .inst { font-size: 10.5px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ch.master .chTop .inst { font: 9.5px var(--mono); color: var(--muted); }
 .sec { padding: 5px 5px 6px; border-top: 1px solid #0a0b0d; box-shadow: inset 0 1px 0 rgba(255,255,255,.025); }
-.secH { font: 8px var(--legend); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin: 0 0 4px 2px; }
+.secH { font: 8px var(--legend); letter-spacing: .14em; text-transform: var(--legend-case); color: var(--dim); margin: 0 0 4px 2px; }
 .slots { display: flex; flex-direction: column; gap: 2px; }
 .sec.ins .slots { height: calc(var(--insRows, 3) * 22px - 2px); overflow: hidden auto; scrollbar-width: thin; align-content: start; }
 .sec.snd .slots { height: calc(var(--sndRows, 2) * 22px - 2px); overflow: hidden auto; scrollbar-width: thin; align-content: start; }
@@ -64,9 +64,9 @@
 .ch .slot.send span { overflow: hidden; text-overflow: ellipsis; }
 .ch .slot.send b { font: 400 9.5px var(--mono); color: var(--muted); flex: none; }
 .ch .slot.send i { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--c); opacity: .75; margin: 0; }
-.ch .slot.out { display: flex; gap: 5px; align-items: center; font: 9.5px var(--legend); letter-spacing: var(--legend-sp); text-transform: uppercase; color: var(--muted); }
+.ch .slot.out { display: flex; gap: 5px; align-items: center; font: 9.5px var(--legend); letter-spacing: var(--legend-sp); text-transform: var(--legend-case); color: var(--muted); }
 .ch .slot.out span { color: var(--dim); font-family: var(--ui); }
-.ch .sum { margin: 5px 5px 0; height: 20px; padding: 0 4px; font: 9px var(--legend); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); background: #0d0f12; border: 1px solid #050607; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ch .sum { margin: 5px 5px 0; height: 20px; padding: 0 4px; font: 9px var(--legend); letter-spacing: .06em; text-transform: var(--legend-case); color: var(--muted); background: #0d0f12; border: 1px solid #050607; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ch .sum:hover { color: var(--amber); border-color: var(--amber-d); }
 .chTop .au { font-weight: 400; color: var(--vfd); margin-left: 4px; }
 
@@ -131,7 +131,7 @@
 .ch.master .bands { display: flex; gap: 2px; align-items: flex-end; height: 58px; margin: 6px 6px 0; padding-bottom: 11px; position: relative; }
 .ch.master .bands div { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; position: relative; min-width: 0; }
 .ch.master .bands i { display: block; background: linear-gradient(var(--amber), #a86c00); border-radius: 1px 1px 0 0; min-height: 1px; }
-.ch.master .bands span { position: absolute; bottom: -11px; left: -2px; right: -2px; text-align: center; font: 7.5px var(--legend); color: var(--dim); text-transform: uppercase; white-space: nowrap; overflow: hidden; }
+.ch.master .bands span { position: absolute; bottom: -11px; left: -2px; right: -2px; text-align: center; font: 7.5px var(--legend); color: var(--dim); text-transform: var(--legend-case); white-space: nowrap; overflow: hidden; }
 .ch.master .bands .meta { font-size: 10px; align-self: center; margin: auto; }
 .ch.master .loud { display: grid; gap: 2px; padding: 0 5px 5px; font: 11px var(--mono); color: var(--vfd); text-align: center; }
 .ch.master .loud span { background: var(--vfd-bg); border: 1px solid #000; border-radius: 3px; padding: 2px 0; }
@@ -142,14 +142,14 @@
 .fxPanel { margin-top: 8px; border: 1px solid #000; border-radius: var(--r); background: linear-gradient(#1a1d21, #141619); box-shadow: inset 0 1px 0 rgba(255,255,255,.05), inset 0 2px 0 var(--c); padding: 10px 12px; }
 .conWrap.fill .fxPanel { margin: 10px 10px 10px 0; overflow: auto; min-height: 0; }
 .fxPanel .fxHead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
-.fxPanel .fxHead .nm { font: 10.5px var(--legend); text-transform: uppercase; letter-spacing: var(--legend-sp); border-left: 3px solid var(--c); padding-left: 7px; color: var(--ink); }
+.fxPanel .fxHead .nm { font: 10.5px var(--legend); text-transform: var(--legend-case); letter-spacing: var(--legend-sp); border-left: 3px solid var(--c); padding-left: 7px; color: var(--ink); }
 .fxPanel .fxHead .mini.on { color: var(--green); border-color: #1d4a2e; background: rgba(79,220,132,.08); }
 .fxPanel .fxBody, .fxPanel .fxks { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; }
 .conWrap.fill .fxPanel .fxBody, .conWrap.fill .fxPanel .fxks { grid-template-columns: 1fr; }
 .fxPanel .fxBody > .fxq, .fxPanel .fxBody > .fxks, .fxPanel .fxks > .meta, .fxPanel .fxBody > .meta { grid-column: 1 / -1; }
 .fxPanel .fxq { font: 11px var(--mono); background: var(--well); color: var(--ink); border: 1px solid #000; border-radius: 3px; padding: 4px 7px; max-width: 320px; }
 .fxk { display: grid; grid-template-columns: 86px minmax(60px, 1fr) 72px; gap: 8px; align-items: center; font: 10px var(--mono); }
-.fxk .kn { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: uppercase; font: 9px var(--legend); letter-spacing: .08em; }
+.fxk .kn { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: var(--legend-case); font: 9px var(--legend); letter-spacing: .08em; }
 .fxk.auto .kn { color: var(--cyan); }
 .fxk input[type=range] { width: 100%; min-width: 0; accent-color: var(--amber); }
 .fxk .v, .fxk input.db { font: 10px var(--mono); color: var(--vfd); background: var(--vfd-bg); border: 1px solid #000; border-radius: 3px; padding: 2px 3px; text-align: center; cursor: text; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; min-width: 0; }

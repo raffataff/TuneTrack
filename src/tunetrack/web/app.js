@@ -75,7 +75,13 @@ const CV = {
   ruler: "#121417", rulerTxt: "#8e8b84", tick: "#2c3138", tickMinor: "#1f2328", marker: "#ffb224", play: "#ff5545",
   vfd: "#7cf0d6", vfdBg: "#0a1716", dim: "#64625c",
 };
-const UI_FONT = "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif", MONO = "'Cascadia Mono', Consolas, ui-monospace, monospace";
+// the canvases' fonts follow Setup's (the CSS variables on <html>); shell.js fires "tt-fonts" when they change
+let UI_FONT = "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif", MONO = "'Cascadia Mono', Consolas, ui-monospace, monospace", LEGEND = "Bahnschrift, 'Segoe UI', sans-serif";
+const syncFonts = () => {
+  const cs = getComputedStyle(document.documentElement), v = (n, d) => cs.getPropertyValue(n).trim() || d;
+  UI_FONT = v("--ui", UI_FONT); MONO = v("--mono", MONO); LEGEND = v("--legend", LEGEND);
+};
+syncFonts(); addEventListener("tt-fonts", syncFonts);
 // a rounded rectangle path (r per corner: [tl, tr, br, bl] or one number)
 function rrect(g, x, y, w, h, r) { g.beginPath(); g.roundRect(x, y, Math.max(0, w), Math.max(0, h), r); }
 const songEnd = () => {
@@ -503,7 +509,7 @@ function drawRuler() {
   // tempo changes (a fit to picture hits makes many): a cyan tick at each, its bpm along the bottom where it fits
   const tempos = tempoChanges();
   if (tempos.length > 1) {
-    g.font = "9px Cascadia Mono, Consolas, ui-monospace, monospace"; let room = -1e9;
+    g.font = `9px ${MONO}`; let room = -1e9;
     for (const [b, bpm] of tempos) {
       const x = b * S.zoom - sx; if (x > W) break;
       g.fillStyle = "rgba(92,200,255,.8)"; g.fillRect(Math.round(x), H - 9, 1, 9);
@@ -1231,7 +1237,9 @@ function renderReport() {
 
 function renderBrief() {
   const box = $("#brief"); if (!S.doc) { box.innerHTML = ""; return; }
-  const br = S.doc.brief || {}, keys = Array.from(new Set(["genre", "style", "mood", "use", "game", "references", "notes", ...Object.keys(br)])).filter((k) => k !== "stills");
+  const br = S.doc.brief || {}, keys = Array.from(new Set(["genre", "style", "mood", "use", "game", "length", "size", "references", "arrangement", "notes", ...Object.keys(br)])).filter((k) => k !== "stills");
+  // size: how big the cast starts (the crew may still grow it); length: seconds or m:ss
+  const sizeSel = `<select data-b="size" title="How big the cast starts. The crew may still add parts the music calls for.">${["", "small", "medium", "full"].map((v) => `<option value="${v}"${(br.size || "") === v ? " selected" : ""}>${v || "auto (from the cue)"}</option>`).join("")}</select>`;
   // style: a genre style sheet every seat's brief follows (auto: the genre's words pick one)
   if (!S.styles) { S.styles = []; api("style_list", {}, null).then((l) => { S.styles = l; if (S.tab === "brief") renderBrief(); }).catch(() => {}); }
   const styleSel = `<select data-b="style" title="A genre style sheet: each seat's brief gets that genre's craft. Auto: the genre's words pick one.">
@@ -1240,7 +1248,7 @@ function renderBrief() {
   const still = (s, i) => `/api/picture?kind=still&n=${i}${S.take ? "&take=" + encodeURIComponent(S.take) : ""}&v=${encodeURIComponent(s.file || "")}`;
   const stills = (br.stills || []).map((s, i) => `<figure><a href="${still(s, i)}" target="_blank" rel="noopener" title="Open the full image"><img loading="lazy" src="${still(s, i)}" alt="${esc(s.note || s.file || "")}"></a><figcaption>${esc(s.note || String(s.file || "").split("/").pop())}<button class="mini" data-still-rm="${i + 1}" title="Take this screenshot out of the brief">×</button></figcaption></figure>`).join("");
   box.innerHTML = `<div class="card"><h3>Brief (what the music is for)</h3><div class="grid2">
-    ${keys.map((k) => `<span>${esc(k)}</span>${k === "style" ? styleSel : k === "notes" ? `<textarea data-b="${k}" rows="3">${esc(br[k] || "")}</textarea>` : `<input data-b="${k}" value="${esc(typeof br[k] === "string" ? br[k] : JSON.stringify(br[k] ?? ""))}">`}`).join("")}
+    ${keys.map((k) => `<span>${esc(k)}</span>${k === "style" ? styleSel : k === "size" ? sizeSel : k === "notes" || k === "arrangement" ? `<textarea data-b="${k}" rows="3">${esc(br[k] || "")}</textarea>` : `<input data-b="${k}"${k === "length" ? ' placeholder="e.g. 2:30 or 90"' : ""} value="${esc(typeof br[k] === "string" ? br[k] : JSON.stringify(br[k] ?? ""))}">`}`).join("")}
   </div></div>
   ${stills ? `<div class="card"><h3>Stills (screenshots for the mood)</h3><div class="stillsB">${stills}</div></div>` : ""}
   <div class="card"><h3>Delivery</h3><div class="grid2">
@@ -1362,8 +1370,10 @@ async function openProjectModal() {
     e.preventDefault();
     const name = $("#npName").value.trim(); if (!name) { toast("Give the project a name"); $("#npName").focus(); return; }
     const brief = {}; Object.keys(IDEAS).forEach((k) => { const v = $("#np_" + k).value.trim(); if (v) brief[k] = v; });
+    // read every field before the sheet closes: closing removes the form from the page
+    const args = { name, tempo: +$("#npTempo").value, key: `${$("#npRoot").value} ${$("#npMode").value}`, time_sig: sig, brief };
     Sheet.close(true); leaveTake();
-    await act("project_new", { name, tempo: +$("#npTempo").value, key: `${$("#npRoot").value} ${$("#npMode").value}`, time_sig: sig, brief });
+    await act("project_new", args);
   };
 }
 // ---------------------------------------------------------------- choosers and forms as sheets (sheet.js)

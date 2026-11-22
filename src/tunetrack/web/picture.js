@@ -71,12 +71,12 @@ const Picture = (() => {
           for (let x = a; x < b; x += tw + 1) g.drawImage(strip, i * m.w, 0, m.w, m.h, x, 2, tw, H - 4);
           g.restore();
         }
-      } else { g.fillStyle = "#5c574d"; g.font = "11px Segoe UI, system-ui, sans-serif"; g.textBaseline = "middle"; g.fillText(p.file.split("/").pop(), Math.max(6, x0 + 6), H / 2); }
+      } else { g.fillStyle = "#5c574d"; g.font = `11px ${UI_FONT}`; g.textBaseline = "middle"; g.fillText(p.file.split("/").pop(), Math.max(6, x0 + 6), H / 2); }
       g.strokeStyle = drag && drag.kind === "start" ? "#5cc8ff" : "#3b3b40"; g.strokeRect(Math.round(x0) + 0.5, 1.5, Math.round(x1 - x0) - 1, H - 3);
       g.fillStyle = drag && drag.kind === "start" ? "#5cc8ff" : "#8f897c"; g.fillRect(Math.round(x0), 0, 3, H);  // the first frame: grab it to move the picture
       for (const t of (view && view.cuts) || []) { const x = X(t); if (x >= 0 && x <= W) { g.fillStyle = "rgba(255,255,255,.75)"; g.fillRect(Math.round(x), 0, 1, 5); g.fillRect(Math.round(x), H - 5, 1, 5); } }
     }
-    g.font = "10px Cascadia Mono, Consolas, ui-monospace, monospace"; g.textBaseline = "top";
+    g.font = `10px ${MONO}`; g.textBaseline = "top";
     for (const h of hits()) {
       const x = Math.round(X(h.t)); if (x < -160 || x > W) continue;
       const o = offBeat(h.t), exact = Math.abs(o.off) <= 0.5 / fps() + 1e-6, ms = Math.round(o.off * 1000);

@@ -47,8 +47,8 @@ is acoustic):
 
 PRODUCER = """Craft: what you decide.
 Form by cue (set it with markers and project_set(loop=...)):
-- Menu: 45-120 s loop. Optional 2-4 bar intro played once, then A(8) B(8) or A A' B A. A motif people remember,
-  medium density, room for UI sounds.
+- Menu: 45-120 s loop. Optional 2-4 bar intro played once, then A A' B A'' (8 bars each at most tempos). A motif
+  people remember, medium density, room for UI sounds.
 - Exploration: 1.5-3 min loop. Long arcs, sparse, one chord per 1-2 bars.
 - Town, shop: 40-90 s loop. Warm, rhythmic, small ensemble, catchy.
 - Battle: 60-120 s loop, 130-170 bpm. Driving ostinato, strong bass, short phrases; B raises the intensity.
@@ -59,6 +59,10 @@ Form by cue (set it with markers and project_set(loop=...)):
 - Credits: 2-4 min one-shot, a medley of the motifs.
 A loop is a whole number of bars and its last bar leads back into its first. Adaptive music: every layer in the
 same key, tempo and length, tracks tagged with layer, render(layers=True).
+16 bars of 4/4 at 100 bpm is 38 s: check the bars against the seconds.
+Cast (typical, not a limit): small 3-5 parts; medium 6-9 (+ counterline, ostinato, extra percussion, a colour);
+full 10-16 (+ doublings, harmony in two registers, a low doubling, swells). Unset: ambience and stingers small,
+battle and boss full, the rest medium.
 
 """ + GENRES + """
 Style sheets give each seat the detail of one genre: project_set(brief={"style": <name>}) with chiptune, lofi,
@@ -197,12 +201,14 @@ SOUND = """Craft: the right instrument for the part.
   palette the brief needs is not installed, that is a blocker for the user (ask_human), not something to cover.
 - HALion Sonic and Groove Agent load empty: "vst3:<plugin>" without a patch renders silence. MODO DRUM plays
   without one.
-- Choose against what the part demands (your task says: short fast notes, long lines, how loud and how soft).
+- Every part is written before you choose: choose against what it plays (range, short fast notes or long lines,
+  how loud and how soft).
   Shortlist by tag and name, then audition([...]) the shortlist in one call (up to 12; phrase="melody", "bass",
   "chords", "drums" or the part's own notes in TTN). One sfz_list and sfz_info only for the finalists: range,
   keyswitches, the CCs it answers to.
-- A patch with dynamics_cc takes its loudness from that CC, not from velocity: say so in your summary, with the
-  CC number, so the seat that writes the part draws its dynamics on that controller.
+- A patch with dynamics_cc takes its loudness from that CC, not from velocity: when you choose one for a part
+  written without that CC, name the track and the CC number in your summary, so the seat that wrote it draws the
+  dynamics on that controller.
 - Give each track its role (track_update(role=...)) so range checks apply to what is written for it.
 - A built-in synth is shaped with track_update(instrument_params={"cutoff": .., "release": ..}). A sampled
   instrument's envelope cannot be changed from here: when its release or attack is wrong for the part, choose
@@ -210,11 +216,10 @@ SOUND = """Craft: the right instrument for the part.
 - An articulation for some bars only needs its own track with that patch for those bars: set the track up and
   say which bars have to move there.
 
-Checking: the melody is usually written before you choose, so audition with its notes (phrase= the track's TTN
-from notes_read) and then render() and listen() with the part in place. On a track with no notes yet, audition()
-with the phrase your task describes is the check; say so in your summary. A Sound check task comes after those
-parts are written: audition each named track on its own notes and change a patch only where it fails (range,
-attack, articulation); say which tracks you left as they were. verify shows pitches that are silent or much quieter
+Checking: audition each track's shortlist on its own notes (phrase= the track's TTN from notes_read), then
+render() and listen() with every part in place. Keep a stand-in that already works for its part and say which
+tracks you left as they were. A track with no notes is a part nobody wrote: tell the Producer instead of choosing
+for it. Another drum kit maps its notes differently: check verify.drum_notes and set drum_map. verify shows pitches that are silent or much quieter
 (outside the range), an instrument sounding transposed, slow attacks on short notes; masking shows whether it is
 heard against the rest. Brightness in audition() is for comparing candidates, not a target.
 
@@ -281,10 +286,19 @@ not a finding.
 
 """ + LISTEN
 
+# Seen live: casts stayed at the four tracks the Producer planned, so songs sounded bare. A writing seat may grow it.
+GROW = """Growing the arrangement (the one way out of your task's tracks): when your bars need a part nobody has
+({examples}), track_add it with a role and a stand-in, write it, and name its job and sections in your summary;
+Sound picks its instrument after. Enter where brief.arrangement has room, not everywhere."""
+_GROW = {"composer": "a second theme voice for B; counterlines are the Arranger's when one is seated",
+         "arranger": "a counterline for A', a doubling at the climax, a pad under the bridge",
+         "rhythm": "a shaker lifting the second A, toms for the build"}
+
 CRAFT = {"producer": PRODUCER, "spotting": SPOTTING, "composer": COMPOSER, "arranger": ARRANGER, "rhythm": RHYTHM,
          "sound": SOUND, "tracking": TRACKING, "mix": MIX, "review": REVIEW}
 
 
 def craft(seat: str) -> str:
     """The craft text for a seat ("" for a name that is not one)."""
-    return CRAFT.get(seat, "")
+    text = CRAFT.get(seat, "")
+    return text + "\n\n" + GROW.format(examples=_GROW[seat]) if seat in _GROW else text
