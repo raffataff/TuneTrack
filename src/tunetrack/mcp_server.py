@@ -17,7 +17,7 @@ INSTRUCTIONS = """TuneTrack is a multitrack music workstation for game soundtrac
 
 Workflow:
 1. status() - see instruments: VST3 plugins, saved patches (plugin + sound), built-in synths, SFZ libraries.
-2. project_new(name, tempo, key, time_sig, brief={genre, mood, use, references}) - plan form first (sections,
+2. project_new(name, tempo, key, time_sig, brief={genre, mood, use, references, length, size}) - plan form first (sections,
    bars, loop region, where the hook lands) and record it with markers(). Then put the harmony on the chord track:
    harmony("i VI III VII", section="A") per section (roman numerals in the key, or symbols "Am7 F/A G").
 3. track_add(name, instrument=..., role=...) per part. instrument: "patch:<id>" (real VST3 sound - preferred for
@@ -200,7 +200,9 @@ def project_new(name: str, tempo: float = 120, key: str = "C major", time_sig: s
                 brief: dict | None = None, folder: str | None = None, overwrite: bool = False,
                 eq_engine: str | None = None) -> dict:
     """Create a project and make it current. brief: free-form intent, e.g. {"genre": "orchestral fantasy",
-    "mood": "hopeful, nostalgic", "use": "main menu loop", "game": "..."}. folder defaults to TuneTrack/projects.
+    "mood": "hopeful, nostalgic", "use": "main menu loop", "game": "...", "length": "2:30", "size": "full"}
+    (length: how long the cue runs, seconds or m:ss; size: small, medium or full, how big the cast is - both
+    starting points the form and track list are planned from). folder defaults to TuneTrack/projects.
     eq_engine: what builtin:eq inserts run on - "builtin", "ssl" (SSL Native Channel Strip 2) or "nova" (TDR Nova);
     default from the library config (builtin unless set)."""
     return api.project_new(name, folder, tempo, key, time_sig, brief, overwrite, eq_engine)

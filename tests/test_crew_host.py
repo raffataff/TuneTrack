@@ -51,7 +51,7 @@ FINISHER = """
 """
 
 BOARD_SEAT_KEYS = {"seat", "title", "room", "purpose", "owns", "optional", "tier", "occupant", "label", "mode",
-                   "notes", "paused", "presence", "task", "open_tasks"}
+                   "notes", "paused", "presence", "signoff", "options", "task", "open_tasks"}
 
 
 @pytest.fixture(autouse=True)

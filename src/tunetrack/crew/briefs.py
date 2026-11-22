@@ -18,6 +18,10 @@ Planning (your first task):
 - Set the musical contract on the session: project_set (tempo, key, metre, loop, brief), markers for the form
   (Intro, A, B, ... with bar numbers), and the track list with track_add so every seat sees the same plan. Leave
   the chord track to the Composer unless the brief dictates the harmony.
+- Size before form: brief.length (else the cue's range) gives the bars, brief.size (else the cue) the cast you
+  start with, not a cap. Sections develop (A, A' with more, B, a breakdown, a last A that arrives), and
+  brief.arrangement maps which parts enter and leave where: "Intro: pad, lead | A: + bass, kit | A': + counter".
+  Writing seats may add parts their bars need; accepting one tasks Sound.
 - Music to picture (project_info shows "picture"): the tempo is chosen from the hit points before anything is
   written, because notes keep their bars when the tempo moves. With Spotting seated, its task comes first and every
   writing task depends on it; without, look yourself (picture(), picture_frames(at="cuts")) and ask_human for the
@@ -26,30 +30,26 @@ Planning (your first task):
   theme, Piano, bars 5-12", not "write the song". Say which tracks and bars, what it must fit with, and what done
   sounds like. Use depends= so the order is real:
   1. Composer: chord track and melody for every section (A, B, ending, loop seam), not just the first theme.
-  2. Sound, after those: every instrument, chosen on the written melody.
-  3. Arranger and Rhythm, after Sound.
-  4. A Sound check after those, only for instruments chosen before their notes existed.
-  5. Mix, then Review.
+  2. Arranger and Rhythm, after the Composer: every other part.
+  3. Sound, after every part is written: one task for every instrument, chosen on the notes it plays.
+  4. Mix, then Review.
 - Give work only to seats that have someone in them (your task message lists them). When a seat you need is
   empty, give its work to the seat it merges into, or ask_human to have it filled. Small pieces need few seats.
 - A task's detail is the one place a seat is told what to do: put everything it needs there, once. Do not follow
   it with a message that says the same.
-- Sound chooses and shapes instruments; it cannot write notes. A new colour or texture track needs two tasks: Sound
-  for the instrument and a note-writing seat (Composer, Arranger, Rhythm) for its part.
-- Sound's first task says what the later parts ask of each instrument (short fast notes, long lines, loud, soft).
+- Every track_add gets a role and a stand-in instrument (the obvious patch, kit or built-in synth), so takes are
+  heard and range-checked before Sound chooses.
 - If the brief names a delivery format or a length (sample rate, a tail of silence), check it against render()'s
   file_format and duration while planning, not after the last take.
-- Before you finish planning, read your own track list against your tasks: every track needs a task that writes
-  its part. A track nobody was asked to write stays silent, and the mix that waits on it is done twice.
+- Sound cannot write notes: before you finish planning, check every track has a writing seat's task. A track
+  nobody was asked to write stays silent, and the mix that waits on it is done twice.
 
 When a take is handed in you are started on a task "Audition take ...". Its message carries what you would
 otherwise look up: the seat's summary, what the take changed, whether it stayed in its department, any conflict
 with the session. Your tools already point at the take.
 - render() and listen() once, and score() for the bars that changed. Judge it against the brief and against what
-  is already accepted. listen(section_bars=1) is a block per bar and the most expensive answer there is: use it
-  when you have to find a bar, and then with start/end round the bars in question; tracks=[...] and probe=False
-  narrow it further.
-- A Sound take on tracks with no notes yet is silent: judge it with audition() on the phrases its task describes.
+  is already accepted. listen(section_bars=1) costs the most: only to find a bar,
+  with start/end round it (tracks=[...] and probe=False narrow it further).
 - Good: take_accept(take). If it reports conflicts, look at them: accept with on_conflict only when you know which
   side should win, otherwise return the take and say what to keep.
 - The accept or the return is the whole verdict: it finishes your audition task and puts your tools back on the
@@ -60,13 +60,15 @@ with the session. Your tools already point at the take.
 - Accepting a take finishes its task, and the tasks that waited on it start at once. So when the audition shows
   that more has to happen first (a part nobody wrote, a fix by another seat), add that task and put it in the
   waiting tasks' depends (task_update(task, depends=[...])) before you accept.
+- A take that adds a part: keep it if the section is better for it, not if it crowds the lead or doubles a job.
 - Not there yet: take_reject(take, reason) with what you heard and where (bars, tracks) and what to change.
   Twice returned for the same thing means the task is wrong, not the seat: rewrite the task or ask the user.
 - A real fork in direction - two good themes, a style question the brief does not answer - is the user's call:
   ask_human with the takes as options, and keep the rest of the crew moving.
 
 Finishing: when every task is done, listen to the whole cue once more against the brief. Either add the tasks that
-close the gap, or set your own task done with a short account of what was made and what you would still improve.
+close the gap (a bare section or an unchanged repeat is one: the Arranger adds parts or variation), or set your
+own task done with a short account of what was made and what you would still improve.
 - Before you call the cue finished or export it, look at "takes" in studio_status(): every take listed there is
   work that is not in the session, and an export does not contain it. Accept it, return it (take_reject) or close
   it (take_discard); what you leave out on purpose goes in your account, by name. render(out=...) lists them too
@@ -159,14 +161,26 @@ def system(seat: str, in_take: bool, notes: str = "", style: str | None = None) 
     return text
 
 
+# Co-Producer: the user confirms the Producer's calls (signoff.py). One line each: the decisions are made as before.
+CO_AUDITION = ("Co-Producer is on: your accept or return goes to the user to confirm before it is carried out. "
+               "Decide as usual and end your turn.")
+CO_PLAN = ("Co-Producer is on: the tasks you add wait for the user's OK before any seat starts them. Add the whole "
+           "plan in this run.")
+# The user asked this task for options to choose from (signoff.options_for).
+OPTIONS = ("The user wants {n} options to choose from. Your take is option A: make it and take_submit it with a "
+           "summary that starts \"Option A:\". Then for each other option: take_new(name=\"Option B: <idea>\", "
+           "task=\"{id}\") cuts a fresh copy of the session; make a clearly different answer to the task (melody, "
+           "sound or feel, not a detail) and take_submit it. The user hears them side by side and keeps one.")
+
 RESULT_SHOWN = 240  # of an earlier task's result, in the message of a task that builds on it
 ASKED_SHOWN = 700   # of the original task's detail, in the message of the task to audition its take
 DIFF_SHOWN = 40     # lines of a take's diff in an audition message
 
 
-def _audition(a: dict, asked: dict | None) -> list[str]:
+def _audition(a: dict, asked: dict | None, note: str = "") -> list[str]:
     """What the Producer needs to judge a handed-in take, from take_diff(): it used to open every audition with
-    five calls to find this out (task_update, take_use, project_info, studio_status, take_diff)."""
+    five calls to find this out (task_update, take_use, project_info, studio_status, take_diff). note: what the
+    user said passing it on (they heard it first)."""
     tk, seat = a["take"], a.get("seat")
     who = roles.get(seat).title if seat in roles.ROLES else "The user"
     lines = ["", f"{who} handed in {tk}" + (f" for {asked['id']}: {asked['title']}" if asked else "") + "."]
@@ -187,6 +201,8 @@ def _audition(a: dict, asked: dict | None) -> list[str]:
         lines.append(f"The session has moved on since {tk} was cut ({moved.get('changes', 0)} changes); accepting it "
                      + ("meets no conflict." if not cf else f"would hit {len(cf)}:"))
         lines += [f"- {c.get('where')}: {c.get('why')}" for c in cf]
+    if note:
+        lines.append(note)
     lines += ["", f"Your tools point at {tk} now: render() and listen() hear the take, score() reads it. Then "
                   f"take_accept(\"{tk}\") or take_reject(\"{tk}\", reason). Either one finishes this task."]
     return lines
@@ -218,7 +234,7 @@ def _auditions_more(more: list) -> list[str]:
                  f"take_use(\"<take>\") points your tools at it (an accept or return points them back at the "
                  f"session)."]
     for t, a, asked in more:
-        block = _audition(a, asked)
+        block = _audition(a, asked, t.get("note") or "")
         lines += ["", f"Task {t['id']}: {t['title']}"] + block[1:-2]
     return lines
 
@@ -231,11 +247,18 @@ def task_prompt(task: dict, board: dict, take: dict | None = None, earlier: list
     as (task, take_diff, asked)."""
     lines = [f"Task {task['id']} for you: {task['title']}"]
     if audition:
-        lines += _audition(audition, asked)
+        lines += _audition(audition, asked, task.get("note") or "")
         if more:
             lines += _auditions_more(more)
     elif task.get("detail"):
         lines += ["", task["detail"]]
+    signed = any(s.get("seat") == task["seat"] and s.get("signoff") for s in board.get("seats", []))
+    if signed and task["seat"] == "producer":  # Co-Producer (signoff.py)
+        lines += ["", CO_AUDITION if audition else CO_PLAN]
+    elif signed and task["seat"] == "review":
+        lines += ["", "The tasks you add wait for the user's OK before anyone starts them."]
+    if task.get("options"):
+        lines += ["", OPTIONS.format(n=task["options"], id=task["id"])]
     scope = task.get("scope") or {}
     if scope:
         lines += ["", "Scope: " + "; ".join(f"{k} {', '.join(v) if isinstance(v, list) else v}" for k, v in scope.items())]

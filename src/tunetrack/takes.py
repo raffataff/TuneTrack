@@ -696,6 +696,8 @@ def take_submit(summary: str, take: str | None = None, session: str | None = Non
     if synced:
         rep = _report(d, _meta(d))
     meta = _meta(d, state="submitted", summary=str(summary).strip(), submitted=round(time.time(), 3))
+    # the take as handed in: whoever signs it off may change it before passing it on (signoff.your_changes)
+    (d / "handed.json").write_text((d / "project.json").read_text(encoding="utf-8"), encoding="utf-8")
     with studio._Board(str(session_root(d))) as b:
         if meta.get("task"):
             t = b.task(meta["task"])
@@ -736,6 +738,13 @@ def _catch_up(d: Path, meta: dict, session: str | None) -> dict | None:
     return {"since_rev": since, "now_rev": cur.get("rev"), "brought_in": len(brought)}
 
 
+def _new_parts(base: dict, doc: dict) -> list[dict]:
+    """Instrument tracks in doc that base did not have (buses and audio tracks need no instrument choice)."""
+    had = {t["id"] for t in base.get("tracks", [])}
+    return [{"name": t["name"], "role": t.get("role"), "instrument": _instr(t.get("instrument"))}
+            for t in doc.get("tracks", []) if t["id"] not in had and t.get("kind", "midi") == "midi"]
+
+
 def take_accept(take: str, on_conflict: str = "fail", session: str | None = None) -> dict:
     """Merge a take into the session (one undo step). on_conflict: "fail" (default: change nothing and list the
     conflicts), "take" (the take's version wins each conflict) or "session" (the session's version is kept)."""
@@ -751,6 +760,18 @@ def take_accept(take: str, on_conflict: str = "fail", session: str | None = None
         raise ValueError(f"{meta['id']} is already {meta['state']}")
     base, doc = _read_json(d / "base.json"), _read_json(d / "project.json")
     ch = changes(base, doc)
+    if studio.me() == "producer":
+        from . import signoff  # Co-Producer: the Producer's accept waits for the user (a clash is answered first)
+        if signoff.co_producer(str(path)):
+            if prefer is None:
+                _m, clash, _n = merge(base, doc, _read_json(path / "project.json"))
+                if clash:
+                    return {"accepted": False, "take": meta["id"], "conflicts": _label(clash, "take", "session"),
+                            "note": 'Nothing was changed. Accept with on_conflict="take" or "session", or have the '
+                                    "seat take_sync and resolve them in the take."}
+            held = signoff.hold(d, meta, "accept", on_conflict=on_conflict)
+            if held:
+                return held
     with project_lock(path):
         cur = _read_json(path / "project.json")
         merged, conflicts, notes = merge(base, doc, cur, prefer)
@@ -762,7 +783,7 @@ def take_accept(take: str, on_conflict: str = "fail", session: str | None = None
         p = Project.from_json(merged, path=path)
         p.rev = int(cur.get("rev", 0))
         p.save()
-    meta = _meta(d, state="accepted", accepted=round(time.time(), 3), merged_rev=p.rev)
+    meta = _meta(d, state="accepted", accepted=round(time.time(), 3), merged_rev=p.rev, proposal=None)
     with studio._Board(str(path)) as b:
         done = None
         if meta.get("task"):
@@ -774,10 +795,13 @@ def take_accept(take: str, on_conflict: str = "fail", session: str | None = None
         b.emit("take", id=meta["id"], state="accepted", seat=meta.get("seat"), task=meta.get("task"), rev=p.rev,
                by=studio.me())
         b.close_auditions(meta["id"], "accepted")
+        sound = studio.new_parts_to_sound(b, _new_parts(base, doc), meta.get("seat"), meta["id"])
     _leave(d)
     out = {"accepted": True, "take": meta["id"], "rev": p.rev, "changes": len(ch)}
     if done:
         out["task_done"] = done
+    if sound:
+        out["new_parts"] = sound
     if conflicts:
         out["conflicts_resolved"] = {"winner": on_conflict, "conflicts": _label(conflicts, "take", "session")}
     if notes:
@@ -799,9 +823,14 @@ def take_reject(take: str, reason: str, session: str | None = None) -> dict:
     meta = _meta(d)
     if meta["state"] not in ("open", "submitted"):
         raise ValueError(f"{meta['id']} is already {meta['state']}")
+    if studio.me() == "producer":
+        from . import signoff  # Co-Producer: the Producer's return waits for the user
+        held = signoff.hold(d, meta, "return", reason=reason)
+        if held:
+            return held
     # the reason stays on the take: a person in the seat reads it on their task and on the Desk, not in a log
     meta = _meta(d, state="open", returned=round(time.time(), 3), returns=int(meta.get("returns", 0)) + 1,
-                 reason=str(reason).strip())
+                 reason=str(reason).strip(), proposal=None)
     with studio._Board(str(session_root(d))) as b:
         if meta.get("task"):
             t = b.task(meta["task"])
@@ -825,7 +854,12 @@ def take_discard(take: str, session: str | None = None) -> dict:
     meta = _meta(d)
     if meta["state"] not in ("open", "submitted"):
         raise ValueError(f"{meta['id']} is already {meta['state']}")
-    meta = _meta(d, state="rejected", closed=round(time.time(), 3))
+    if studio.me() == "producer":
+        from . import signoff  # Co-Producer: the Producer's discard waits for the user
+        held = signoff.hold(d, meta, "discard")
+        if held:
+            return held
+    meta = _meta(d, state="rejected", closed=round(time.time(), 3), proposal=None)
     out = {"discarded": meta["id"]}
     with studio._Board(str(session_root(d))) as b:
         b.emit("take", id=meta["id"], state="rejected", seat=meta.get("seat"), task=meta.get("task"), by=studio.me())

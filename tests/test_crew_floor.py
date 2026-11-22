@@ -362,10 +362,11 @@ def test_a_seats_craft_text_names_only_tools_that_seat_has():
         text = craft.craft(seat)
         named = {w for w in re.findall(r"\b([a-z_]+)\(", text) if w in mcp_server.TOOLS}
         assert named <= roles.get(seat).tools, (seat, sorted(named - roles.get(seat).tools))
-    # what a seat is sent with every step: the longest (the Producer's, with its playbook) stays under 13,000
-    # characters; it was 15,500 when craft was cut from skill/SKILL.md, and the Composer's 14,700
+    # what a seat is sent with every step: the longest (the Producer's, with its playbook) stays under 14,000
+    # characters; it was 15,500 when craft was cut from skill/SKILL.md, and the Composer's 14,700. Raised from
+    # 13,000 (2026-11-18) for sizing the cue: length, cast, the arrangement map
     sizes = {s: len(briefs.system(s, s != "producer")) for s in roles.ORDER}
-    assert max(sizes.values()) < 13000 and sizes["composer"] < 7000, sizes
+    assert max(sizes.values()) < 14000 and sizes["composer"] < 7000, sizes
 
 # ---- loose ends: takes that never reach the session, and questions that cost a run each -------------------------------
 
@@ -476,7 +477,7 @@ def test_an_agents_take_left_with_work_after_its_task_was_closed_is_handed_in_fo
     assert left["state"] == "submitted" and "loose" not in left and "waiting for you" in left["status"]
     [item] = studio.attention_list()["needs_you"]
     assert item["take"] == "tk1" and "T1 was set cancelled" in item["detail"]
-    assert [o["label"] for o in item["options"]] == ["Accept", "Return", "Discard"]
+    assert [o["do"] for o in item["options"]] == ["accept", "return", "discard"]
     assert studio.task_list(state="cancelled")["tasks"][0]["id"] == "T1"  # the task stays as it was left
     studio.attention_resolve(item["id"], "discard")
     assert takes.take_pending()["takes"] == [] and studio.attention_list()["needs_you"] == []
@@ -517,6 +518,95 @@ def test_an_audition_that_ends_undecided_is_asked_again_then_goes_to_the_user(so
     assert "waiting for you" in takes.take_pending()["takes"][0]["status"]
     studio.attention_resolve(item["id"], "accept")
     assert (69, 8.0) in piano(song) and takes.take_pending()["takes"] == []
+
+
+def test_an_audition_the_producer_closed_itself_without_a_decision_is_asked_again(song, tmp_path):
+    # Seen live: the Producer wrote "tk1 accepted" into its task and closed it, but never called take_accept.
+    seat("producer", agent(tmp_path, "producer", """
+        tool("task_update"); studio.task_update(task, state="done", result="tk1 accepted")
+    """))
+    _handed_in()
+    out = floor.Floor(song).run(poll=0.05)
+    assert out["launches"] == 2
+    said = [m["text"] for m in studio.read()["messages"] if m["to"] == "producer"]
+    assert len(said) == 1 and "ended without take_accept or take_reject" in said[0]
+    [item] = out["needs_you"]
+    assert item["title"].startswith("Audition take tk1") and "waiting for you" in takes.take_pending()["takes"][0]["status"]
+
+
+def test_a_run_whose_take_is_discarded_under_it_is_stopped_and_starts_fresh(song, tmp_path):
+    # Seen live: Sound worked 18 minutes on a take the Producer had discarded 15 seconds in.
+    import time
+    seat("composer", agent(tmp_path, "composer", """
+        import os, time
+        from pathlib import Path
+        if Path(os.environ["TUNETRACK_PROJECT"]).name == "tk1":
+            time.sleep(60)
+        tool("write"); api.write("Piano", "D5:w", at="1:1")
+        tool("take_submit"); takes.take_submit("Hook")
+    """))
+    studio.task_add("composer", "Write the hook")
+    f = floor.Floor(song)
+    assert f.tick()["started"] == ["T1"]
+    takes.take_discard("tk1")
+    f.tick()
+    for _ in range(200):
+        if not f.active():
+            break
+        time.sleep(0.05)
+    ends = [e for e in studio.events(limit=500)["events"] if e["kind"] == "run" and e.get("what") == "end"]
+    assert ends[0]["error"] == "it was stopped: its take tk1 was discarded"
+    assert studio.task_list()["tasks"][0]["state"] == "queued"
+    out = f.run(poll=0.05)
+    assert out["launches"] == 2 and [k["id"] for k in takes.take_list("submitted")["takes"]] == ["tk2"]
+    assert not any(a["kind"] == "blocker" for a in out["needs_you"])  # the stop was not counted as a failed try
+
+
+def test_a_run_whose_task_is_cancelled_is_stopped(song, tmp_path):
+    import time
+    seat("composer", agent(tmp_path, "composer", """
+        import time
+        time.sleep(60)
+    """))
+    studio.task_add("composer", "Write the hook")
+    f = floor.Floor(song)
+    f.tick()
+    studio.task_update("T1", state="cancelled")
+    f.tick()
+    for _ in range(200):
+        if not f.active():
+            break
+        time.sleep(0.05)
+    assert not f.active() and studio.task_list(state="cancelled")["tasks"][0]["id"] == "T1"
+    ends = [e for e in studio.events(limit=500)["events"] if e["kind"] == "run" and e.get("what") == "end"]
+    assert ends[0]["error"] == "it was stopped: its task was cancelled"
+
+
+def test_the_producer_cannot_skip_a_take_or_a_wait_on_the_board(song):
+    # Seen live, in one Producer run: a take never accepted, the next task forced to working, and a second copy of it.
+    studio.seat_assign("composer", "human")
+    studio.seat_assign("sound", "human")
+    write = studio.task_add("composer", "Write the hook")["id"]
+    sound = studio.task_add("sound", "Pick the instruments", depends=[write])["id"]
+    tk = takes.take_new("Hook", write, "composer", use=False)
+    api.write("Piano", "D5:w", at="1:1", project=tk["project"])
+    takes.take_submit("Hook", tk["take"])
+    studio.seat_join("producer")
+    with pytest.raises(ValueError, match="take_accept"):
+        studio.task_update(write, state="done", result="tk1 accepted")
+    with pytest.raises(PermissionError, match="set working when sound starts"):
+        studio.task_update(sound, state="working")
+    with pytest.raises(ValueError, match=f"already has {sound}"):
+        studio.task_add("sound", "  pick the INSTRUMENTS ")
+    studio.seat_join("sound")
+    with pytest.raises(ValueError, match=f"still waits on {write}"):
+        studio.task_update(sound, state="working")
+    studio.seat_join(None)
+    assert studio.task_add("sound", "Pick the instruments")["warning"] == f"sound already has {sound} with this title"
+    studio.seat_join("producer")
+    takes.take_accept(tk["take"])
+    studio.seat_join("sound")
+    assert studio.task_update(sound, state="working")["state"] == "working"
 
 
 def test_take_cleanup_deletes_only_takes_that_are_over(song):

@@ -26,7 +26,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import api, bench, config, gear, livehost, picture as pic, review, studio, styles, takes, tracking
+from . import api, bench, config, gear, livehost, picture as pic, review, signoff, studio, styles, takes, tracking
 from .crew import detect, host, scorecard
 
 PORT = 7373
@@ -209,6 +209,34 @@ def ui_prefs(set: dict | None = None) -> dict:  # noqa: A002 - the page's word f
     return prefs
 
 
+_FONT_STYLES = {"regular", "bold", "italic", "oblique", "light", "semilight", "semibold", "demibold", "black", "heavy",
+                "thin", "extralight", "ultralight", "extrabold", "ultrabold", "medium", "book", "normal", "roman"}
+
+
+def font_list() -> dict:
+    """Font family names installed on this computer (machine-wide and for this user), for Setup's font pickers.
+    Names come from the font registry, so a few are guesses; the page keeps only the ones the browser can draw."""
+    names: set[str] = set()
+    try:
+        import winreg
+    except ImportError:
+        return {"fonts": []}
+    key = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(hive, key) as k:
+                for i in range(winreg.QueryInfoKey(k)[1]):
+                    raw = re.sub(r"\s*\((TrueType|OpenType|All res|VGA res)[^)]*\)\s*$", "", winreg.EnumValue(k, i)[0])
+                    for part in raw.split(" & "):
+                        words = part.split()
+                        while len(words) > 1 and words[-1].lower().replace("-", "") in _FONT_STYLES:
+                            words.pop()
+                        names.add(" ".join(words))
+        except OSError:
+            continue
+    return {"fonts": sorted((n for n in names if n and not n.startswith("@") and len(n) < 64), key=str.lower)}
+
+
 # The studio board, as the user (this server never speaks for a seat). Read-only calls and the user's own
 # decisions: assigning seats, handing out tasks, talkback, answering Needs You, accepting or returning takes,
 # cutting and handing in a take of their own, and starting or stopping the crew.
@@ -222,9 +250,9 @@ STUDIO = {f.__name__: f for f in (
     scorecard.crew_scorecard, scorecard.crew_review, scorecard.crew_history, scorecard.crew_pick,
     live_play, live_stop, live_seek, live_loop, live_window, live_off, live_state,
     live_inputs, live_arm, live_click, live_keys, live_record, live_record_stop, live_devices, live_device,
-    live_guide, live_mix, ui_prefs,
+    live_guide, live_mix, ui_prefs, font_list,
     gear.catalog, gear.gear_state, gear.gear_seen, gear.gear_folders, gear.gear_rescan, gear_audition,
-    gear_audition_stop, styles.style_list,
+    gear_audition_stop, styles.style_list, signoff.seat_signoff, signoff.crew_involve, signoff.away_set,
 )}
 TOKEN = secrets.token_urlsafe(32)
 _HOSTS = {"127.0.0.1", "localhost", "[::1]"}

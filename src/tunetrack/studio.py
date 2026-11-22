@@ -59,13 +59,15 @@ def session_path(session: str | None = None) -> Path:
 def _fresh() -> dict:
     return {"studio": SCHEMA, "rev": 0, "seq": 0, "next": {"T": 1, "M": 1, "N": 1, "tk": 1, "R": 1},
             "seats": {}, "tasks": [], "messages": [], "attention": [], "reports": [],
-            "routed": {}}  # take id -> the hand-in (its "submitted" time) someone has been asked to audition
+            "routed": {},  # take id -> the hand-in (its "submitted" time) someone has been asked to audition
+            "away": None}  # away mode (signoff.away_set): {"on", "since", "minutes"}
 
 
 def _seat_default(seat: str = "") -> dict:
     # The Producer runs the session and accepts takes, so it works on the session itself; everyone else proposes.
+    # signoff: the seat's work stops at the user before it goes on (signoff.py); options: takes offered per task.
     return {"occupant": None, "mode": "direct" if seat == "producer" else "propose", "notes": "", "presence": None,
-            "paused": False}
+            "paused": False, "signoff": False, "options": 0}
 
 
 def _normalise(st: dict) -> dict:
@@ -81,12 +83,28 @@ def _normalise(st: dict) -> dict:
     return st
 
 
+def _read_json(f: Path, tries: int = 20):
+    """A JSON file another process may be replacing right now. On Windows a read in that moment fails; it is tried
+    again. FileNotFoundError: there is none. Other errors only once it keeps failing."""
+    for i in range(tries):
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise
+        except (OSError, ValueError):
+            if i == tries - 1:
+                raise
+            time.sleep(0.01 * (i + 1))
+
+
 def read(session: str | None = None) -> dict:
-    """The board as stored (a fresh one if this session has none yet). Read-only: changes go through the functions."""
+    """The board as stored (a fresh one if this session has none yet). Read-only: changes go through the functions.
+    Seen in tests: a read that met another process's write came back as a fresh board, so the Producer's accept
+    went past the user's Co-Producer switch."""
     f = session_path(session) / "studio" / "state.json"
     try:
-        return _normalise(json.loads(f.read_text(encoding="utf-8")))
-    except (OSError, ValueError):
+        return _normalise(_read_json(f))
+    except FileNotFoundError:
         return _normalise(_fresh())
 
 
@@ -217,7 +235,8 @@ def occupant_label(occ: dict | None) -> str | None:
 
 def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, model: str | None = None,
                 effort: str | None = None, label: str | None = None, mode: str | None = None,
-                notes: str | None = None, session: str | None = None, audition_model: str | None = None) -> dict:
+                notes: str | None = None, session: str | None = None, audition_model: str | None = None,
+                signoff: bool | None = None, options: int | None = None) -> dict:
     """Put someone in a seat, or change how the seat works.
 
     kind: "agent" (the studio launches runner/model for it), "human" (you take it), "external" (an outside app such
@@ -226,10 +245,17 @@ def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, m
     notes: standing instructions for whoever sits here ("no brass", "keep it under 8 voices").
     audition_model: a cheaper model on the same runner for the runs whose only job is to audition handed-in takes
     (the floor's audition tasks); planning runs and the final listen stay on model. "" turns it off. When the agent
-    is replaced on the same runner and audition_model is not given, the old one is kept."""
+    is replaced on the same runner and audition_model is not given, the old one is kept.
+    signoff: the user's SIGN OFF switch for this seat (signoff.py). options: 0, 2 or 3 takes per task to choose from.
+    Both are the user's to set."""
     sid = roles.get(seat).id
     if not _lead(me()):
         raise PermissionError("Only the Producer or the user assigns seats")
+    if (signoff is not None or options is not None) and me() != roles.YOU:
+        raise PermissionError("Sign-off and options are the user's settings")
+    from . import signoff as so
+    if options is not None and int(options) not in so.OPTIONS:
+        raise ValueError(f"options must be one of {so.OPTIONS}")
     with _Board(session) as b:
         s = b.st["seats"][sid]
         if kind is not None:
@@ -263,8 +289,13 @@ def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, m
             s["mode"] = mode
         if notes is not None:
             s["notes"] = notes
+        if options is not None:
+            s["options"] = int(options)
+        said = so._switch(b, sid, bool(signoff)) if signoff is not None else None
         b.emit("seat", seat=sid, occupant=occupant_label(s["occupant"]) or "empty", mode=s["mode"])
         out = {"seat": sid, "occupant": occupant_label(s["occupant"]), "mode": s["mode"]}
+        if said:
+            out["note"] = said
         if (s["occupant"] or {}).get("audition_model"):
             out["auditions"] = s["occupant"]["audition_model"]
         waiting = [t["id"] for t in b.st["tasks"] if t["seat"] == sid and t["state"] in OPEN]
@@ -336,7 +367,8 @@ def _take_in_the_way(b: "_Board", t: dict) -> tuple[str, str] | None:
 def _ready(st: dict, t: dict) -> bool:
     done = {x["id"] for x in st["tasks"] if x["state"] == "done"}
     return (t["state"] == "queued" and all(d in done for d in t.get("depends", []))
-            and float(t.get("not_before") or 0) <= time.time())  # "try again in 15 minutes"
+            and float(t.get("not_before") or 0) <= time.time()  # "try again in 15 minutes"
+            and not t.get("held"))  # part of a plan waiting for the user's OK (signoff.py)
 
 
 def _task_view(st: dict, t: dict, detail: bool = False) -> dict:
@@ -348,7 +380,11 @@ def _task_view(st: dict, t: dict, detail: bool = False) -> dict:
             d["waiting_for"] = waiting
         if float(t.get("not_before") or 0) > time.time():
             d["ready"], d["not_before"] = False, t["not_before"]
-    for k in ("scope", "take", "result"):
+        if t.get("held"):  # "plan" while its seat is still adding, then the plan ticket's id
+            d["ready"], d["held"] = False, "waits for the user's OK"
+            if detail:
+                d["held_by"] = t["held"]
+    for k in ("scope", "take", "result", "options"):
         if t.get(k):
             d[k] = t[k]
     if detail:
@@ -402,36 +438,105 @@ def _review_links(b: "_Board", t: dict) -> list[str]:
     return linked
 
 
+WRITERS = ("composer", "arranger", "rhythm")  # seats that write notes and may grow the cast with a part of their own
+
+
+def new_parts_to_sound(b: "_Board", parts: list[dict], seat: str | None, take: str) -> dict | None:
+    """A writing seat's accepted take added parts (name, role, stand-in instrument). Choosing their instrument is
+    Sound's, so they join the Sound task that has not started yet, or a new one that a waiting Mix task waits for.
+    Without that a part grown mid-session keeps its stand-in through the mix and into the export."""
+    if seat not in WRITERS or not parts:
+        return None
+    names = [p["name"] for p in parts]
+    lines = [f"- {p['name']} ({p.get('role') or 'no role'}, stand-in {p['instrument']})" for p in parts]
+    said = f"{roles.get(seat).title} added in {take}:\n" + "\n".join(lines)
+    if not b.st["seats"]["sound"]["occupant"]:
+        return {"note": f"Sound is empty: {', '.join(names)} keep their stand-in instruments."}
+    t = next((x for x in b.st["tasks"] if x["seat"] == "sound" and x["state"] == "queued"), None)
+    if t:
+        t["detail"] = (t.get("detail") or "").rstrip() + "\n\n" + said
+        if (t.get("scope") or {}).get("tracks"):
+            t["scope"]["tracks"] = list(dict.fromkeys([*t["scope"]["tracks"], *names]))
+        t["updated"] = round(time.time(), 3)
+        return {"task": t["id"], "added_to": True, "tracks": names}
+    t = _new_task(b, "sound", "Instrument for " + ", ".join(names),
+                  said + "\nChoose and shape each one on the notes it plays, like the rest of the cast.",
+                  scope={"tracks": names})
+    out = {"task": t["id"], "tracks": names}
+    waiting = [m for m in b.st["tasks"] if m["seat"] == "mix" and m["state"] == "queued"]
+    for m in waiting:
+        m["depends"].append(t["id"])
+    if waiting:
+        out["mix_waits"] = [m["id"] for m in waiting]
+    elif any(m["seat"] == "mix" and m["state"] in ("working", "submitted", "done") for m in b.st["tasks"]):
+        out["note"] = f"Mix has started or finished without {', '.join(names)}: give it a task if they need balancing."
+    return out
+
+
 def task_add(seat: str, title: str, detail: str = "", depends: list | None = None, scope: dict | None = None,
-             session: str | None = None) -> dict:
+             session: str | None = None, plan: str | None = None) -> dict:
     """Give a seat a task. depends: task ids that must be done first. scope: {"tracks": [...], "bars": "9-16"}.
 
     Write the detail so the seat can work from it alone: what to make, for which bars/tracks, what it must fit
-    with, and what done looks like."""
+    with, and what done looks like. plan: (the user) the open plan item this task joins: it waits for that OK too."""
     sid = roles.get(seat).id
     if not str(title).strip():
         raise ValueError("A task needs a title")
+    from .signoff import PLAN_SEATS
+    who = me()
     with _Board(session) as b:
-        t = _new_task(b, sid, title, detail, [b.task(d)["id"] for d in depends or []], scope)
+        # A signed-off Producer (Co-Producer) or Review: what it hands out waits for the user's OK as one plan,
+        # put to them when its run is over (signoff.gather_plans). Nobody starts it before.
+        held = "plan" if who in PLAN_SEATS and bool(b.st["seats"][who].get("signoff")) and (
+            b.st["seats"][who]["occupant"] or {}).get("kind") in ("agent", "external") else None
+        same = " ".join(str(title).split()).casefold()
+        twin = next((x for x in b.st["tasks"] if x["seat"] == sid and x["state"] in OPEN
+                     and " ".join(x["title"].split()).casefold() == same), None)
+        if twin and who != roles.YOU:  # seen live: a second copy with no depends started at once, ahead of its music
+            raise ValueError(f"{sid} already has {twin['id']} \"{twin['title']}\" ({_task_view(b.st, twin)['state']}). "
+                             f"Change that one with task_update(\"{twin['id']}\", detail=...) instead.")
+        item = None
+        if plan:
+            item = b.item(plan)
+            if who != roles.YOU or item.get("stage") != "plan" or item["state"] != "open":
+                raise ValueError(f"{item['id']} is not an open plan of yours to add to")
+            held = item["id"]
+        t = _new_task(b, sid, title, detail, [b.task(d)["id"] for d in depends or []], scope,
+                      **({"held": held} if held else {}))
+        if item:
+            item["tasks"].append(t["id"])
         out = _task_view(b.st, t)
         linked = _review_links(b, t)
         if linked:
             out["waited_for_by"] = linked
         if not b.st["seats"][sid]["occupant"]:
             out["warning"] = f"{sid} is empty: nobody will pick this up until the seat is assigned"
+        elif twin:
+            out["warning"] = f"{sid} already has {twin['id']} with this title"
     return out
 
 
 def task_update(task: str, state: str | None = None, result: str | None = None, take: str | None = None,
                 title: str | None = None, detail: str | None = None, depends: list | None = None,
-                session: str | None = None) -> dict:
+                session: str | None = None, options: int | None = None) -> dict:
     """Move a task along. States: queued, working, submitted (a take is waiting for acceptance), needs_you, done,
-    failed, cancelled. result: one or two sentences on what was done or why it failed - the next seat reads it."""
+    failed, cancelled. result: one or two sentences on what was done or why it failed - the next seat reads it.
+    options: the user asks for 2 or 3 takes to choose from on this task (0: one, as usual)."""
     with _Board(session) as b:
         t = b.task(task)
         who = me()
         if who != t["seat"] and not _lead(who):
             raise PermissionError(f"{t['id']} belongs to {t['seat']}; only that seat, the Producer or the user changes it")
+        if options is not None:
+            from .signoff import OPTIONS
+            if who != roles.YOU:
+                raise PermissionError("Options are the user's to ask for")
+            if int(options) not in OPTIONS:
+                raise ValueError(f"options must be one of {OPTIONS}")
+            if int(options):
+                t["options"] = int(options)
+            else:
+                t.pop("options", None)
         if state is not None:
             if state not in TASK_STATES:
                 raise ValueError(f"state must be one of {TASK_STATES}")
@@ -446,6 +551,24 @@ def task_update(task: str, state: str | None = None, result: str | None = None, 
                     raise ValueError(f"Your take {held[0]} holds changes that are not in the session yet. Hand it in "
                                      f"with take_submit(summary): the task is finished when the take is accepted. "
                                      f"If the task needed no change after all, undo() the changes first.")
+            if state == "done" and who != t["seat"] and who != roles.YOU:
+                # Seen live: the Producer said a take was accepted without accepting it. Closing the task anyway
+                # frees the next seat on a session that has none of that work in it.
+                held = _take_in_the_way(b, t)
+                if held:
+                    raise ValueError(f"{held[0]} holds {t['seat']}'s work for {t['id']} and is not in the session. "
+                                     f"take_accept(\"{held[0]}\") puts it in and closes {t['id']}; take_reject or "
+                                     f"take_discard if it should not land.")
+            if state == "working" and t["state"] != "working" and who != roles.YOU:
+                # "working" means someone is on it. Set by hand, it skips what the task waits on and nobody starts.
+                if who != t["seat"]:
+                    raise PermissionError(f"{t['id']} is set working when {t['seat']} starts on it. To let it start, "
+                                          f"finish what it waits on (a seat's task is done when its take is "
+                                          f"accepted) or change its depends.")
+                waits = [d for d in t.get("depends", [])
+                         if d not in {x["id"] for x in b.st["tasks"] if x["state"] == "done"}]
+                if waits:
+                    raise ValueError(f"{t['id']} still waits on {', '.join(waits)}")
             if state == "working" and t["state"] != "working":
                 t["attempts"] = t.get("attempts", 0) + 1
             t["state"] = state
@@ -683,7 +806,13 @@ def attention_resolve(item: str, option: str | None = None, text: str = "", sess
         raise PermissionError("Needs You items are answered by the user")
     pending = next((a for a in read(session)["attention"] if a["id"].lower() == str(item).strip().lower()), None)
     carried = False
-    if pending and pending["state"] == "open" and pending.get("take") and option is not None:
+    if pending and pending["state"] == "open" and pending.get("stage") and option is not None:
+        # a stop where the user signs off the crew's work (signoff.py): the answer is carried out here, and the
+        # seat hears about it through what that does (a returned take's reason, the Producer's audition task)
+        from . import signoff
+        signoff.carry(pending, option, text, session)
+        carried = True
+    elif pending and pending["state"] == "open" and pending.get("take") and option is not None:
         # an audition request: the answer is the decision, so carry it out (before the board is locked below)
         from . import takes
         choice = str(option).strip().lower()
@@ -710,7 +839,8 @@ def attention_resolve(item: str, option: str | None = None, text: str = "", sess
         chosen = None
         if option is not None:
             o = str(option).strip().lower()
-            chosen = next((x for x in a["options"] if x["id"] == o or x["label"].lower() == o), None)
+            chosen = next((x for x in a["options"] if x["id"] == o or x["label"].lower() == o
+                           or (a.get("stage") and x.get("do") == o)), None)
             if not chosen:
                 raise KeyError(f"No option {option!r} on {a['id']}. Options: "
                                + ", ".join(f"{x['id']}: {x['label']}" for x in a["options"]))
@@ -721,6 +851,8 @@ def attention_resolve(item: str, option: str | None = None, text: str = "", sess
         said = "; ".join(x for x in ((f"chose {chosen['label']}" + (f" (take {chosen['take']})" if chosen.get("take") else ""))
                                      if chosen else "", str(text).strip()) if x)
         do = (chosen or {}).get("do")  # what the floor manager's own options mean (an agent's options carry none)
+        if a.get("stage"):
+            do = None  # a stop's options were carried out above; its own task is not cancelled or delayed
         requeued = b.release(a, cancel=do == "cancel",
                              not_before=round(time.time() + 60 * float(chosen.get("minutes") or 15), 3) if do == "wait" else None)
         if a["from"] != roles.YOU and not carried:  # a returned take already carries its reason to the seat
@@ -736,8 +868,8 @@ def take_index(path: Path) -> list[dict]:
     """Every take's take.json in a session, oldest first (takes.py creates and changes them)."""
     out = []
     for f in (Path(path) / "takes").glob("*/take.json"):
-        try:
-            out.append(json.loads(f.read_text(encoding="utf-8")))
+        try:  # a take missed here is cut again by the floor, or not heard: retried like the board
+            out.append(_read_json(f, tries=10))
         except (OSError, ValueError):
             continue
     return sorted(out, key=lambda t: t.get("created", 0))
@@ -794,6 +926,8 @@ def studio_status(session: str | None = None, lean: bool = False) -> dict:
             d["presence"] = s["presence"]["state"]
         if s.get("paused"):
             d["paused"] = True
+        if s.get("signoff"):  # the Producer's brief says what Co-Producer means for its decisions and its plan
+            d["signoff"] = True
         if cur:
             d["task"] = f"{cur['id']} {cur['state']}: {cur['title']}"
         if len(mine) > 1:
@@ -830,9 +964,12 @@ def board(session: str | None = None, finished: int = 12, messages: int = 80) ->
                       "optional": r.optional, "tier": r.tier, "occupant": s["occupant"],
                       "label": occupant_label(s["occupant"]), "mode": s["mode"], "notes": s["notes"],
                       "paused": bool(s.get("paused")), "presence": (s["presence"] or {}).get("state"),
+                      "signoff": bool(s.get("signoff")), "options": int(s.get("options") or 0),
                       "task": cur["id"] if cur else None, "open_tasks": len(mine)})
     closed = [t for t in st["tasks"] if t["state"] not in OPEN]
+    from .signoff import involve_name
     return {"session": str(path), "rev": st["rev"], "seq": st["seq"], "seats": seats,
+            "involve": involve_name(st), "away": st.get("away"),
             "tasks": [_task_view(st, t, detail=True) for t in st["tasks"] if t["state"] in OPEN]
                      + [_task_view(st, t, detail=True) for t in closed[-int(finished):]],
             "needs_you": [a for a in st["attention"] if a["state"] == "open"],
