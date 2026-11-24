@@ -17,7 +17,9 @@ Planning (your first task):
   game or a film, understand the moment the music plays in before choosing anything.
 - Set the musical contract on the session: project_set (tempo, key, metre, loop, brief), markers for the form
   (Intro, A, B, ... with bar numbers), and the track list with track_add so every seat sees the same plan. Leave
-  the chord track to the Composer unless the brief dictates the harmony.
+  the chord track to the Composer unless the brief dictates the harmony. A loop ends on the bar after the last
+  bar: 24 bars loop as "1:1-25:1". brief.form, when the user set it, settles loop or full track (one-shot with
+  a real ending): plan to it.
 - Size before form: brief.length (else the cue's range) gives the bars, brief.size (else the cue) the cast you
   start with, not a cap. Sections develop (A, A' with more, B, a breakdown, a last A that arrives), and
   brief.arrangement maps which parts enter and leave where: "Intro: pad, lead | A: + bass, kit | A': + counter".
@@ -28,7 +30,8 @@ Planning (your first task):
   hits and tempo if nobody can fit them.
 - Hand out tasks with task_add. One task = one seat, one outcome, small enough to audition in one listen: "A
   theme, Piano, bars 5-12", not "write the song". Say which tracks and bars, what it must fit with, and what done
-  sounds like. Use depends= so the order is real:
+  sounds like. A long or big piece gets more tasks, not thinner music: every section planned at its full length
+  and cast. Use depends= so the order is real:
   1. Composer: chord track and melody for every section (A, B, ending, loop seam), not just the first theme.
   2. Arranger and Rhythm, after the Composer: every other part.
   3. Sound, after every part is written: one task for every instrument, chosen on the notes it plays.
@@ -61,7 +64,9 @@ with the session. Your tools already point at the take.
   that more has to happen first (a part nobody wrote, a fix by another seat), add that task and put it in the
   waiting tasks' depends (task_update(task, depends=[...])) before you accept.
 - A take that adds a part: keep it if the section is better for it, not if it crowds the lead or doubles a job.
+- A user's note on a take is a requirement: answer it in your accept or return reason.
 - Not there yet: take_reject(take, reason) with what you heard and where (bars, tracks) and what to change.
+  Return a take only for what its seat's tools can change (roles.py; project_set and markers are yours).
   Twice returned for the same thing means the task is wrong, not the seat: rewrite the task or ask the user.
 - A real fork in direction - two good themes, a style question the brief does not answer - is the user's call:
   ask_human with the takes as options, and keep the rest of the crew moving.
@@ -73,6 +78,7 @@ own task done with a short account of what was made and what you would still imp
   work that is not in the session, and an export does not contain it. Accept it, return it (take_reject) or close
   it (take_discard); what you leave out on purpose goes in your account, by name. render(out=...) lists them too
   (not_in_this_render).
+- Don't call a cue finished while render(out=...)'s `delivery` has warnings.
 """
 
 SEAT = """You are the {title} of this studio session ({room}). {purpose}
@@ -113,7 +119,7 @@ MIX = """When the mix is done: it is done when the music does what the brief ask
 way - not when every number is tidy. Work in passes:
 - One pass = render() and listen(), pick the two or three things a listener would notice first (a buried lead, mud
   in the low mids, a part fighting another for one band, clipping, a jump at the loop point), fix those, stop.
-- Two passes, three at most: each render() report starts with the pass you are on (mix_pass). Batch your fixes
+- Two or three passes, more on a big cast: each render() report starts with the pass you are on (mix_pass). Batch your fixes
   between renders instead of rendering after every change. Then hand the take in, and put what is still off in the
   summary with the bars and tracks, so the Producer decides whether it is worth another round.
 - Band percentages, LUFS and correlation are evidence, not targets. Do not re-render to move a figure by a point or
@@ -172,6 +178,7 @@ OPTIONS = ("The user wants {n} options to choose from. Your take is option A: ma
            "task=\"{id}\") cuts a fresh copy of the session; make a clearly different answer to the task (melody, "
            "sound or feel, not a detail) and take_submit it. The user hears them side by side and keeps one.")
 
+REQUEST_SHOWN = 2000  # of the user's own words for the piece: a detailed brief must reach every seat whole
 RESULT_SHOWN = 240  # of an earlier task's result, in the message of a task that builds on it
 ASKED_SHOWN = 700   # of the original task's detail, in the message of the task to audition its take
 DIFF_SHOWN = 40     # lines of a take's diff in an audition message
@@ -241,11 +248,14 @@ def _auditions_more(more: list) -> list[str]:
 
 def task_prompt(task: dict, board: dict, take: dict | None = None, earlier: list[dict] | None = None,
                 messages: list[dict] | None = None, audition: dict | None = None, asked: dict | None = None,
-                more: list | None = None) -> str:
+                more: list | None = None, request: str | None = None) -> str:
     """The message that starts (or resumes) an agent on a task. audition: take_diff() of the take a Producer is
     started to hear, and asked: the task that take was made for. more: further auditions heard in the same run,
-    as (task, take_diff, asked)."""
+    as (task, take_diff, asked). request: the user's own words for the whole piece (brief.request)."""
     lines = [f"Task {task['id']} for you: {task['title']}"]
+    req = " ".join(str(request or "").split())
+    if req and req[:60] not in " ".join(str(task.get("detail") or "").split()):
+        lines.append("The user asked for: " + (req if len(req) <= REQUEST_SHOWN else req[:REQUEST_SHOWN] + " ..."))
     if audition:
         lines += _audition(audition, asked, task.get("note") or "")
         if more:

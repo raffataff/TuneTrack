@@ -692,6 +692,7 @@ def take_submit(summary: str, take: str | None = None, session: str | None = Non
         raise ValueError("This take changes nothing yet. Did the edits go to another project? "
                          "(project_info shows which one your tools are editing.) If the task needed no change, "
                          "do not hand in an empty take: task_update(task, state=\"done\", result=why).")
+    _no_missing_tracks(d)
     synced = _catch_up(d, meta, session)
     if synced:
         rep = _report(d, _meta(d))
@@ -713,6 +714,15 @@ def take_submit(summary: str, take: str | None = None, session: str | None = Non
     if synced:
         out["synced"] = synced
     return out
+
+
+def _no_missing_tracks(d: Path) -> None:
+    """A take whose mix would drop a track (a bad built-in setting, a missing SFZ/patch) is not handed in or
+    accepted: the render only warns, and The Drive's lead melody went missing from an accepted take that way."""
+    bad = api.mix_problems(str(d))
+    if bad:
+        raise ValueError("TRACK MISSING FROM THE MIX, fix it first: " + "; ".join(bad[:4])
+                         + (f" (+{len(bad) - 4} more)" if len(bad) > 4 else ""))
 
 
 def _catch_up(d: Path, meta: dict, session: str | None) -> dict | None:
@@ -760,6 +770,7 @@ def take_accept(take: str, on_conflict: str = "fail", session: str | None = None
         raise ValueError(f"{meta['id']} is already {meta['state']}")
     base, doc = _read_json(d / "base.json"), _read_json(d / "project.json")
     ch = changes(base, doc)
+    _no_missing_tracks(d)
     if studio.me() == "producer":
         from . import signoff  # Co-Producer: the Producer's accept waits for the user (a clash is answered first)
         if signoff.co_producer(str(path)):
@@ -783,7 +794,10 @@ def take_accept(take: str, on_conflict: str = "fail", session: str | None = None
         p = Project.from_json(merged, path=path)
         p.rev = int(cur.get("rev", 0))
         p.save()
-    meta = _meta(d, state="accepted", accepted=round(time.time(), 3), merged_rev=p.rev, proposal=None)
+    # who decided: a Producer's accept the user confirmed (Co-Producer) is still the Producer's, heard in its run
+    by = "producer" if (meta.get("proposal") or {}).get("decision") == "accept" else studio.me()
+    meta = _meta(d, state="accepted", accepted=round(time.time(), 3), merged_rev=p.rev, proposal=None,
+                 accepted_by=by)
     with studio._Board(str(path)) as b:
         done = None
         if meta.get("task"):
@@ -812,6 +826,18 @@ def take_accept(take: str, on_conflict: str = "fail", session: str | None = None
     return out
 
 
+def _users_word(meta: dict, handed_in) -> str:
+    """What the user said (and changed) when they signed off this hand-in, for the seat it goes back to: in The
+    Drive their notes reached only the Producer, and the seat was returned for reasons it never heard."""
+    s = meta.get("signed") or {}
+    if not handed_in or s.get("hand_in") != handed_in:
+        return ""
+    out = f" The user said: {s['note'].strip()}" if str(s.get("note") or "").strip() else ""
+    if s.get("changed"):
+        out += " The user changed: " + "; ".join(s["changed"][:6])
+    return out
+
+
 def take_reject(take: str, reason: str, session: str | None = None) -> dict:
     """Send a take back. reason: what has to change, specific enough to act on (bars, tracks, what you heard).
     The seat gets it as a message and its task goes back in the queue; the take stays open for it to continue."""
@@ -828,6 +854,7 @@ def take_reject(take: str, reason: str, session: str | None = None) -> dict:
         held = signoff.hold(d, meta, "return", reason=reason)
         if held:
             return held
+    handed_in = meta.get("submitted")  # the hand-in being returned (a sign-off note is tied to it)
     # the reason stays on the take: a person in the seat reads it on their task and on the Desk, not in a log
     meta = _meta(d, state="open", returned=round(time.time(), 3), returns=int(meta.get("returns", 0)) + 1,
                  reason=str(reason).strip(), proposal=None)
@@ -838,7 +865,8 @@ def take_reject(take: str, reason: str, session: str | None = None) -> dict:
                 t.update(state="queued", updated=meta["returned"])
                 b.emit("task", id=t["id"], seat=t["seat"], state="queued", title=t["title"], by=studio.me(), take=meta["id"])
         if meta.get("seat") in roles.ROLES:
-            b.message(studio.me(), meta["seat"], f"Take {meta['id']} came back: {str(reason).strip()}", meta.get("task"))
+            b.message(studio.me(), meta["seat"], f"Take {meta['id']} came back: {str(reason).strip()}"
+                      + _users_word(meta, handed_in), meta.get("task"))
         b.emit("take", id=meta["id"], state="returned", seat=meta.get("seat"), task=meta.get("task"),
                reason=str(reason).strip()[:studio.EVENT_TEXT], by=studio.me())
         b.close_auditions(meta["id"], "returned", str(reason).strip()[:300])

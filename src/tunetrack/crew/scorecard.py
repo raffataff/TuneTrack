@@ -29,9 +29,9 @@ from ..model import _atomic_write
 _QUOTA = re.compile(r"usage limit|rate.?limit|too many requests|quota|\b429\b|out of credit|insufficient credit|billing", re.I)
 # metered: runs that reported tokens; priced: runs that reported dollars (cost_usd is kept beside the counts)
 _COUNTS = ("runs", "ok", "out_of_usage", "failed", "stopped", "tool_calls", "handed_in", "accepted", "first_time",
-           "returned", "rejected", "tasks_done", "asked_you", "tokens", "metered", "priced")
+           "returned", "rejected", "tasks_done", "asked_you", "tool_errors", "tokens", "metered", "priced")
 _WHO = ("runner", "model", "effort")
-_RUNNERS = ("claude", "codex", "kilo", "script")  # crew.runners.RUNNERS, without importing the launcher
+_RUNNERS = ("claude", "codex", "kilo", "agy", "script")  # crew.runners.RUNNERS, without importing the launcher
 
 
 def _wins(r: dict) -> int:
@@ -77,6 +77,7 @@ def crew_scorecard(session: str | None = None) -> dict:
     started: dict[str, float] = {}
     owner: dict[str, tuple[str, str]] = {}  # take -> the row that handed it in
     came_back: set[str] = set()
+    run_errors: dict[str, int] = {}  # seat -> failed tool calls in its current run
 
     def row(seat: str) -> dict:
         key = (seat, who.get(seat) or "unknown")
@@ -99,6 +100,8 @@ def crew_scorecard(session: str | None = None) -> dict:
                 row(seat)["runs"] += 1
             elif e.get("what") == "tool":
                 row(seat)["tool_calls"] += 1
+                if e.get("ok") is False:
+                    run_errors[seat] = run_errors.get(seat, 0) + 1
             elif e.get("what") == "end":
                 r = row(seat)
                 r["minutes"] += max(0.0, e["at"] - started.pop(seat, e["at"])) / 60
@@ -109,7 +112,11 @@ def crew_scorecard(session: str | None = None) -> dict:
                     r["priced"] += 1
                     r["cost_usd"] += float(e["cost_usd"])
                 err = e.get("error") or ""
-                r["ok" if e.get("ok") else "out_of_usage" if _QUOTA.search(err) else
+                # tool calls that failed (the end event's tool_errors, or tool events with ok=False)
+                bad = int(e.get("tool_errors") or 0) + run_errors.pop(seat, 0)
+                r["tool_errors"] += bad
+                calls = int(e.get("tools") or 0)
+                r["ok" if e.get("ok") and (not bad or 2 * bad < calls) else "out_of_usage" if _QUOTA.search(err) else
                   "stopped" if err.startswith("it was stopped") else "failed"] += 1
         elif kind == "take" and seat in roles.ROLES:
             state = e.get("state")
@@ -129,7 +136,8 @@ def crew_scorecard(session: str | None = None) -> dict:
                     r["first_time"] += e["id"] not in came_back
         elif kind == "task" and e.get("state") == "done" and e.get("by") == seat and seat in roles.ROLES:
             row(seat)["tasks_done"] += 1
-        elif kind == "attention" and e.get("state") == "open" and e.get("sender") in roles.ROLES:
+        elif (kind == "attention" and e.get("state") == "open" and e.get("sender") in roles.ROLES
+              and e.get("what") in studio.ATTENTION_KINDS and not e.get("stage")):  # ask_human, not sign-off stops
             row(e["sender"])["asked_you"] += 1
     out = [_with_cost(dict(r, minutes=round(r["minutes"], 1))) for r in rows.values()
            if r["runs"] or r["handed_in"] or r["tasks_done"]]
@@ -144,13 +152,13 @@ def as_markdown(card: dict) -> str:
     run reported usage: cost per accepted take, or per finished task for a seat that hands in no takes."""
     cost = any(r.get("metered") or r.get("priced") for r in card["rows"])
     head = ("| Seat | Agent | Runs (ok) | Out of usage | Failed | Tool calls | Minutes | Takes in / accepted / first time "
-            "/ returned / rejected | Tasks done | Asked you |" + (" Cost per |" if cost else ""))
-    lines = [head, "|" + "---|" * (11 if cost else 10)]
+            "/ returned / rejected | Tasks done | Asked you | Tool errors |" + (" Cost per |" if cost else ""))
+    lines = [head, "|" + "---|" * (12 if cost else 11)]
     for r in card["rows"]:
         lines.append(f"| {roles.get(r['seat']).title} | {r['agent']} | {r['runs']} ({r['ok']}) | {r['out_of_usage']} | "
                      f"{r['failed']} | {r['tool_calls']} | {r['minutes']} | {r['handed_in']} / {r['accepted']} / "
                      f"{r['first_time']} / {r['returned']} / {r.get('rejected', 0)} | {r['tasks_done']} | "
-                     f"{r['asked_you']} |" + (f" {_per_take(r, unit=True)} |" if cost else ""))
+                     f"{r['asked_you']} | {r.get('tool_errors', 0)} |" + (f" {_per_take(r, unit=True)} |" if cost else ""))
     t = card["totals"]
     spent = (f" Usage reported by {t['metered']} runs: {round(t['tokens'] / 1000)}k tokens"
              + (f", ${t['cost_usd']:.2f}" if t["priced"] else "") + "." if t["metered"] or t["priced"] else "")
@@ -304,7 +312,8 @@ def crew_review(session: str | None = None) -> dict:
             "this cue becomes a lesson for that seat - lessons(seat=\"composer\", add=[\"...\"]), seat=\"all\" for "
             "the whole crew. One line each: the rule and why. lessons(seat) first shows what is there: remove "
             "(by number) lines this session proved wrong or that a new line replaces. Nothing about one cue's "
-            "bars or tracks; no lesson at all is fine.", session=session)
+            "bars or tracks; no lesson at all is fine. A lesson is about the seat's craft, not about a tool error or a "
+            "missing tool: those go in the review, for the user.", session=session)
         out["task"] = t["id"]
     else:
         out["note"] = "No agent sits in the Producer seat, so only the scorecard was filed."

@@ -243,6 +243,51 @@ SIDECHAIN_BODIES = {
 SIDECHAIN_FX = set(SIDECHAIN_BODIES)
 
 
+# Sane ranges for built-in effect settings: (low, high, unit). Checked when a setting is made, so a value meant in
+# other units (reverb decay 6500 meaning ms, delay time 375 meaning ms) is refused there, not heard as a broken mix.
+FX_RANGES = {
+    "reverb": dict(predelay=(0, 500, "ms"), decay=(0.1, 30, "s"), low_decay=(0.1, 30, "s"),
+                   damping=(200, 24000, "Hz"), mix=(0, 1, ""), low_cut=(10, 2000, "Hz")),
+    "delay": dict(time=(0.0625, 8, "beats"), feedback=(0, 0.95, ""), damping=(200, 24000, "Hz"), mix=(0, 1, ""),
+                  spread=(0, 100, "ms")),
+    "compressor": dict(threshold=(-80, 0, "dB"), ratio=(1, 100, ":1"), attack=(0, 1, "s"), release=(0.001, 5, "s"),
+                       makeup=(-24, 36, "dB"), mix=(0, 1, "")),
+    "chorus": dict(rate=(0.01, 20, "Hz"), depth=(0, 30, "ms"), mix=(0, 1, "")),
+    "saturator": dict(drive=(-24, 48, "dB"), output=(-60, 24, "dB"), mix=(0, 1, "")),
+    "width": dict(width=(0, 4, "")),
+    "filter": dict(mode=(0, 1, ""), cutoff=(10, 24000, "Hz"), q=(0.05, 50, "")),
+    "bitcrush": dict(bits=(1, 24, "bits"), rate=(50, 192000, "Hz"), mix=(0, 1, "")),
+    "gain": dict(gain_db=(-96, 36, "dB")),
+}
+
+
+def check_params(kind: str, name: str, params: dict | None) -> dict:
+    """Built-in synth/effect settings as floats, checked by name (and range, for effects). Raises on a bad one."""
+    if kind == "builtin":
+        if name not in FX:
+            raise KeyError(f"Unknown built-in effect {name!r}. Built-in effects: {', '.join(FX)}")
+        known, ranges, what = FX[name][1], FX_RANGES.get(name, {}), "Effect"
+    else:
+        if name not in SYNTHS:
+            raise KeyError(f"Unknown synth {name!r}. Built-in synths: {', '.join(SYNTHS)}")
+        known, ranges, what = SYNTHS[name][2], {}, "Synth"
+    out = {}
+    for k, v in (params or {}).items():
+        if k not in known:
+            raise KeyError(f"{what} {name!r} has no parameter {k!r}. Parameters: {', '.join(known)}")
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} {k} must be a number, not {v!r}") from None
+        if k in ranges:
+            lo, hi, unit = ranges[k]
+            if not lo <= x <= hi:
+                u = f" {unit}" if unit else ""
+                raise ValueError(f"{name} {k}={x:g} is out of range: {lo:g}-{hi:g}{u}")
+        out[k] = x
+    return out
+
+
 def fx_dsp(name: str, overrides: dict | None = None, bpm: float = 120.0, sidechain: bool = False) -> str:
     if name not in FX:
         raise KeyError(f"Unknown built-in effect {name!r}. Built-in effects: {', '.join(FX)}")

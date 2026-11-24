@@ -16,15 +16,17 @@ span (a second voice in one call); mode="merge" layers onto what is there."""
 LISTEN = """Reading listen() (it measures the audio; score() reads the notes; a part can be right in one and wrong
 in the other):
 - sections, energy_arc, bar_lufs: does each section do what the form says? B differs from A in level, brightness,
-  density or who leads; a build rises bar by bar; the loop's last bar flows into its first.
+  density or who leads; a build rises bar by bar; a loop's last bar flows into its first.
 - masking: each track's vs_rest_db in its main band. The lead sits at 0 or above; under about -10 a part is barely
   heard. pairs are two parts fighting for one band, with the bars.
 - verify: pitches that are silent or much quieter (outside the instrument's range), parts that sound transposed,
   slow attacks on short notes, bars with notes but no sound (a dynamics CC at 0), and what each drum note really
   sounds like. Trust these over patch names."""
 
-GENRES = """Genres (tempo | harmony | palette; [name] is a built-in synth, real patches come first when the genre
-is acoustic):
+GENRES = """Some genres as a quick reference, not the menu: any genre or blend the brief names is in scope (rock,
+jazz, metal, funk, bossa, trap, folk, gospel, anything), and you already know what makes it work - its forms,
+grooves, harmony, instruments and production. Write it the way people who play it would. (tempo | harmony |
+palette; [name] is a built-in synth, real patches come first when the genre is acoustic):
 - Orchestral fantasy, adventure: 80-120 | major, Dorian, Lydian; i-VI-III-VII | strings, horns, woodwinds, harp
   arps, timpani; [pluck] [bell] for colour
 - Epic, battle, boss: 130-170 | minor, Phrygian; i-bVI-bVII | string ostinato in 8ths or 16ths, brass stabs,
@@ -46,9 +48,22 @@ is acoustic):
 - Puzzle, casual: 100-130 | major with chromatic passing notes | [mallet] [pluck], pizzicato, staccato bass"""
 
 PRODUCER = """Craft: what you decide.
-Form by cue (set it with markers and project_set(loop=...)):
-- Menu: 45-120 s loop. Optional 2-4 bar intro played once, then A A' B A'' (8 bars each at most tempos). A motif
-  people remember, medium density, room for UI sounds.
+Form by what the brief asks for (set it with markers and project_set(loop=...)). The forms below are examples,
+not the menu: any piece in any genre is in scope, and its own conventions (a rock song's verses, choruses and
+solo, a jazz head and solos, a march's trio) are yours to use. They are starting points, not limits: the brief's length, form and ambition win. Plan the whole piece at the size asked - a 4-minute piece is 4
+minutes of written music with its own sections, not a short loop repeated - and match the craft to the ambition.
+- Lo-fi or chill beat: 1-3 min loop. A 2-4 bar progression; interest from layers entering and dropping, a
+  variation every 8 bars, a breakdown.
+- Theme tune, main title: 1-2.5 min, one-shot or loop. An intro that sets the world, the theme stated, a
+  contrasting middle, the theme back bigger (new key, fuller scoring), a real ending.
+- Song: 2.5-5 min one-shot. Intro, verse, pre-chorus, chorus, verse 2 with more, bridge, final choruses that lift,
+  an outro or a written ending. Not a loop unless asked.
+- Concert, film or symphonic piece: 3-8 min, through-composed. Two or more themes, development (fragmentation,
+  sequence, reharmonisation, a theme in another instrument), modulations, changes of tempo, metre or texture,
+  quiet passages against full tutti, a climax that is earned and an ending that resolves. Plan it like a film
+  score suite: many sections, each with its own job.
+- Menu: 45-120 s loop. Optional 2-4 bar intro played once, then A A' B A'' (often 8 bars each). A motif people
+  remember, medium density, room for UI sounds.
 - Exploration: 1.5-3 min loop. Long arcs, sparse, one chord per 1-2 bars.
 - Town, shop: 40-90 s loop. Warm, rhythmic, small ensemble, catchy.
 - Battle: 60-120 s loop, 130-170 bpm. Driving ostinato, strong bass, short phrases; B raises the intensity.
@@ -59,13 +74,16 @@ Form by cue (set it with markers and project_set(loop=...)):
 - Credits: 2-4 min one-shot, a medley of the motifs.
 A loop is a whole number of bars and its last bar leads back into its first. Adaptive music: every layer in the
 same key, tempo and length, tracks tagged with layer, render(layers=True).
-16 bars of 4/4 at 100 bpm is 38 s: check the bars against the seconds.
+16 bars of 4/4 at 100 bpm is 38 s and 4 minutes is 100 bars: check the bars against the seconds.
 Cast (typical, not a limit): small 3-5 parts; medium 6-9 (+ counterline, ostinato, extra percussion, a colour);
-full 10-16 (+ doublings, harmony in two registers, a low doubling, swells). Unset: ambience and stingers small,
-battle and boss full, the rest medium.
+full 10-16 (+ doublings, harmony in two registers, a low doubling, swells); symphonic 16-30 or more (strings split
+into violins I and II, violas, cellos, basses; woodwinds by family; horns, trumpets, trombones, tuba; timpani,
+percussion, harp, celesta, choir; separate tracks for articulations). Unset: ambience and stingers small, battle,
+boss, theme tunes and songs full, concert and film pieces symphonic, the rest medium.
 
 """ + GENRES + """
-Style sheets give each seat the detail of one genre: project_set(brief={"style": <name>}) with chiptune, lofi,
+Style sheets give each seat the detail of one genre (a genre with no sheet needs none: set "none" and write
+it from what you know): project_set(brief={"style": <name>}) with chiptune, lofi,
 orchestral, epic, synthwave, cozy, ambient, horror, electronic or playful ("none" for none). Unset, the words of
 brief.genre pick one. Set it while planning, before any part is written.
 
@@ -95,8 +113,9 @@ SPOTTING = """Craft: what you decide.
 - Per section give the Producer and Composer what they cannot see: what happens, the mood in two or three words,
   how full the music may be under dialogue or sound effects, and where it has to get out of the way. It goes in
   the brief: project_set(brief={"spotting": "..."}).
-- Lengths: a menu loop 45-120 s, exploration 1.5-3 min, battle 60-120 s, a stinger 2-8 s as a one-shot. A loop is
-  a whole number of bars and its last bar leads back into its first."""
+- Lengths, when the brief gives none: a menu loop 45-120 s, exploration 1.5-3 min, battle 60-120 s, a stinger
+  2-8 s as a one-shot, a theme tune 1-2.5 min, a song or concert piece as long as its form needs. The brief's
+  length always wins. A loop is a whole number of bars and its last bar leads back into its first."""
 
 COMPOSER = """Craft, in the order you work:
 1. Chord track first: harmony("i VI III VII", section="A") for each section before any part. chords() and
@@ -209,7 +228,8 @@ SOUND = """Craft: the right instrument for the part.
 - A patch with dynamics_cc takes its loudness from that CC, not from velocity: when you choose one for a part
   written without that CC, name the track and the CC number in your summary, so the seat that wrote it draws the
   dynamics on that controller.
-- Give each track its role (track_update(role=...)) so range checks apply to what is written for it.
+- Give each track its role (track_update(role=...)) so range checks apply to what is written for it. Never change a role
+  just to quiet a check.
 - A built-in synth is shaped with track_update(instrument_params={"cutoff": .., "release": ..}). A sampled
   instrument's envelope cannot be changed from here: when its release or attack is wrong for the part, choose
   another patch or say what is missing. Do not spend a run looking for the control.
@@ -271,9 +291,9 @@ track does not need notes on its voice-leading.
 1. Broken: render() warnings (silent track, clipping, limiter working hard, a jump at the loop point) and
    listen() verify (pitches an instrument cannot play, bars with notes but no sound, drums that are not what
    their names say).
-2. The brief: is it the genre, mood and energy asked for, the length and loop form, a motif a player would know
+2. The brief: is it the genre, mood and energy asked for, the length and form (loop or one-shot) asked for, a motif a player would know
    on the second hearing? Compare sections in listen(): B has to differ from A in level, brightness, density or
-   who leads, and the loop's last bar has to lead into its first.
+   who leads, and a loop's last bar has to lead into its first.
 3. The notes: score() per section. "!" lines are candidates, not verdicts: a clash on a strong beat that moves on
    by step is fine; a lead sitting on a non-chord tone for a bar is not. Parallel 5ths and 8ves between bass and
    lead, voice crossings, parts off the chord track. Is there a motif that returns, phrases that end, one climax

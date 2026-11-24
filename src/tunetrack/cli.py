@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> None:
     w.add_argument("--brief", help="what to make: the Producer plans from it")
     w.add_argument("--project")
     w.add_argument("--parallel", type=int, default=3, help="agents working at once")
-    w.add_argument("--max-runs", type=int, default=40, help="agent runs before the crew stops and asks you")
+    w.add_argument("--max-runs", type=int, default=100, help="agent runs before the crew stops and asks you")
     w.add_argument("--refresh", action="store_true", help="detect: rescan instead of using the cached result")
     t = sub.add_parser("takes", help="`takes clean`: delete the folders of takes that are over (accepted or closed); "
                                      "lists them unless --yes is given")
@@ -64,6 +64,11 @@ def main(argv: list[str] | None = None) -> None:
     t.add_argument("--project")
     t.add_argument("--days", type=float, default=0.0, help="keep takes that ended in the last N days")
     t.add_argument("--yes", action="store_true", help="delete them (without it: only list what would go)")
+    cl = sub.add_parser("clean", help="free disk space across every project: unused renders, finished takes, old "
+                                      "auditions and check runs; lists what would go unless --yes is given")
+    cl.add_argument("--days", type=float, default=7.0, help="keep takes, auditions and check runs from the last N days")
+    cl.add_argument("--yes", action="store_true", help="delete (without it: only report)")
+    cl.add_argument("--json", action="store_true", help="print the full result as JSON")
     lv = sub.add_parser("live", help="play a project in real time through the audio interface (the live engine); "
                                      "edits made elsewhere are heard as they land")
     lv.add_argument("project", nargs="?")
@@ -159,6 +164,10 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "takes":
         from . import takes
         _print(takes.take_cleanup(a.days, dry_run=not a.yes, session=a.project))
+    elif a.cmd == "clean":
+        from . import cleanup
+        r = cleanup.sweep(a.days, dry_run=not a.yes)
+        _print(r) if a.json else print(cleanup.report(r))
     elif a.cmd == "functions":
         for mod in _modules():
             for name, fn in inspect.getmembers(mod, inspect.isfunction):

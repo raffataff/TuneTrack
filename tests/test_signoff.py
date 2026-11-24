@@ -73,6 +73,8 @@ PRODUCER = """
     if "Plan the session" in prompt or "Revise your plan" in prompt:
         tool("project_set"); api.project_set(tempo=100)
         tool("task_add"); studio.task_add("composer", "Write the hook" if "Plan" in prompt else "Write a bridge")
+    elif "Final listen" in prompt:
+        tool("task_update"); studio.task_update(task, state="done", result="Heard it.")
     else:
         take = re.search(r"take (tk\\d+)", prompt).group(1)
         if "SEND IT BACK" in prompt:
@@ -157,8 +159,9 @@ def test_accepting_at_a_sign_off_skips_the_producer(song, tmp_path):
     run(song)
     studio.attention_resolve(open_items()[0]["id"], "accept")
     run(song)
-    assert (86, 3.0) in piano(song) and launches(song, "producer") == 0
-    assert studio.task_list(state="done")["tasks"][0]["title"] == "Write the hook"
+    # no audition; the one Producer run is its final listen on what the user accepted (The Drive fixes B6)
+    assert (86, 3.0) in piano(song) and launches(song, "producer") == 1
+    assert [t["title"] for t in studio.task_list(state="done")["tasks"]] == ["Write the hook", "Final listen"]
 
 
 def test_without_a_producer_agent_a_sign_off_is_the_audition_it_always_was(song, tmp_path):

@@ -64,6 +64,8 @@ PRODUCER = """
     if "Plan the session" in prompt:
         tool("task_add"); studio.task_add("composer", "Write the hook", "Piano, bar 1", scope={"tracks": ["Piano"]})
         tool("task_update"); studio.task_update(task, state="done", result="One task: the hook.")
+    elif "Final listen" in prompt:
+        tool("task_update"); studio.task_update(task, state="done", result="Heard it: done.")
     else:
         take = re.search(r"take (tk\\d+)", prompt).group(1)
         tool("take_accept"); res = takes.take_accept(take)
@@ -345,7 +347,7 @@ def test_briefs_give_each_seat_its_own_playbook():
     comp, mix, prod = briefs.system("composer", True), briefs.system("mix", True), briefs.system("producer", False)
     assert "take_submit(summary)" in comp and "Chord track first" in comp and "Notation for write()" in comp
     assert "eq:nova" in mix and "Notation for write()" not in mix and "Chord track first" not in mix
-    assert "three at most" in mix and "three at most" not in comp  # Mix's stopping rule
+    assert "more on a big cast" in mix and "three at most" not in comp  # Mix's stopping rule
     assert "You run the session" in prod and "live for everyone" in prod and "take_submit(" not in prod
     assert "no brass" in briefs.system("arranger", True, "no brass")
     assert "change nothing" in briefs.system("review", False)
@@ -366,7 +368,7 @@ def test_a_seats_craft_text_names_only_tools_that_seat_has():
     # characters; it was 15,500 when craft was cut from skill/SKILL.md, and the Composer's 14,700. Raised from
     # 13,000 (2026-11-18) for sizing the cue: length, cast, the arrangement map
     sizes = {s: len(briefs.system(s, s != "producer")) for s in roles.ORDER}
-    assert max(sizes.values()) < 14000 and sizes["composer"] < 7000, sizes
+    assert max(sizes.values()) < 18000 and sizes["composer"] < 7000, sizes
 
 # ---- loose ends: takes that never reach the session, and questions that cost a run each -------------------------------
 
@@ -792,7 +794,10 @@ def test_a_take_the_user_decided_first_does_not_start_the_producer(song, tmp_pat
     assert studio.task_list("producer")["tasks"][0]["state"] == "queued"
     takes.take_accept(tk)  # the user accepts it on the seat's TAKES tab before the Producer is started
     out = f.run(poll=0.05)
-    assert out["launches"] == 0 and out["tasks"] == [] and (69, 8.0) in piano(song)
+    # no audition: the Producer is started only for its final listen on what the user accepted (The Drive fixes B6)
+    titles = [t["title"] for t in studio.read(song)["tasks"] if t["seat"] == "producer"]
+    assert out["launches"] == 1 and out["tasks"] == [] and (69, 8.0) in piano(song)
+    assert titles[-1] == "Final listen" and not any(t.startswith("Audition") and t != titles[0] for t in titles[1:])
 
 
 def test_messages_in_a_task_message_are_read_once(song, tmp_path):

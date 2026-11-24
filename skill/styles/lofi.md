@@ -5,7 +5,7 @@ about: Dusty jazz chords over a lazy swung beat; warm, a little broken, never bu
 ---
 
 ## producer
-- 70-90 bpm, swung. 8-16 bar loops that repeat with small changes; no big climax, no key change.
+- 70-90 bpm, swung. 8-16 bar loops that repeat with small changes; usually no big climax or key change unless the brief wants a journey.
 - A small band: e-piano or nylon chords, soft drums, round bass, one lead voice that comes and goes. Room left
   for the listener to think.
 
@@ -19,7 +19,7 @@ about: Dusty jazz chords over a lazy swung beat; warm, a little broken, never bu
   velocity=8-12)), chords rolled a little late, the lead behind the beat.
 
 ## arranger
-- Four or five parts at most. Chords in the middle register (C3-C5), never doubled by another instrument.
+- Usually four to six parts. Chords in the middle register (C3-C5), never doubled by another instrument.
 - Drop parts in and out every 4-8 bars instead of adding new ones: the bass alone for a bar, the drums out for a
   break.
 - notes_edit(op="humanize", timing_ms=15-25, velocity=8-12) on every played part; never on the drums' kick.

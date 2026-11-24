@@ -24,13 +24,14 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .. import config, roles, signoff, studio, styles, takes
+from .. import api, config, roles, signoff, studio, styles, takes
 from ..model import LockTimeout, Project, _os_lock, _os_unlock
 from . import briefs, runners
 
 TEXT_LIMIT = 400  # an error line
 AUDITIONS_PER_RUN = 5  # takes the Producer hears in one run when several are handed in together
 SAYS_LIMIT = studio.EVENT_TEXT  # what an agent says is read in the monitor: keep all of it
+QUIET_AFTER = 600.0  # seconds without an event before a run is shown as quiet (it is not stopped)
 
 
 # An agent that ended because its model has no usage left (a free tier's daily limit, a rate limit, no credit).
@@ -79,8 +80,8 @@ def managed(session: str | None = None) -> bool:
 
 
 class Floor:
-    def __init__(self, session: str | None = None, max_parallel: int = 3, max_launches: int = 40,
-                 max_attempts: int = 3, run_timeout: float = 1800.0, start=runners.start, on_event=None):
+    def __init__(self, session: str | None = None, max_parallel: int = 3, max_launches: int = 100,
+                 max_attempts: int = 3, run_timeout: float = 3600.0, start=runners.start, on_event=None):
         self.path = studio.session_path(session)
         self.session = str(self.path)
         self.max_parallel, self.max_launches, self.max_attempts = max_parallel, max_launches, max_attempts
@@ -108,7 +109,16 @@ class Floor:
             if now - r["started"] > self.run_timeout:
                 r["timed_out"] = True
                 r["run"].stop()
+            elif now - r.get("last_event", r["started"]) > QUIET_AFTER and not r.get("quiet"):
+                # Seen live: a Mix run sent nothing for 25 minutes. Not killed (it may be thinking), but shown.
+                r["quiet"] = r.get("last_event", r["started"])
+                studio.log("run", self.session, seat=seat, task=r["task"], what="quiet",
+                           since=round(r["quiet"], 3))
+            elif r.get("quiet") and r.get("last_event", 0) > r["quiet"]:
+                r.pop("quiet", None)
+        self._unstick(set(running))
         self._route_takes()
+        self._final_listen()
         signoff.gather_plans(self.session, set(running), self._plan_changes)
         signoff.away_pass(self.session)
         started, waiting, paused = [], [], []
@@ -237,7 +247,8 @@ class Floor:
     def active(self) -> dict:
         """Seats with an agent running right now: {seat: {"task", "take", "since"}}."""
         with self._lock:
-            return {seat: {"task": r["task"], "take": r["take"], "since": round(r["started"], 3)}
+            return {seat: {"task": r["task"], "take": r["take"], "since": round(r["started"], 3),
+                           **({"quiet": round(r["quiet"], 3)} if r.get("quiet") else {})}
                     for seat, r in self._runs.items()}
 
     def _recover(self) -> None:
@@ -263,6 +274,47 @@ class Floor:
             for sid in stale:
                 b.st["seats"][sid]["presence"] = None
                 b.emit("presence", seat=sid, state="cleared")
+
+    def _unstick(self, running: set[str]) -> None:
+        """An open task in needs_you with no open Needs You item holding it would wait forever (nobody was asked
+        and the floor never starts it): back in the queue, with an event saying why."""
+        st = studio.read(self.session)
+        held = {x for a in st["attention"] if a["state"] == "open" for x in [a.get("task"), *a.get("blocks", [])] if x}
+        stuck = [t["id"] for t in st["tasks"] if t["state"] == "needs_you" and t["id"] not in held
+                 and t["seat"] not in running]
+        if not stuck:
+            return
+        with studio._Board(self.session) as b:
+            for tid in stuck:
+                t = b.task(tid)
+                t["state"], t["updated"] = "queued", round(time.time(), 3)
+                b.emit("task", id=tid, seat=t["seat"], state="queued", title=t["title"], by="floor",
+                       reason="it was in needs_you with nothing on Needs You for it")
+
+    def _final_listen(self) -> None:
+        """The user accepted the last open work from Needs You: no Producer run heard the finished cue (its final
+        listen is part of an audition run). Once per accepted revision, the Producer gets a task to do it."""
+        st = studio.read(self.session)
+        occ = st["seats"]["producer"]["occupant"]
+        if not occ or occ.get("kind") != "agent" or any(t["state"] in studio.OPEN for t in st["tasks"]):
+            return
+        acc = [k for k in studio.take_index(self.path) if k.get("state") == "accepted"]
+        last = max(acc, key=lambda k: k.get("accepted") or 0, default=None)
+        if not last or last.get("accepted_by") != roles.YOU:
+            return
+        rev = last.get("merged_rev")
+        if any(t.get("final_listen") == rev for t in st["tasks"]):
+            return
+        with studio._Board(self.session) as b:
+            now = round(time.time(), 3)
+            t = {"id": b.new_id("T"), "seat": "producer", "title": "Final listen",
+                 "detail": f"The user accepted {last['id']}, the last open work. render(out=...) and listen() the whole "
+                           "cue against the brief and its `delivery` check. Add the tasks that close a gap, "
+                           "or set this task done with a short account of what was made.",
+                 "state": "queued", "depends": [], "scope": {}, "by": "floor", "take": None, "result": "",
+                 "final_listen": rev, "created": now, "updated": now, "attempts": 0}
+            b.st["tasks"].append(t)
+            b.emit("task", id=t["id"], seat="producer", state="queued", title=t["title"], by="floor")
 
     def _limit_answer(self):
         """What the user said to the run-limit item: None (not answered), a number of further runs, or "stop"."""
@@ -374,10 +426,11 @@ class Floor:
                 system=briefs.system(seat, in_take, s.get("notes", ""), self._style()),
                 prompt=briefs.task_prompt(told, studio.studio_status(self.session), take,
                                           [done[d] for d in task.get("depends", []) if d in done],
-                                          unread, audition, asked, more),
+                                          unread, audition, asked, more, self._request()),
                 cwd=str(work), env=env, allow_tools=["mcp__tunetrack"],
                 mcp={"tunetrack": {"command": sys.executable, "args": ["-m", "tunetrack.mcp_server"], "env": env}},
-                log=str(self.path / "studio" / "logs" / f"{task['id']}-{task.get('attempts', 0) + 1}-{seat}.jsonl"))
+                log=str(self.path / "studio" / "logs" /
+                        f"{task['id']}-{task.get('attempts', 0) + 1}-{seat}-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"))
             if occ["runner"] == "script":
                 launch.script, launch.model = model, None
             run = self._start(launch)
@@ -425,6 +478,13 @@ class Floor:
             out.append((t, takes.take_diff(tk["id"], self.session), tasks.get(tk.get("task") or "")))
         return out
 
+    def _request(self) -> str | None:
+        """The user's words for the piece (kickoff stores them as brief.request): every seat's task names them."""
+        try:
+            return Project.load(self.path).brief.get("request")
+        except (OSError, ValueError, KeyError):
+            return None
+
     def _style(self) -> str | None:
         """The session's genre style sheet, read at each launch (the Producer may set it mid-session)."""
         try:
@@ -466,9 +526,12 @@ class Floor:
         tools, errors, last_text, done = 0, [], "", {"ok": False, "returncode": None, "result": ""}
         try:
             for ev in rec["run"].events():
+                rec["last_event"] = time.time()
                 self._on_event(seat, ev)
                 kind = ev.get("type")
-                if kind == "tool":
+                if kind == "tool_result" and ev.get("ok") is False:
+                    rec["tool_errors"] = rec.get("tool_errors", 0) + 1
+                elif kind == "tool":
                     tools += 1
                     studio.log("run", self.session, seat=seat, task=rec["task"], what="tool",
                                tool=str(ev.get("name", "")).replace("mcp__tunetrack__", ""))
@@ -510,7 +573,7 @@ class Floor:
                f"it was stopped: {dropped}" if dropped else
                (errors[-1] if errors else ""))
         studio.log("run", self.session, seat=seat, task=tid, what="end", ok=bool(done.get("ok")), tools=tools,
-                   error=why or None, **rec.get("used", {}))
+                   tool_errors=rec.get("tool_errors", 0), error=why or None, **rec.get("used", {}))
         if rec.get("before"):
             try:
                 moved = takes.changes(json.loads(rec["before"]),
@@ -730,6 +793,8 @@ def kickoff(brief: str, session: str | None = None) -> dict:
     """Start a session from a prompt: the Producer gets the brief as its first task and plans from there."""
     if not str(brief).strip():
         raise ValueError("Say what you want made")
+    # on the project too, so every seat's task message and the export's delivery check see the user's words
+    api.project_set(str(studio.session_path(session)), brief={"request": str(brief).strip()})
     return studio.task_add(
         "producer", "Plan the session",
         "The user asked for:\n\n" + str(brief).strip() + "\n\nPlan it: set the musical contract on the session, "

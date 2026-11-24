@@ -242,7 +242,7 @@ def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, m
     kind: "agent" (the studio launches runner/model for it), "human" (you take it), "external" (an outside app such
     as Claude Desktop sits in), "none" (leave it empty). Omit kind to keep the occupant and change only mode/notes.
     mode: "propose" (work in a take, submit for acceptance) or "direct" (edit the session itself).
-    notes: standing instructions for whoever sits here ("no brass", "keep it under 8 voices").
+    notes: standing instructions for whoever sits here ("no brass", "strings only in the intro").
     audition_model: a cheaper model on the same runner for the runs whose only job is to audition handed-in takes
     (the floor's audition tasks); planning runs and the final listen stay on model. "" turns it off. When the agent
     is replaced on the same runner and audition_model is not given, the old one is kept.
@@ -264,7 +264,7 @@ def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, m
                 s["occupant"], s["presence"] = None, None
             elif k == "agent":
                 if not runner:
-                    raise ValueError("An agent needs a runner (claude, codex, kilo) and usually a model")
+                    raise ValueError("An agent needs a runner (claude, codex, kilo, agy) and usually a model")
                 was = s["occupant"] or {}
                 s["occupant"] = {"kind": "agent", "runner": runner, "model": model, "effort": effort, "label": label}
                 keep = was.get("audition_model") if was.get("runner") == runner else None
@@ -540,6 +540,10 @@ def task_update(task: str, state: str | None = None, result: str | None = None, 
         if state is not None:
             if state not in TASK_STATES:
                 raise ValueError(f"state must be one of {TASK_STATES}")
+            if state == "needs_you" and t["state"] != "needs_you":
+                # Set by hand it makes no Needs You item: the task never starts again and nobody is asked.
+                raise ValueError("needs_you is set by ask_human(title, task=...), which puts the question on the "
+                                 "user's Needs You list; use that")
             if state == "done" and who == t["seat"] and not _lead(who):
                 # The seat's work is in a take, and a take is not in the session until it is accepted. A task
                 # closed here would never reach anyone's ears (seen live: an export went out without the part).

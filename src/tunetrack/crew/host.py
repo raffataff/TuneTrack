@@ -28,7 +28,7 @@ def _user() -> None:
         raise PermissionError("The crew is started and stopped by the user")
 
 
-def crew_start(brief: str | None = None, parallel: int = 3, max_runs: int = 40, session: str | None = None) -> dict:
+def crew_start(brief: str | None = None, parallel: int = 3, max_runs: int = 100, session: str | None = None) -> dict:
     """Let the seated agents work on this session, and keep managing it until crew_stop().
 
     brief: what you want made - the Producer gets it as its first task. Omit it to carry on with the tasks already

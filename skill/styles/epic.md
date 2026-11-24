@@ -5,7 +5,7 @@ about: Battle and boss music: orchestra plus synths and big drums, driven by ost
 ---
 
 ## producer
-- 130-170 bpm, minor or Phrygian. A 60-120 s loop: A drives, B lifts (a new layer, a key up a step, or the theme in
+- 130-170 bpm, minor or Phrygian. As a game cue a 60-120 s loop, as a trailer or concert piece as long as the brief asks: A drives, B lifts (a new layer, a key up a step, or the theme in
   the brass), the loop's last bars build back into A.
 - The layers: a string ostinato, low brass and choir for weight, taiko and toms, a synth bass and pulse for the
   hybrid edge. Each section adds or removes a layer.

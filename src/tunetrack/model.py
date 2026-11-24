@@ -270,6 +270,15 @@ class TempoMap:
         return self.bpms[max(0, bisect.bisect_right(self.beats, beat) - 1)]
 
 
+TAIL = 30.0  # default longest one-shot tail in seconds (engine cuts it 1 s after the sound has died away)
+
+
+def _tail(v) -> float:
+    """A saved tail. 4.0 was the old fixed default that cut long reverbs: saved projects carry it, so it is read as
+    the new default; any other value was set on purpose and is kept."""
+    return TAIL if v is None or float(v) == 4.0 else float(v)
+
+
 @dataclass
 class Project:
     name: str
@@ -285,7 +294,7 @@ class Project:
     chord_track: list[dict] = field(default_factory=list)
     loop: dict | None = None  # {"start": beat, "end": beat}
     length: float | None = None  # explicit song end in beats
-    tail: float = 4.0  # seconds rendered past the end for release/reverb tails
+    tail: float = TAIL  # the longest a one-shot rings past the end; the render stops once it is silent
     tempo_changes: list[list[float]] = field(default_factory=list)
     eq_engine: str = "builtin"  # what builtin:eq inserts run on: builtin | ssl | nova (see eqmap.py)
     # the video the music is written to (picture.py): {"file", "start": song seconds of its first frame, "duration",
@@ -317,7 +326,13 @@ class Project:
             raise ValueError(f"Can't parse position {value!r}; use beats (e.g. 16) or 'bar:beat' (e.g. '5:1')")
         bar = float(m.group(1))
         beat = float(m.group(2)) if m.group(2) else 1.0
-        return (bar - 1) * self.beats_per_bar + (beat - 1)
+        bpb = self.beats_per_bar
+        # "1:5" in 6/8 used to land on 2:2 without a word. A beat on the next bar line is a rounding of it: allowed.
+        if m.group(2) and (beat < 1 or beat > bpb + 1 + 1e-3):
+            last = f"{bpb + 0.5:g}" if bpb % 1 == 0 else f"{bpb + 1 - 0.25:g}"
+            raise ValueError(f"{value!r}: {self.time_sig[0]}/{self.time_sig[1]} has {bpb:g} beats per bar "
+                             f"(quarter notes): {int(bar)}:1-{int(bar)}:{last}")
+        return (bar - 1) * bpb + (beat - 1)
 
     def dur(self, value) -> float:
         """Parse a length: number = beats; "2 bars"/"2b" = bars."""
@@ -402,7 +417,7 @@ class Project:
                 tracks=[Track.from_json(t) for t in d.get("tracks", [])],
                 markers=list(d.get("markers", [])), chord_track=[dict(e) for e in d.get("chord_track") or []],
                 loop=d.get("loop"), length=d.get("length"),
-                tail=float(d.get("tail", 4.0)), tempo_changes=list(d.get("tempo_changes", [])),
+                tail=_tail(d.get("tail")), tempo_changes=list(d.get("tempo_changes", [])),
                 eq_engine=d.get("eq_engine") or "builtin",
                 picture=dict(d["picture"]) if d.get("picture") else None, hits=[dict(h) for h in d.get("hits") or []],
                 next_id=int(d.get("next_id", 1)), rev=int(d.get("rev", 0)), path=path)

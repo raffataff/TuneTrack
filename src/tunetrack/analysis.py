@@ -137,11 +137,13 @@ def notes_report(p: Project) -> dict:
         if rng and not is_drums:
             lo, hi, clo, chi = rng
             bad = [n for _, n in notes if n.pitch < lo or n.pitch > hi]
-            hard = [n for _, n in notes if (clo > n.pitch >= lo) or (chi < n.pitch <= hi)]
+            # Sustained low pads and drones are normal: only their top end counts as extreme.
+            sustained = any(w in (t.role or "").lower() for w in ("pad", "drone"))
+            hard = [n for _, n in notes if (clo > n.pitch >= lo and not sustained) or (chi < n.pitch <= hi)]
             if bad:
                 issues.append(f"{len(bad)} notes outside the playable {t.role} range {note_name(lo)}-{note_name(hi)}")
             if len(hard) > 0.3 * len(notes):
-                issues.append(f"many notes in the extreme register of {t.role}")
+                issues.append(f"info: most notes sit in the extreme register of {t.role} - fine if intended")
         by_pitch: dict[int, list[tuple[float, float]]] = {}
         for s, n in notes:
             by_pitch.setdefault(n.pitch, []).append((s, s + n.dur))

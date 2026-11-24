@@ -5,7 +5,7 @@ about: Light and bouncy: pizzicato, mallets, staccato bass, a cheeky tune with c
 ---
 
 ## producer
-- 100-130 bpm, major with chromatic passing notes; a short loop (30-60 s) that stays out of the player's way
+- 100-130 bpm, major with chromatic passing notes; a loop (30-60 s unless the brief asks for longer) that stays out of the player's way
   while they think.
 - Pizzicato strings, mallets, clarinet or bassoon for humour, a plucky bass, light percussion; small and clear.
 

@@ -27,7 +27,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route
 
 from . import api, bench, config, gear, livehost, picture as pic, review, signoff, studio, styles, takes, tracking
-from .crew import detect, host, scorecard
+from .crew import detect, host, scorecard, usage
 
 PORT = 7373
 WEB = Path(__file__).parent / "web"
@@ -43,6 +43,12 @@ CALLABLE = {
 def crew_detect(refresh: bool = False) -> dict:
     """The agent CLIs on this computer and the models each offers (what can sit in a seat)."""
     return detect.detect(refresh=bool(refresh))
+
+
+def crew_usage() -> dict:
+    """Each agent app's 5-hour and weekly limits, as it last reported them."""
+    cur = _current()
+    return usage.usage([str(cur)] if cur else None)
 
 
 def studio_view() -> dict:
@@ -244,7 +250,7 @@ STUDIO = {f.__name__: f for f in (
     studio.studio_status, studio.board, studio.seat_assign, studio.task_add, studio.task_update, studio.task_list,
     studio.message_send, studio.inbox, studio.attention_list, studio.attention_resolve, studio.events,
     takes.take_list, takes.take_diff, takes.take_accept, takes.take_reject, takes.take_discard,
-    takes.take_audition, takes.take_submit, takes.take_sync, take_cut, host.crew_start, host.crew_stop, host.crew_state, host.seat_hold, crew_detect,
+    takes.take_audition, takes.take_submit, takes.take_sync, take_cut, host.crew_start, host.crew_stop, host.crew_state, host.seat_hold, crew_detect, crew_usage,
     studio_view, bench.seat_bench, studio.report_list, studio.report_read, review.review_draft, review.review_send,
     review.review_check, review.final_status,
     scorecard.crew_scorecard, scorecard.crew_review, scorecard.crew_history, scorecard.crew_pick,
@@ -253,6 +259,7 @@ STUDIO = {f.__name__: f for f in (
     live_guide, live_mix, ui_prefs, font_list,
     gear.catalog, gear.gear_state, gear.gear_seen, gear.gear_folders, gear.gear_rescan, gear_audition,
     gear_audition_stop, styles.style_list, signoff.seat_signoff, signoff.crew_involve, signoff.away_set,
+    signoff.your_version, signoff.hand_over, signoff.take_yours,
 )}
 TOKEN = secrets.token_urlsafe(32)
 _HOSTS = {"127.0.0.1", "localhost", "[::1]"}

@@ -19,8 +19,8 @@ Before writing a note, find out what the music is for:
   colours, existing audio folders and file naming, the engine (Godot `project.godot`, Unity `Assets/`, Unreal `.uproject`, web).
 - Settle on: **genre/palette, mood (2-3 adjectives), energy, tempo, key/mode, cue type, length, loop form, delivery format and path.**
   If the user gave intent ("dark synthwave menu, 100 bpm") it wins over your inference. Ask only if the project gives no clue.
-- Record it: `project_new(name, tempo, key, time_sig, brief={genre, mood, use, game, references, notes, length, size}, eq_engine=...)`
-  (eq_engine: see section 6). length: seconds or m:ss; size: small (3-5 parts), medium (6-9) or full (10-16) - a starting
+- Record it: `project_new(name, tempo, key, time_sig, brief={genre, mood, use, form, game, references, notes, length, size}, eq_engine=...)`
+  (eq_engine: see section 6). form: "loop" or a full track with an ending; length: seconds or m:ss; size: small (3-5 parts), medium (6-9), full (10-16) or symphonic (16-30+) - a starting
   cast, not a cap: add a part whenever a section needs one.
 
 ## 2. Check the instrument library
@@ -47,12 +47,12 @@ keep their bars when it moves. Give every hit something a viewer hears there (a 
 change, silence), keep the music thin where `sound.loud` shows dialogue, and deliver with `render(out="cue.mp4")`.
 
 Set `markers()` for sections and `project_set(loop="5:1-21:1")` for the loop region, then put each section's harmony on
-the chord track (section 4). Typical forms (check bars against seconds: 16 bars of 4/4 at 100 bpm is only 38 s). Sections should grow: plan which
+the chord track (section 4). Typical forms (check bars against seconds: 16 bars of 4/4 at 100 bpm is only 38 s; 4 minutes is 100 bars). Sections should grow: plan which
 parts enter and leave in each section, holding some back so A' and B arrive, rather than every part playing throughout.
 
 | Cue | Length | Form and notes |
 |---|---|---|
-| Main menu | 45-120 s loop | Optional 2-4 bar intro (played once) then A A' B A'' (8 bars each at most tempos). Memorable motif, medium density, leaves room for UI sounds. |
+| Main menu | 45-120 s loop | Optional 2-4 bar intro (played once) then A A' B A'' (often 8 bars each). Memorable motif, medium density, leaves room for UI sounds. |
 | Exploration / overworld | 1.5-3 min loop | Long arcs, sparse texture, breathing room, slow harmonic rhythm (1-2 bars per chord). |
 | Town / shop | 40-90 s loop | Warm, rhythmic, small ensemble, catchy. |
 | Battle | 60-120 s loop | 130-170 bpm, driving ostinato, strong bass, accents and hits, short phrases; B section raises intensity. |
@@ -60,6 +60,12 @@ parts enter and leave in each section, holding some back so A' and B arrive, rat
 | Victory / defeat stinger | 2-8 s, one-shot | Victory: rising line to a bright major chord + cymbal. Defeat: falling line to a minor or diminished chord, fade. `loop="off"`. |
 | Ambience bed | 1-3 min loop | Pads/drones, slow movement, no strong pulse, little melody. |
 | Credits | 2-4 min, one-shot | Medley of the game's motifs. |
+| Lo-fi / chill beat | 1-3 min loop | A 2-4 bar progression; interest from layers entering and dropping, a variation every 8 bars, a breakdown. |
+| Theme tune / main title | 1-2.5 min, one-shot or loop | Intro that sets the world, theme stated, contrasting middle, theme back bigger (new key, fuller scoring), a real ending. |
+| Song | 2.5-5 min, one-shot | Intro, verse, pre-chorus, chorus, verse 2 with more, bridge, final choruses that lift, outro or written ending. |
+| Concert / film / symphonic piece | 3-8 min, through-composed | Two or more themes, development, modulations, tempo/metre/texture changes, quiet passages against full tutti, an earned climax, a resolved ending. |
+
+These are starting points, not limits: the user's length, form and ambition win. A 4-minute piece is 4 minutes of written music, not a short loop repeated.
 
 Loop rules: the loop is a whole number of bars; its last bar must lead back into its first (dominant, or a pickup into the first
 melody note). Don't let notes cross the loop end unless you want them to. Release and reverb tails are folded into the loop start
