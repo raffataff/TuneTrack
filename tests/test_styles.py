@@ -67,7 +67,7 @@ def test_a_seats_brief_carries_its_section_of_the_style():
     assert briefs.system("sound", True, style="horror").count("Style:") == 1
     # the longest brief with the longest sheet still fits the bound the craft test keeps
     longest = max(len(briefs.system("producer", False, style=n)) for n in styles.names())
-    assert longest < 14500
+    assert longest < 19000
 
 
 def test_the_floor_reads_the_sessions_style_at_launch(tmp_path):

@@ -5,7 +5,7 @@ about: A small warm ensemble playing for friends: plucked strings, mallets, a li
 ---
 
 ## producer
-- 85-110 bpm, major with add9 and maj7 colour; a 40-90 s loop that can play for an hour without tiring.
+- 85-110 bpm, major with add9 and maj7 colour; a 40-90 s loop (longer when the brief asks) that can play for an hour without tiring.
 - Small ensemble: nylon guitar or ukulele, piano or e-piano, mallets (glockenspiel, marimba), a flute or whistle
   lead, upright or soft bass, shaker and light percussion. No full drum kit, no big reverb.
 
@@ -14,12 +14,12 @@ about: A small warm ensemble playing for friends: plucked strings, mallets, a li
   answer each other.
 - Harmony: I-vi-IV-V, I-iii-IV-I, IVmaj7-iii7-vi7, ii-V-I with add9; a secondary dominant (V/vi) for a moment of
   wistfulness.
-- Keep it simple and singable; one tune that comes back with a new instrument each time.
+- Singable first; one tune that comes back with a new instrument each time.
 
 ## arranger
 - Guitar or ukulele strums the chords in a light pattern; piano doubles the bass and fills in rests; mallets
   double the tune an octave up on the second time round.
-- Three to five parts at once; trade the tune between flute, mallets and piano.
+- Usually three to six parts at once; trade the tune between flute, mallets and piano.
 - Humanise every part (notes_edit(op="humanize", timing_ms=8-15, velocity=6-10)): it is played by people.
 
 ## rhythm

@@ -5,7 +5,7 @@ about: Space and slow change: pads and drones, little pulse, sounds that evolve 
 ---
 
 ## producer
-- 60-90 bpm or no clear pulse; Lydian, sus chords, slow harmonic change (a chord every 2-4 bars). A 1.5-3 min loop.
+- 60-90 bpm or no clear pulse; Lydian, sus chords, slow harmonic change (a chord every 2-4 bars). A 1.5-3 min loop unless the brief says otherwise.
 - Pads, drones, a sparse bell or piano voice, textures; no drum kit. The interest comes from slow change in colour
   and density.
 

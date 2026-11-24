@@ -70,10 +70,10 @@ const noteName = (p) => NOTE_NAMES[p % 12] + (Math.floor(p / 12) - 1);
 const trackColor = (t, i) => t.color || PALETTE[i % PALETTE.length];
 // The canvases' palette, matching style.css's tokens. UI_FONT/MONO are what the canvases write labels in.
 const CV = {
-  bg: "#0d0f12", band: "rgba(255,255,255,.014)", beat: "#14171b", bar: "#1d2126", phrase: "#2a2f36",
-  lane: "#08090b", laneHi: "rgba(255,255,255,.025)", sel: "rgba(255,178,36,.05)", loop: "rgba(79,220,132,.045)",
-  ruler: "#121417", rulerTxt: "#8e8b84", tick: "#2c3138", tickMinor: "#1f2328", marker: "#ffb224", play: "#ff5545",
-  vfd: "#7cf0d6", vfdBg: "#0a1716", dim: "#64625c",
+  bg: "#0d1217", band: "rgba(173,199,220,.021)", beat: "#171f27", bar: "#232d36", phrase: "#313d46",
+  lane: "#090d11", laneHi: "rgba(173,199,220,.065)", loop: "rgba(79,220,132,.045)",
+  ruler: "#141c24", rulerTxt: "#c1c8d0", tick: "#3d4b57", tickMinor: "#2c3741", marker: "#ffb224", play: "#ff5545",
+  vfd: "#7cf0d6", vfdBg: "#0a1716",
 };
 // the canvases' fonts follow Setup's (the CSS variables on <html>); shell.js fires "tt-fonts" when they change
 let UI_FONT = "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif", MONO = "'Cascadia Mono', Consolas, ui-monospace, monospace", LEGEND = "Bahnschrift, 'Segoe UI', sans-serif";
@@ -169,7 +169,20 @@ function renderTakeBar() {
   if (m && m.reason && $("#takeWhy")) $("#takeWhy").onclick = () => { modal(`<h2>${esc(m.id)} was sent back</h2><div class="reader">${esc(m.reason)}</div><div class="row"><button class="ghost" id="twClose">Close</button></div>`); $("#twClose").onclick = closeModal; };
   for (const id of ["takeChanges", "takeSync", "takeSubmit", "takeLeave"]) $("#" + id).classList.toggle("hidden", !m);
   $("#takeNew").classList.toggle("hidden", !!m);
-  if (m) { $("#takeSync").disabled = !m.session_moved; $("#takeSubmit").textContent = m.state === "submitted" ? "HAND IN AGAIN…" : "HAND IN…"; $("#takeSubmit").disabled = !m.changes; }
+  // what the go key does: a take waiting on your sign-off goes back to Needs You with your edits in it; any other
+  // take of yours is handed over (to the Producer or straight into the song)
+  const stop = m && board && board.needs_you.find((a) => a.take === m.id && a.stage), info = m && takes.find((t) => t.id === m.id);
+  if (m && (stop || (info && info.replaces))) $("#takeTags").insertAdjacentHTML("afterbegin", stop
+    ? `<span class="tag bad" title="This take waits on you at ${esc(stop.id)}. Your edits go into it; SIGN OFF takes you back to pass it on, accept it or send it back.">WAITING ON YOUR SIGN-OFF</span>`
+    : `<span class="tag cy" title="Your own version of this task. When you hand it over, ${esc(info.replaces)} is put away.">YOUR VERSION · INSTEAD OF ${esc(info.replaces.toUpperCase())}</span>`);
+  if (m) {
+    const k = $("#takeSubmit");
+    $("#takeSync").disabled = !m.session_moved;
+    k.textContent = stop ? "SIGN OFF…" : m.state === "submitted" ? "HAND OVER AGAIN…" : "HAND OVER…";
+    k.title = stop ? "Back to Needs You with your changes: pass it to the Producer, accept it, or send it back" : "Send this take to the Producer, or merge it into the song";
+    k.disabled = !stop && !m.changes;
+    k.dataset.stop = stop ? stop.id : "";
+  }
 }
 $("#takeSel").onchange = (e) => openTake(e.target.value, false);
 $("#takeLeave").onclick = () => openTake(null, false);
@@ -181,7 +194,7 @@ $("#takeNew").onclick = () => {
   const P = { seat: mine[0] ? mine[0].seat : "", task: "" };
   const who = (s) => s.occupant ? (s.occupant.kind === "human" ? "You sit here" : s.label || s.occupant.kind) : "Empty";
   const el = Sheet.open({ title: "Cut a take", size: "seat", body: `<form class="sform" autocomplete="off">
-      <p class="spWhy">A take is a private copy of the session. The Desk edits the copy, nobody hears it until you hand it in, and accepting it merges only what you changed.</p>
+      <p class="spWhy">A take is a private copy of the song. The Desk edits the copy: notes, instruments, the mix. Nobody hears it until you press HAND OVER, which sends it to the Producer (who can have other seats check it) or merges it straight into the song. Only what you changed is merged.</p>
       <div class="phH sub">For seat</div>
       <div class="tiles ctSeats"><button type="button" data-seat=""><b>NO SEAT</b><span>Your own take</span></button>
         ${board.seats.map((s) => `<button type="button" data-seat="${esc(s.seat)}"><b>${esc(s.title)}</b><span>${esc(who(s))}</span></button>`).join("")}</div>
@@ -241,24 +254,58 @@ async function syncTake(on_conflict) {
 $("#takeSubmit").onclick = async () => {
   const id = S.take, m = S.takeMeta; if (!id || !m) return;
   if (S.pendingSave) { toast("Still saving your last edit: try again in a moment."); return; }
-  let d; try { d = await api("take_diff", { take: id }); } catch (e) { toast(e.message); return; }
-  modal(`<h2>Hand in ${esc(id)}</h2>
-    <p class="hint">It goes to whoever accepts takes (the Producer, or you on Needs You and the seat's TAKES tab). Say what you made and what to listen for.</p>
-    ${changeList(d)}
-    <textarea id="hiText" rows="3" placeholder="What you made and anything the listener should check">${esc(m.summary || "")}</textarea>
-    <div class="row"><button class="ghost" id="hiCancel">Cancel</button><button class="key go" id="hiOk">HAND IT IN</button></div>`);
-  $("#hiText").focus();
-  $("#hiCancel").onclick = closeModal;
-  $("#hiOk").onclick = async () => {
-    const summary = $("#hiText").value.trim(); if (!summary) { toast("Say what you made, so whoever auditions it knows what to listen for"); return; }
-    closeModal();
-    try {
-      await api("take_submit", { take: id, summary });
-      await openTake(null, false);
-      toast(`${id} handed in. The desk is back on the session.`, true);
-    } catch (e) { toast(e.message); }
-  };
+  const stopId = $("#takeSubmit").dataset.stop;
+  if (stopId) { if (window.TTNeeds) TTNeeds.open(stopId); return; }  // a sign-off: answered on Needs You, with your edits in it
+  handOver(id, m);
 };
+// Hand over a take of yours: to the Producer's agent (who may have other seats check it), or straight into the song.
+async function handOver(id, m) {
+  let d; try { d = await api("take_diff", { take: id }); } catch (e) { toast(e.message); return; }
+  const board = window.Studio?.board(), crew = (window.TTStudio && window.TTStudio.ST.crew) || {};
+  const info = board && board.takes.find((t) => t.id === id), replaces = info && info.replaces;
+  const agent = (s) => s.occupant && s.occupant.kind === "agent";
+  const prod = board && board.seats.some((s) => s.seat === "producer" && agent(s));
+  const checkers = board ? board.seats.filter((s) => agent(s) && s.seat !== "producer") : [];
+  const P = { to: prod ? "producer" : "song", check: new Set() };
+  const el = Sheet.open({ title: `Hand over ${id}`, sub: `${m.changes} CHANGE${m.changes === 1 ? "" : "S"}`, size: "seat", body: `<form class="sform" autocomplete="off">
+      <p class="spWhy">What happens to your work now.${replaces ? ` ${esc(replaces.toUpperCase())}, the seat's take you are replacing, is put away when you hand this over.` : ""}</p>
+      <div class="phH sub">Where it goes</div>
+      <div class="tiles hoTo">
+        <button type="button" data-to="producer" ${prod ? "" : "disabled"}><b>TO THE PRODUCER</b><span>${prod
+          ? `Its agent hears it against the brief, then accepts it, sends it back to you, or has other seats check it.${crew.running ? "" : " The crew is stopped now: it hears it when you start the crew."}`
+          : "No agent sits in the Producer seat. Seat one to have your work reviewed."}</span></button>
+        <button type="button" data-to="song"><b>INTO THE SONG NOW</b><span>Merge your changes straight away (one undo step). Nobody reviews it first.</span></button>
+      </div>
+      <div class="hoCheck ${checkers.length ? "" : "hidden"}"><div class="phH sub">Ask the Producer to have these seats check it <i>optional</i></div>
+        <div class="seg hoSeats">${checkers.map((s) => `<button type="button" class="key toggle" data-seat="${esc(s.seat)}">${esc(s.title.toUpperCase())}</button>`).join("")}</div></div>
+      <label class="fld"><span>Note</span><textarea id="hiText" rows="3" placeholder="What you changed and what to listen for (optional)">${esc(m.summary || "")}</textarea></label>
+      <div class="phH sub">What it changes</div>${changeList(d)}
+    </form>`, foot: `<span class="spacer"></span><button class="key" id="hiCancel">CANCEL</button><button class="key go" id="hiOk"></button>` });
+  const draw = () => {
+    el.querySelectorAll("[data-to]").forEach((b) => b.classList.toggle("on", b.dataset.to === P.to));
+    el.querySelector(".hoCheck").classList.toggle("hidden", P.to !== "producer" || !checkers.length);
+    el.querySelectorAll("[data-seat]").forEach((b) => b.classList.toggle("on", P.check.has(b.dataset.seat)));
+    el.querySelector("#hiOk").textContent = P.to === "producer" ? "SEND TO THE PRODUCER" : "MERGE INTO THE SONG";
+  };
+  el.querySelectorAll("[data-to]").forEach((b) => b.onclick = () => { P.to = b.dataset.to; draw(); });
+  el.querySelectorAll("[data-seat]").forEach((b) => b.onclick = () => { P.check.has(b.dataset.seat) ? P.check.delete(b.dataset.seat) : P.check.add(b.dataset.seat); draw(); });
+  draw();
+  el.querySelector("#hiCancel").onclick = () => Sheet.close();
+  const go = async () => {
+    const ok = el.querySelector("#hiOk"); ok.disabled = true;
+    try {
+      status(P.to === "song" ? "merging…" : "handing over…", "busy");
+      await api("hand_over", { take: id, summary: el.querySelector("#hiText").value.trim(), to: P.to, check: [...P.check] }, null);
+      status(""); Sheet.close(true);
+      await openTake(null, false);
+      toast(P.to === "song" ? `${id} is in the song. The desk is back on the session.`
+        : `${id} went to the Producer${crew.running ? "" : " (it hears it when you start the crew)"}. The desk is back on the session.`, true);
+      window.TTStudio?.refresh(true);
+    } catch (e) { status(""); toast(e.message); ok.disabled = false; }
+  };
+  el.querySelector("#hiOk").onclick = go;
+  el.querySelector(".sform").onsubmit = (e) => { e.preventDefault(); go(); };
+}
 
 // Show the desk on one of its panels with a track in front (a seat's bench sends you here).
 function deskShow(tab, trackId) {
@@ -336,14 +383,14 @@ function drawHeaders() {
   const lay = laneLayout(), L = laneH();
   S.doc.tracks.forEach((t, i) => {
     const el = document.createElement("div");
-    el.className = "th" + (S.sel.track === t.id ? " sel" : "") + (lay[i].h !== L ? " tall" : "");
-    if (lay[i].h !== L) el.style.height = lay[i].h + "px";  // a lane grown for its passes
+    el.className = S.sel.track === t.id ? "th sel" : "th";
+    el.style.setProperty("--track-color", trackColor(t, i));
+    if (lay[i].h !== L) el.style.setProperty("--track-height", lay[i].h + "px");
     const inst = t.kind === "midi" ? (t.instrument ? instLabel(t.instrument) : "no instrument") : t.kind;
-    el.innerHTML = `<div class="bar" style="background:${trackColor(t, i)}"></div>
-      <div class="name" title="${esc(t.name)}">${esc(t.name)}</div>
+    el.innerHTML = `<div class="name" title="${esc(t.name)}">${esc(t.name)}</div>
       <div class="btns"><button class="m ${t.mute ? "on" : ""}" title="Mute">M</button><button class="s ${t.solo ? "on" : ""}" title="Solo">S</button>${window.Tracking?.headerButtons(t) || ""}</div>
       <div class="inst" title="${esc(inst)}">${window.Tracking?.headerInst(t) || esc(inst) + (t.role ? " · " + esc(t.role) : "")}</div>
-      <div class="vol"><input type="range" min="-60" max="12" step="0.5" value="${t.volume_db}"><span>${(+t.volume_db).toFixed(1)}</span></div>`;
+      <div class="vol"><input type="range" min="-60" max="12" step="0.5" value="${t.volume_db}" aria-label="${esc(t.name)} gain"><span>${(+t.volume_db).toFixed(1)}</span></div>`;
     el.onclick = (e) => { if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") return; selectTrack(t.id); };
     el.ondblclick = (e) => { if (e.target.classList.contains("name")) renameTrack(t); };
     el.oncontextmenu = (e) => { e.preventDefault(); trackMenu(e, t); };
@@ -359,6 +406,7 @@ function drawHeaders() {
     box.appendChild(el);
     if (lay[i].a) box.appendChild(Automation.header(t, lay[i]));  // the names of its open automation lanes
   });
+  box.scrollTop = lanesWrap.scrollTop;
   window.Tracking?.meters();
 }
 function instLabel(i) {
@@ -380,7 +428,7 @@ function trackMenu(e, t) {
 
 // ---------------------------------------------------------------- arrangement
 const lanesWrap = $("#lanesWrap"), lanes = $("#lanes"), ruler = $("#ruler");
-const laneH = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue("--lane"));
+const laneH = () => parseInt(getComputedStyle(lanesWrap).getPropertyValue("--lane"));
 // Where each track's lane sits ({y, h} per track; .total is the height of them all). A lane is laneH() tall and
 // grows for a track with more than 2 recording passes (about PASS_ROW px a row), so its pass rows stay readable.
 // a: the height of the track's open automation lanes, under its lane (automation.js); the next track starts below.
@@ -406,6 +454,9 @@ function drawArrangement() {
   const lay = laneLayout(), endB = songEnd() + bpb() * 8;
   const W = Math.max(lanesWrap.clientWidth, endB * S.zoom), H = Math.max(lanesWrap.clientHeight - 2, lay.total);
   const g = fitCanvas(lanes, W, H);
+  const headers = $("#trackHeaders");
+  headers.style.marginBottom = (lanesWrap.offsetHeight - lanesWrap.clientHeight) + "px";
+  headers.scrollTop = lanesWrap.scrollTop;
   g.fillStyle = CV.bg; g.fillRect(0, 0, W, H);
   const barW = bpb() * S.zoom;
   for (let b = 0, ph = 0; b <= endB; b += bpb() * 4, ph++) if (ph % 2) { g.fillStyle = CV.band; g.fillRect(b * S.zoom, 0, barW * 4, H); }  // every other 4-bar phrase
@@ -416,9 +467,11 @@ function drawArrangement() {
   }
   S.doc.tracks.forEach((t, i) => {
     const { y, h: L } = lay[i];
-    if (S.sel.track === t.id) { g.fillStyle = CV.sel; g.fillRect(0, y, W, L); }
-    g.fillStyle = CV.lane; g.fillRect(0, y + L - 1, W, 1); g.fillStyle = CV.laneHi; g.fillRect(0, y + L, W, 1);
     const col = trackColor(t, i);
+    if (S.sel.track === t.id) {
+      g.fillStyle = col; g.globalAlpha = 0.07; g.fillRect(0, y, W, L); g.globalAlpha = 1;
+    }
+    g.fillStyle = CV.lane; g.fillRect(0, y + L - 1, W, 1); g.fillStyle = CV.laneHi; g.fillRect(0, y + L, W, 1);
     for (const c of t.clips) drawClip(g, t, c, y, L, col);
   });
   window.Automation?.draw(g, lay, W);
@@ -448,13 +501,20 @@ function clipBox(t, lane, y, L) {
 function drawClip(g, t, c, y, L, col) {
   const x = c.start * S.zoom, w = Math.max(3, c.length * S.zoom), sel = S.sel.clip === c.id;
   const [cy, ch] = clipBox(t, c.lane, y, L), band = ch >= 34 ? 15 : 0;  // a pass row has no room for a title band
-  const R = Math.min(4, w / 3, ch / 3);
-  g.globalAlpha = c.muted ? 0.35 : 1;
-  rrect(g, x + 1, cy, w - 2, ch, R); g.fillStyle = "#0b0c0f"; g.fill(); g.fillStyle = col + "26"; g.fill();
-  if (band) { rrect(g, x + 1, cy, w - 2, band, [R, R, 0, 0]); g.fillStyle = col + "d9"; g.fill(); }
-  else { g.fillStyle = col; g.fillRect(x + 1 + R, cy, Math.max(0, w - 2 - 2 * R), 2); }
-  rrect(g, x + 1.5, cy + 0.5, w - 3, ch - 1, R); g.strokeStyle = sel ? "#ffffff" : col + "b3"; g.lineWidth = sel ? 1.5 : 1; g.stroke(); g.lineWidth = 1;
-  g.save(); g.beginPath(); g.rect(x + 2, cy, w - 4, ch); g.clip();
+  const R = Math.min(5, w / 3, ch / 3), opacity = c.muted ? 0.35 : 1;
+  g.save();
+  g.globalAlpha = opacity;
+  rrect(g, x + 1, cy, w - 2, ch, R);
+  g.fillStyle = "#0b0f14"; g.fill();
+  g.fillStyle = col; g.globalAlpha = opacity * 0.14; g.fill(); g.globalAlpha = opacity;
+  if (band) {
+    rrect(g, x + 1, cy, w - 2, band, [R, R, 0, 0]); g.fill();
+    g.fillStyle = "#ffffff30"; g.fillRect(x + 1 + R, cy + 1, Math.max(0, w - 2 - 2 * R), 1);
+  } else { g.fillRect(x + 1 + R, cy, Math.max(0, w - 2 - 2 * R), 2); }
+  rrect(g, x + 1.5, cy + 0.5, w - 3, ch - 1, R);
+  g.strokeStyle = sel ? "#eef6ff" : col; g.globalAlpha = opacity * (sel ? 1 : 0.77);
+  g.lineWidth = sel ? 2 : 1; g.stroke(); g.globalAlpha = opacity;
+  g.beginPath(); g.rect(x + 2, cy, Math.max(0, w - 4), ch); g.clip();
   if (band) {
     g.fillStyle = "rgba(6,7,9,.92)"; g.font = `600 10.5px ${UI_FONT}`;
     g.fillText((c.name || (c.kind === "audio" ? (c.file || "").split("/").pop() : ""))
@@ -470,14 +530,40 @@ function drawClip(g, t, c, y, L, col) {
       const ny = top + (hi + 1 - n[0]) / span * h;
       g.fillRect(x + n[1] * S.zoom, ny, Math.max(1.5, Math.min(n[2], c.length - n[1]) * S.zoom - 0.5), Math.max(1.5, h / span - 0.5));
     }
-  } else if (c.kind === "audio" && !window.Tracking?.wave(g, c, x, w, top, h, col)) {
-    // a stand-in for the waveform until the file's peaks arrive (or when it has none), taken from where in the
-    // file the clip plays so a cut does not redraw it
-    const o = (c.offset || 0) * 40;
-    g.fillStyle = col + "99"; for (let i = 0; i < w; i += 3) { const a = (Math.sin((i / S.zoom * 9 + o) * 0.37) * 0.5 + 0.5) * h; g.fillRect(x + i, top + (h - a) / 2, 2, a); }
+  } else if (c.kind === "audio") {
+    g.globalAlpha = opacity * 0.8;
+    if (!window.Tracking?.wave(g, c, x, w, top, h, col)) {
+      // Keep the placeholder stable when the clip is cut while the waveform loads.
+      const o = (c.offset || 0) * 40;
+      g.fillStyle = col;
+      for (let i = 0; i < w; i += 3) {
+        const a = (Math.sin((i / S.zoom * 9 + o) * 0.37) * 0.5 + 0.5) * h;
+        g.fillRect(x + i, top + (h - a) / 2, 2, a);
+      }
+    }
+    g.globalAlpha = opacity;
   }
   if (!band && w > 26) { g.fillStyle = c.muted ? col : "#ffffff"; g.font = `9px ${UI_FONT}`; g.fillText("P" + (c.lane || 0), x + 4, cy + Math.min(ch - 2, 10)); }
-  g.restore(); g.globalAlpha = 1;
+  g.restore();
+}
+function drawBarScale(g, W, H, zoom, sx) {
+  const barPx = bpb() * zoom, every = Math.max(1, Math.round(44 / barPx));
+  g.font = `10px ${MONO}`; g.textBaseline = "alphabetic";
+  for (let bar = Math.max(0, Math.floor((sx - 60) / barPx)); bar * barPx < sx + W; bar++) {
+    const x = Math.round(bar * barPx - sx);
+    if (barPx >= 48) for (let k = 1; k < bpb(); k++) { g.fillStyle = CV.tickMinor; g.fillRect(x + Math.round(k * zoom), H - 4, 1, 4); }
+    const major = bar % every === 0;
+    g.fillStyle = major ? CV.tick : CV.tickMinor; g.fillRect(x, major ? H - 11 : H - 6, 1, major ? 11 : 6);
+    if (major) { g.fillStyle = bar % 4 ? "#9da8b3" : CV.rulerTxt; g.fillText(bar + 1, x + 4, H - 3); }
+  }
+  g.font = `600 9.5px ${LEGEND}`; g.textBaseline = "middle";
+  for (const m of S.doc.markers) {
+    const x = Math.round(m.at * zoom - sx), label = String(m.name).toUpperCase(), tw = g.measureText(label).width;
+    if (x + tw + 16 < 0 || x > W) continue;
+    rrect(g, x, 5, tw + 12, 12, [0, 3, 3, 0]); g.fillStyle = "rgba(255,178,36,.17)"; g.fill();
+    g.fillStyle = CV.marker; g.fillRect(x, 5, 1.5, H - 5); g.fillText(label, x + 6, 11.5);
+  }
+  g.textBaseline = "alphabetic";
 }
 function drawRuler() {
   const W = lanesWrap.clientWidth, H = 30, g = fitCanvas(ruler, W, H), sx = lanesWrap.scrollLeft;
@@ -487,25 +573,7 @@ function drawRuler() {
     const lx = S.doc.loop.start * S.zoom - sx, lw = (S.doc.loop.end - S.doc.loop.start) * S.zoom;
     rrect(g, lx, 0.5, lw, 4, 2); g.fillStyle = S.loopOn ? "rgba(79,220,132,.8)" : "rgba(79,220,132,.25)"; g.fill();
   }
-  const barPx = bpb() * S.zoom, every = Math.max(1, Math.round(44 / barPx));
-  g.font = `10px ${MONO}`; g.textBaseline = "alphabetic";
-  for (let bar = 0; bar * barPx < sx + W; bar++) {
-    const x = Math.round(bar * barPx - sx); if (x < -60) continue;
-    if (barPx >= 48) for (let k = 1; k < bpb(); k++) { g.fillStyle = CV.tickMinor; g.fillRect(x + Math.round(k * S.zoom), H - 4, 1, 4); }
-    const major = bar % every === 0;
-    g.fillStyle = major ? CV.tick : CV.tickMinor; g.fillRect(x, major ? H - 11 : H - 6, 1, major ? 11 : 6);
-    if (major) { g.fillStyle = bar % 4 ? CV.dim : CV.rulerTxt; g.fillText(bar + 1, x + 4, H - 3); }
-  }
-  // section markers: a flag with the name, in the display font
-  const legend = getComputedStyle(document.documentElement).getPropertyValue("--legend");
-  g.font = `600 9.5px ${legend}`; g.textBaseline = "middle";
-  for (const m of S.doc.markers) {
-    const x = Math.round(m.at * S.zoom - sx), label = String(m.name).toUpperCase(), tw = g.measureText(label).width;
-    if (x + tw + 16 < 0 || x > W) continue;
-    rrect(g, x, 5, tw + 12, 12, [0, 3, 3, 0]); g.fillStyle = "rgba(255,178,36,.17)"; g.fill();
-    g.fillStyle = CV.marker; g.fillRect(x, 5, 1.5, H - 5); g.fillText(label, x + 6, 11.5);
-  }
-  g.textBaseline = "alphabetic";
+  drawBarScale(g, W, H, S.zoom, sx);
   // tempo changes (a fit to picture hits makes many): a cyan tick at each, its bpm along the bottom where it fits
   const tempos = tempoChanges();
   if (tempos.length > 1) {
@@ -789,7 +857,8 @@ function setPlayhead(b) {
 }
 
 // ---------------------------------------------------------------- piano roll
-const roll = $("#roll"), rollWrap = $("#rollWrap"), velCv = $("#vel"), KEYW = 44;
+const roll = $("#roll"), rollWrap = $("#rollWrap"), rollRuler = $("#rollRuler"), velCv = $("#vel");
+const KEYW = 64, KEY_LABEL_W = 26, VEL_H = 54, VEL_RANGE = VEL_H - 8;
 function selClip() { return S.sel.clip ? findClip(S.sel.clip) : [null, null]; }
 function focusRoll() {
   if (S.tab !== "roll") document.querySelector('#tabs button[data-tab="roll"]').click();
@@ -805,36 +874,44 @@ function drawRoll() {
   if (S.tab !== "roll") return;
   const [t, c] = selClip();
   const info = $("#rollInfo");
+  const midi = c?.kind === "midi";
+  rollRuler.classList.toggle("hidden", !midi);
   const g = fitCanvas(roll, Math.max(rollWrap.clientWidth, c ? KEYW + (c.length + bpb()) * S.rollZoom : 0), 128 * S.rowH);
   const W = roll.clientWidth, sx = rollWrap.scrollLeft;
   g.fillStyle = CV.bg; g.fillRect(0, 0, W, 128 * S.rowH);
-  if (!c || c.kind !== "midi") {
-    info.textContent = "Select a MIDI clip (double-click empty lane space to create one)";
+  if (!midi) {
+    info.textContent = "";
     const cx = sx + rollWrap.clientWidth / 2, cy = rollWrap.scrollTop + rollWrap.clientHeight / 2;
     g.textAlign = "center";
-    g.fillStyle = "#c8c5bd"; g.font = `600 13px ${UI_FONT}`; g.fillText("No clip selected", cx, cy - 6);
-    g.fillStyle = "#64625c"; g.font = `12px ${UI_FONT}`; g.fillText("Click a clip in the arrangement to edit its notes here, or double-click empty lane space to make one.", cx, cy + 14);
+    if (rollWrap.clientWidth > 24) {
+      g.fillStyle = "#c1c8d0"; g.font = `600 13px ${UI_FONT}`; g.fillText("Select a MIDI clip", cx, cy - 6);
+      g.fillStyle = "#9da8b3"; g.font = `12px ${UI_FONT}`;
+      g.fillText("Double-click an empty lane to create one.", cx, cy + 14, rollWrap.clientWidth - 24);
+    }
     g.textAlign = "left";
     drawVel(null); return;
   }
-  info.textContent = `${t.name} · ${c.name || c.id} · starts ${fmtPos(c.start)} · ${c.notes.length} notes · click: add  drag: move  edge: resize  dbl-click: delete  ctrl+wheel: zoom`;
+  info.textContent = `${t.name} · ${c.name || c.id} · ${fmtPos(c.start)} · ${c.notes.length} notes`;
   for (let p = 0; p < 128; p++) {
     const y = (127 - p) * S.rowH, black = [1, 3, 6, 8, 10].includes(p % 12);
-    g.fillStyle = black ? "#0f1114" : "#15181c"; g.fillRect(KEYW, y, W, S.rowH);
-    g.fillStyle = p % 12 === 0 ? "#262b32" : "#0b0d0f"; g.fillRect(KEYW, y + S.rowH - 1, W, 1);
+    g.fillStyle = black ? "#11191f" : "#172129"; g.fillRect(KEYW, y, W, S.rowH);
+    g.fillStyle = p % 12 === 0 ? CV.phrase : "#0d1419"; g.fillRect(KEYW, y + S.rowH - 1, W, 1);
   }
   const len = c.length, X = (b) => KEYW + b * S.rollZoom;
   const step = S.snap > 0 && S.snap * S.rollZoom >= 6 ? S.snap : 0.25;
   for (let b = 0; b <= len + bpb(); b += step) {
-    const isBar = Math.abs(b / bpb() - Math.round(b / bpb())) < 1e-6, isBeat = Math.abs(b - Math.round(b)) < 1e-6;
-    g.fillStyle = isBar ? "#333941" : isBeat ? "#20252b" : "#191c21"; g.fillRect(Math.round(X(b)), 0, 1, 128 * S.rowH);
+    const isBeat = Math.abs(b - Math.round(b)) < 1e-6;
+    g.fillStyle = isBeat ? CV.bar : CV.beat; g.fillRect(Math.round(X(b)), 0, 1, 128 * S.rowH);
+  }
+  for (let beat = Math.ceil(c.start / bpb()) * bpb(); beat <= c.start + len + bpb(); beat += bpb()) {
+    g.fillStyle = CV.phrase; g.fillRect(Math.round(X(beat - c.start)), 0, 1, 128 * S.rowH);
   }
   g.fillStyle = "rgba(0,0,0,.4)"; g.fillRect(X(len), 0, W, 128 * S.rowH);
   const col = trackColor(t, S.doc.tracks.indexOf(t));
   c.notes.forEach((n, i) => {
     const y = (127 - n[0]) * S.rowH, sel = S.sel.notes.has(i), nw = Math.max(3, n[2] * S.rollZoom - 1);
     rrect(g, X(n[1]) + 0.5, y + 1, nw, S.rowH - 2, Math.min(2.5, (S.rowH - 2) / 2));
-    g.fillStyle = sel ? "#ffffff" : col; g.globalAlpha = 0.5 + 0.5 * n[3] / 127; g.fill(); g.globalAlpha = 1;
+    g.fillStyle = sel ? "#ffffff" : col; g.globalAlpha = sel ? 1 : 0.72 + 0.28 * n[3] / 127; g.fill(); g.globalAlpha = 1;
     g.strokeStyle = sel ? CV.marker : "rgba(0,0,0,.55)"; g.lineWidth = sel ? 1.5 : 1; g.stroke(); g.lineWidth = 1;
     if (!sel && S.rowH >= 9) { g.fillStyle = "rgba(255,255,255,.22)"; g.fillRect(X(n[1]) + 2, y + 2, Math.max(0, nw - 3), 1); }
   });
@@ -844,28 +921,43 @@ function drawRoll() {
     g.strokeRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0)); g.setLineDash([]);
   }
   const ph = S.playhead - c.start; if (ph >= 0 && ph <= len) { g.fillStyle = CV.play; g.fillRect(Math.round(X(ph)), 0, 1.25, 128 * S.rowH); }
-  // sticky keyboard: white keys with a shade line, black keys raised, C named
-  g.fillStyle = "#0a0b0d"; g.fillRect(sx, 0, KEYW, 128 * S.rowH);
+  // Keep the keyboard and octave labels visible when the clip scrolls horizontally.
+  g.fillStyle = "#101820"; g.fillRect(sx, 0, KEYW, 128 * S.rowH);
   for (let p = 0; p < 128; p++) {
     const y = (127 - p) * S.rowH, black = [1, 3, 6, 8, 10].includes(p % 12);
-    g.fillStyle = black ? "#1d2025" : "#d8d4cb"; g.fillRect(sx, y, black ? KEYW - 12 : KEYW - 1, S.rowH - 0.5);
-    if (black) { g.fillStyle = "#30353c"; g.fillRect(sx, y, KEYW - 12, 1); }
-    if (p % 12 === 0) { g.fillStyle = "#3a3934"; g.font = `600 8.5px ${UI_FONT}`; g.fillText(noteName(p), sx + KEYW - 22, y + S.rowH - 2.5); }
+    const keyX = sx + KEY_LABEL_W, keyWidth = KEYW - KEY_LABEL_W - 1;
+    g.fillStyle = "#d4d9dd"; g.fillRect(keyX, y, keyWidth, S.rowH - (black ? 0 : 0.5));
+    if (black) {
+      g.fillStyle = "#20262c"; g.fillRect(keyX, y, keyWidth - 11, S.rowH - 0.5);
+      g.fillStyle = "#3b454e"; g.fillRect(keyX, y, keyWidth - 11, 1);
+    }
+    if (p % 12 === 0) { g.fillStyle = CV.rulerTxt; g.font = `9px ${MONO}`; g.fillText(noteName(p), sx + 6, y + S.rowH - 2.5); }
   }
-  g.fillStyle = "#000"; g.fillRect(sx + KEYW - 1, 0, 1, 128 * S.rowH);
+  g.fillStyle = CV.phrase; g.fillRect(sx + KEYW - 1, 0, 1, 128 * S.rowH);
+  drawRollRuler(c);
   drawVel(c, col);
 }
+function drawRollRuler(c) {
+  const W = rollWrap.clientWidth, H = 29, g = fitCanvas(rollRuler, W, H);
+  g.fillStyle = CV.ruler; g.fillRect(0, 0, W, H);
+  g.fillStyle = CV.phrase; g.fillRect(0, H - 1, W, 1);
+  if (W <= KEYW) return;
+  g.save(); g.beginPath(); g.rect(KEYW, 0, W - KEYW, H); g.clip(); g.translate(KEYW, 0);
+  drawBarScale(g, W - KEYW, H, S.rollZoom, c.start * S.rollZoom + rollWrap.scrollLeft);
+  g.restore();
+}
 function drawVel(c, col) {
-  const W = rollWrap.clientWidth, H = 64, g = fitCanvas(velCv, W, H), sx = rollWrap.scrollLeft;
-  g.fillStyle = "#0e1013"; g.fillRect(0, 0, W, H);
-  g.fillStyle = "#1a1d22"; g.fillRect(KEYW, Math.round(H / 2), W, 1);
-  g.fillStyle = "#64625c"; g.font = `9px ${getComputedStyle(document.documentElement).getPropertyValue("--legend")}`; g.fillText("VELOCITY", 6, 14);
+  const W = rollWrap.clientWidth, g = fitCanvas(velCv, W, VEL_H), sx = rollWrap.scrollLeft;
+  g.fillStyle = CV.bg; g.fillRect(0, 0, W, VEL_H);
+  g.fillStyle = CV.ruler; g.fillRect(0, 0, KEYW, VEL_H);
+  g.fillStyle = CV.phrase; g.fillRect(0, 0, W, 1); g.fillRect(KEYW - 1, 0, 1, VEL_H);
+  g.fillStyle = CV.bar; g.fillRect(KEYW, Math.round(VEL_H / 2), W, 1);
+  g.fillStyle = CV.rulerTxt; g.font = `9px ${LEGEND}`; g.fillText("VELOCITY", 6, 14);
   if (!c) return;
   c.notes.forEach((n, i) => {
-    const x = Math.round(KEYW + n[1] * S.rollZoom - sx); if (x < KEYW - 2 || x > W) return;
-    const h = (H - 8) * n[3] / 127, sel = S.sel.notes.has(i);
-    g.fillStyle = sel ? "#ffffff" : col; g.globalAlpha = 0.5; g.fillRect(x + 1, H - h, 1.5, h); g.globalAlpha = 1;
-    g.beginPath(); g.arc(x + 1.75, H - h, 2.5, 0, Math.PI * 2); g.fill();
+    const x = Math.round(KEYW + n[1] * S.rollZoom - sx); if (x < KEYW || x >= W) return;
+    const h = Math.max(1, VEL_RANGE * n[3] / 127);
+    g.fillStyle = S.sel.notes.has(i) ? "#ffffff" : col; g.fillRect(x, VEL_H - h, 2, h);
   });
 }
 rollWrap.addEventListener("scroll", () => drawRoll());
@@ -927,7 +1019,7 @@ roll.addEventListener("dblclick", (e) => {
 velCv.addEventListener("mousedown", (e) => { const [, c] = selClip(); if (!c) return; S.drag = { kind: "vel" }; velDrag(e); });
 function velDrag(e) {
   const [, c] = selClip(), r = velCv.getBoundingClientRect(), x = e.clientX - r.left + rollWrap.scrollLeft, y = e.clientY - r.top;
-  const v = Math.max(1, Math.min(127, Math.round((64 - y) / 58 * 127))), beat = (x - KEYW) / S.rollZoom;
+  const v = Math.max(1, Math.min(127, Math.round((VEL_H - y) / VEL_RANGE * 127))), beat = (x - KEYW) / S.rollZoom;
   const targets = S.sel.notes.size ? [...S.sel.notes] : c.notes.map((n, i) => i).filter((i) => Math.abs(c.notes[i][1] - beat) * S.rollZoom < 5);
   for (const i of targets) c.notes[i][3] = v;
   drawRoll();
@@ -1255,7 +1347,7 @@ function renderBrief() {
     <span>Loop region</span><span>${S.doc.loop ? `${fmtPos(S.doc.loop.start)} → ${fmtPos(S.doc.loop.end)}` : "none (shift-drag on the ruler to set)"}</span>
     <span>Target loudness</span><input id="lufsIn" type="number" step="0.5" value="${S.doc.master.target_lufs}">
     <span>Peak ceiling dB</span><input id="ceilIn" type="number" step="0.1" value="${S.doc.master.ceiling_db}">
-    <span>Tail seconds</span><input id="tailIn" type="number" step="0.5" value="${S.doc.tail}">
+    <span title="The longest a one-shot may ring past the end. The render stops 1 s after the reverb and releases have died away.">Max tail seconds</span><input id="tailIn" type="number" step="0.5" value="${S.doc.tail}">
   </div></div>`;
   box.querySelectorAll("[data-b]").forEach((el) => el.onchange = () => act("project_set", { brief: { [el.dataset.b]: el.value } }));
   box.querySelectorAll("[data-still-rm]").forEach((el) => el.onclick = () => act("picture", { remove_still: el.dataset.stillRm }).catch(() => {}));
@@ -1283,6 +1375,13 @@ document.addEventListener("mousedown", (e) => { if (!e.target.closest("#menu")) 
 
 // The Projects screen (a sheet over the whole room): every project as a row you can search and sort, its details
 // beside the list, and a new one on the right.
+// brief.form, chosen on a new project and in the Producer's brief box (studio.js): the Producer plans to it
+// (crew/briefs.py). The one-shot wording avoids the word loop on purpose (api._delivery_check reads "loop" in the
+// brief as a request for a looped export).
+const FORMS = [["", "CREW DECIDES", "The Producer picks the form from the rest of the brief"],
+               ["loop", "LOOP", "Seamless loop: the last bar leads back into the first (game music, beats)"],
+               ["full track: one-shot with an intro and a real ending", "FULL TRACK", "Plays once, start to finish: a song, theme or concert piece with an ending"]];
+const formSeg = (id, cur = "") => `<div class="seg" id="${id}">${FORMS.map(([v, label, tip]) => `<button type="button" class="${v === cur ? "on" : ""}" data-v="${esc(v)}" title="${esc(tip)}">${label}</button>`).join("")}</div>`;
 async function openProjectModal() {
   let d = { details: [], current: null };
   try { d = await api("project_list"); } catch (e) { toast(e.message); }
@@ -1291,9 +1390,9 @@ async function openProjectModal() {
   const MODES = ["major", "minor", "dorian", "phrygian", "lydian", "mixolydian", "harmonic minor"];
   const METERS = ["4/4", "3/4", "6/8", "2/4", "5/4", "7/8", "12/8"];
   const IDEAS = {
-    genre: ["orchestral fantasy", "synthwave", "chiptune", "lo-fi", "ambient", "rock", "jazz", "folk"],
+    genre: ["orchestral", "film score", "rock", "pop", "hip-hop", "jazz", "metal", "synthwave", "lo-fi", "chiptune", "ambient", "folk"],
     mood: ["hopeful", "tense", "playful", "melancholy", "heroic", "mysterious", "calm", "driving"],
-    use: ["main menu loop", "exploration", "battle", "boss", "town / shop", "stinger", "ambience", "credits"],
+    use: ["main menu", "theme tune", "song", "concert piece", "trailer", "exploration", "battle", "boss", "town / shop", "stinger", "ambience", "credits"],
   };
   const el = Sheet.open({ title: "Projects", sub: `${cards.length} on this computer`, size: "full", body: `<div class="ph">
     <div class="phLib"></div>
@@ -1308,6 +1407,8 @@ async function openProjectModal() {
       </div>
       <div class="fld"><span>Meter</span><div class="seg" id="npSig">${METERS.map((m, i) => `<button type="button" class="${i ? "" : "on"}" data-v="${m}">${m}</button>`).join("")}</div></div>
       <div class="phH sub">Brief <i>what the crew writes toward · optional</i></div>
+      <div class="fld"><span>Form</span>${formSeg("npForm")}</div>
+      <div class="fld"><span>Length</span><input id="npLength" placeholder="e.g. 90 s, 2:30, about 4 minutes · blank: the crew decides"></div>
       ${Object.entries(IDEAS).map(([k, list]) => `<div class="fld"><span>${k}</span><input id="np_${k}" placeholder="type, or pick below">
         <div class="ideas" data-for="np_${k}">${list.map((x) => `<button type="button" class="mini">${esc(x)}</button>`).join("")}</div></div>`).join("")}
       <div class="phGo"><button type="submit" class="key go" id="npCreate">CREATE PROJECT</button></div>
@@ -1354,7 +1455,8 @@ async function openProjectModal() {
   });
   // a new project
   const form = el.querySelector(".phNew");
-  let sig = "4/4";
+  let sig = "4/4", formV = "";
+  form.querySelectorAll("#npForm button").forEach((b) => b.onclick = () => { formV = b.dataset.v; form.querySelectorAll("#npForm button").forEach((x) => x.classList.toggle("on", x === b)); });
   form.querySelectorAll("#npSig button").forEach((b) => b.onclick = () => { sig = b.dataset.v; form.querySelectorAll("#npSig button").forEach((x) => x.classList.toggle("on", x === b)); });
   form.querySelectorAll(".ideas").forEach((g) => g.querySelectorAll("button").forEach((b) => b.onclick = () => {
     const inp = $("#" + g.dataset.for), have = inp.value.split(",").map((s) => s.trim()).filter(Boolean);
@@ -1370,6 +1472,8 @@ async function openProjectModal() {
     e.preventDefault();
     const name = $("#npName").value.trim(); if (!name) { toast("Give the project a name"); $("#npName").focus(); return; }
     const brief = {}; Object.keys(IDEAS).forEach((k) => { const v = $("#np_" + k).value.trim(); if (v) brief[k] = v; });
+    if (formV) brief.form = formV;
+    const len = $("#npLength").value.trim(); if (len) brief.length = len;
     // read every field before the sheet closes: closing removes the form from the page
     const args = { name, tempo: +$("#npTempo").value, key: `${$("#npRoot").value} ${$("#npMode").value}`, time_sig: sig, brief };
     Sheet.close(true); leaveTake();

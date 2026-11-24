@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 FORM, BRIEF, NOTES, SOUND, MIX, MASTER, TRACKS = "form", "brief", "notes", "sound", "mix", "master", "tracks"
 
 # MCP tool groups (names as registered in mcp_server.py).
-READ = {"status", "project_info", "project_list", "notes_read", "score", "analyze", "theory", "knowledge", "plugins_list",
+# project_list is left out: a seat works on its own project (unseated clients get every tool).
+READ = {"status", "project_info", "notes_read", "score", "analyze", "theory", "knowledge", "plugins_list",
         "patches_list", "synths_list", "sfz_list", "sfz_info", "plugin_params"}
 HEAR = {"render", "listen", "audition"}
 WRITE = {"write", "add_notes", "chords", "pattern", "drums", "cc", "notes_edit", "clip_edit", "arrange", "midi_import"}

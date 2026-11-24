@@ -470,3 +470,98 @@ def _drop(take: str, session: str | None) -> None:
         takes.take_discard(take, session=session)
     except ValueError:
         pass
+
+
+# ---- your own hands on the work -------------------------------------------------------------------------------------
+# From a stop on Needs You you can change the seat's take itself on the Desk (then PASS or ACCEPT as usual), or start
+# your own version from the song as it is, without their work. Any take of yours is handed over with hand_over: to
+# the Producer's agent (who may get other seats to check it) or straight into the song.
+
+def _open_stop(st: dict, take: str) -> dict | None:
+    return next((a for a in st["attention"] if a["state"] == "open" and a.get("stage") and a.get("take") == take), None)
+
+
+def take_yours(take: str, session: str | None = None) -> dict:
+    """What you changed in a take since it was handed in (empty for a take that was never handed in)."""
+    return {"take": take, "changes": your_changes(takes._take_dir(take, session))}
+
+
+def your_version(item: str, session: str | None = None) -> dict:
+    """Start your own version of the take waiting on you at a stop, from the song as it is now (without that seat's
+    work). Their take stays on Needs You until you hand yours over, then it is put away. A version you already
+    started is picked up again."""
+    if studio.me() != roles.YOU:
+        raise PermissionError("Only the user makes their own version")
+    path = studio.session_path(session)
+    st = studio.read(str(path))
+    a = next((x for x in st["attention"] if x["id"].lower() == str(item).strip().lower()), None)
+    if not a or a["state"] != "open" or not a.get("take"):
+        raise ValueError(f"{item} is not a take waiting on you")
+    theirs = takes._meta(takes._take_dir(a["take"], str(path)))
+    have = next((k for k in studio.take_index(path) if k.get("replaces") == theirs["id"] and k.get("state") == "open"), None)
+    if have:
+        return {"take": have["id"], "replaces": theirs["id"], "continued": True}
+    t = next((x for x in st["tasks"] if x["id"] == theirs.get("task")), None)
+    tid = takes.take_new(f"Your version: {t['title'] if t else theirs.get('name') or theirs['id']}", use=False,
+                         session=str(path))["take"]
+    takes._meta(takes._take_dir(tid, str(path)), replaces=theirs["id"], for_task=t["id"] if t else None, item=a["id"])
+    return {"take": tid, "replaces": theirs["id"], "continued": False}
+
+
+def hand_over(take: str, summary: str = "", to: str = "producer", check: list | None = None,
+              session: str | None = None) -> dict:
+    """Hand over a take you worked in on the Desk. to: "producer" (its agent hears it against the brief and decides;
+    check: seats you would like it to have look at it once accepted) or "song" (merge it now, nobody reviews it).
+    A version of yours made instead of a seat's take puts that take away once yours is handed over."""
+    if studio.me() != roles.YOU:
+        raise PermissionError("hand_over is the user's")
+    if to not in ("producer", "song"):
+        raise ValueError('to must be "producer" or "song"')
+    path = studio.session_path(session)
+    d = takes._take_dir(take, str(path))
+    meta = takes._meta(d)
+    st = studio.read(str(path))
+    if meta["state"] not in ("open", "submitted"):
+        raise ValueError(f"{meta['id']} is already {meta['state']}")
+    stop = _open_stop(st, meta["id"])
+    if stop:
+        raise ValueError(f"{meta['id']} waits on you at {stop['id']}: answer it there (pass, accept, send back)")
+    if to == "producer" and not _agent_producer(st):
+        raise ValueError("No agent sits in the Producer seat: merge it into the song yourself, or seat one first")
+    seats = [s for s in (check or []) if s in roles.ROLES and s != "producer"]
+    task = meta.get("for_task")
+    if task:  # your version takes over the seat's task: its take is yours now
+        with studio._Board(str(path)) as b:
+            t = next((x for x in b.st["tasks"] if x["id"] == task), None)
+            if t and t["state"] in studio.OPEN:
+                t["take"] = meta["id"]
+                meta = takes._meta(d, task=task)
+    theirs = meta.get("replaces")
+    their_seat = _seat_of(takes._meta(takes._take_dir(theirs, str(path)))) if theirs else None
+    summary = str(summary).strip() or (f"The user's own version, instead of {theirs}" if theirs else "The user's own changes")
+    rep = takes.take_submit(summary, take=meta["id"], session=str(path))
+    meta = takes._meta(d)
+    if theirs:
+        try:
+            takes.take_discard(theirs, session=str(path))
+        except ValueError:
+            pass  # already decided
+    out = {"handed_over": meta["id"], "to": to, "changes": len(rep["changes"])}
+    if theirs:
+        out["put_away"] = theirs
+    if to == "song":
+        _accept(meta["id"], "fail", str(path))
+        out["accepted"] = True
+        return out
+    # yours needs no Co-Producer stop to be accepted: you made it (hold() lets a signed hand-in through)
+    takes._meta(d, signed={"by": roles.YOU, "at": _now(), "hand_in": meta.get("submitted"), "note": summary,
+                           "changed": []})
+    who = f" instead of the {roles.get(their_seat).title}'s take {theirs}" if their_seat else ""
+    note = f"The user made this themself{who}."
+    if seats:
+        note += (" They ask that " + ", ".join(roles.get(s).title for s in seats) + " check it: once you accept it, "
+                 "task_add each of them a short check of what it changed.")
+    with studio._Board(str(path)) as b:
+        b.st["routed"][meta["id"]] = meta.get("submitted")  # the floor does not route it again
+        out["task"] = audition_task(b, meta, note)["id"]
+    return out

@@ -20,6 +20,11 @@ Runners (flags checked against each CLI's ``--help`` on Windows, 2026-11):
   tool permissions go in through the ``KILO_CONFIG_CONTENT`` env var, which Kilo merges over the user's config
   without touching it. Servers in the user's own kilo.jsonc still load (there is no strict flag). ``--auto`` is
   not used: only the allowed tools are pre-approved.
+* ``agy`` - Antigravity CLI 1.5: ``agy --output-format stream-json --input-format stream-json --settings
+  <tmp.json> (--agent tunetrack-crew | --conversation ID) [--model M] [--effort E] -p=``, the prompt on stdin as
+  ``{"event":"user","message":{"role":"user","content":...}}``. MCP servers and the role text go in as a plugin
+  and a custom agent under ``<cwd>/.agents/``; ``--settings`` carries allow rules for the MCP tools and denies the
+  shell, file writes and URLs (headless agy auto-denies anything not allowed, but ran shell commands unasked).
 * ``script`` - ``python -u <script>`` with the prompt on stdin; the script prints normalised event JSON lines.
   Used to test the studio without spending tokens.
 """
@@ -38,7 +43,7 @@ from typing import Iterator
 from . import detect
 
 IS_WINDOWS = sys.platform == "win32"
-RUNNERS = ("claude", "codex", "kilo", "script")
+RUNNERS = ("claude", "codex", "kilo", "agy", "script")
 MAX_ARG_SYSTEM = 16000  # longer role text is prefixed to the prompt (Windows command lines cap at 32k chars)
 
 
@@ -284,6 +289,71 @@ def _build_kilo(launch: Launch) -> Command:
     return Command(argv, env, _with_system(launch), cleanup, launch.cwd)
 
 
+AGY_PLUGIN = "tunetrack"     # agy names a plugin's MCP server "<plugin>_<server>"
+AGY_AGENT = "tunetrack-crew"
+# agy's own tools a crew seat never needs. The custom agent already lists only read_file (agy saves big MCP
+# results to a file the model must read); these rules hold even if the agent file is not picked up.
+AGY_DENY = ["command(*)", "write_file(*)", "read_url(*)", "execute_url(*)"]
+
+
+def agy_permission(tool: str) -> str:
+    """Claude-style tool names -> agy rules: mcp__tunetrack -> mcp(tunetrack_tunetrack/*)."""
+    m = re.fullmatch(r"mcp__([^_].*?)(?:__(.+))?", tool)
+    if m:
+        return f"mcp({AGY_PLUGIN}_{m.group(1)}/{m.group(2) or '*'})"
+    return tool
+
+
+def _write(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def _build_agy(launch: Launch) -> Command:
+    """agy reads MCP servers only from config files, so the run's own workspace carries them: a plugin in
+    ``<cwd>/.agents/plugins/tunetrack/`` and a custom agent in ``<cwd>/.agents/agents/tunetrack-crew/`` (the
+    role text, and read_file as its only built-in tool). Permissions go in with ``--settings``; the user's
+    ~/.gemini config is never touched."""
+    exe = _require("agy")
+    cleanup: list[str] = []
+    ws = launch.cwd
+    if not ws:
+        ws = tempfile.mkdtemp(prefix="tunetrack-crew-agy-")
+        cleanup.append(ws)
+    root = os.path.join(ws, ".agents")
+    servers = {}
+    for name, spec in launch.mcp.items():
+        cmd, args, env = _server(spec)
+        servers[name] = {"command": cmd, "args": args, **({"env": env} if env else {})}
+    plug = os.path.join(root, "plugins", AGY_PLUGIN)
+    _write(os.path.join(plug, "plugin.json"),
+           json.dumps({"name": AGY_PLUGIN, "description": "TuneTrack studio tools for a crew seat"}))
+    _write(os.path.join(plug, "mcp_config.json"), json.dumps({"mcpServers": servers}, indent=2))
+    system = (launch.system or "").strip() or "You are a crew member in the TuneTrack music studio."
+    _write(os.path.join(root, "agents", AGY_AGENT, "agent.md"),
+           f"---\nname: {AGY_AGENT}\ndescription: A TuneTrack studio crew seat that works through the TuneTrack "
+           f"MCP tools.\nmainAgent: true\ninheritMcp: true\ntools:\n  - read_file\n---\n\n# System Prompt\n\n"
+           f"{system}\n\nWork only through the TuneTrack MCP tools. When a tool's result is saved to a file, "
+           f"read that file with read_file.\n")
+    settings = {"permissions": {"allow": [agy_permission(t) for t in launch.allow_tools], "deny": list(AGY_DENY)}}
+    path = _tmp(".json", json.dumps(settings))
+    cleanup.append(path)
+    argv = _exe_argv(exe) + ["--output-format", "stream-json", "--input-format", "stream-json",
+                             "--settings", path]
+    if launch.resume:
+        argv += ["--conversation", launch.resume]  # a resumed conversation keeps its agent; --agent is ignored
+    else:
+        argv += ["--agent", AGY_AGENT]
+    if launch.model:
+        argv += ["--model", launch.model]
+    if launch.effort:
+        argv += ["--effort", launch.effort]
+    argv.append("-p=")  # the prompt comes on stdin as one stream-json message
+    stdin = json.dumps({"event": "user", "message": {"role": "user", "content": launch.prompt}}) + "\n"
+    return Command(argv, _base_env(launch), stdin, cleanup, ws)
+
+
 def _build_script(launch: Launch) -> Command:
     if not launch.script:
         raise ValueError("runner 'script' needs Launch.script")
@@ -303,7 +373,8 @@ def _build_script(launch: Launch) -> Command:
     return Command([sys.executable, "-u", script], env, launch.prompt, [], launch.cwd)
 
 
-_BUILDERS = {"claude": _build_claude, "codex": _build_codex, "kilo": _build_kilo, "script": _build_script}
+_BUILDERS = {"claude": _build_claude, "codex": _build_codex, "kilo": _build_kilo, "agy": _build_agy,
+             "script": _build_script}
 
 
 def build(launch: Launch) -> Command:
@@ -497,6 +568,66 @@ class KiloNormaliser(_Normaliser):
         return [{"type": "usage", **self.usage}] if self.steps else []
 
 
+class AgyNormaliser(_Normaliser):
+    """agy 1.5 stream-json: ``init`` (conversation id), ``step_update`` per step (tools ACTIVE then DONE/ERROR,
+    agent_response text as ``text_delta`` chunks) and a final ``result`` with status, response and usage."""
+
+    def __init__(self, mcp_names=()):
+        super().__init__(mcp_names)
+        self.seen: set = set()
+        self.texts: dict = {}
+
+    def tool(self, s: dict) -> tuple[str, dict]:
+        info = s.get("tool_info") if isinstance(s.get("tool_info"), dict) else {}
+        params = info.get("parameters") if isinstance(info.get("parameters"), dict) else {}
+        name = str(s.get("tool_name") or info.get("name") or s.get("step_type") or "")
+        if name == "call_mcp_tool":
+            server = str(params.get("ServerName") or "")
+            for n in self.mcp_names:
+                if server == f"{AGY_PLUGIN}_{n}":
+                    server = n
+                    break
+            args = params.get("Arguments")
+            return _mcp_name(server, str(params.get("ToolName") or "")), args if isinstance(args, dict) else {}
+        return name, params
+
+    def feed(self, o: dict) -> list[dict]:
+        e = o.get("event")
+        if e == "init":
+            return self._session(o.get("conversation_id"))
+        if e == "result":
+            r = o.get("result") if isinstance(o.get("result"), dict) else {}
+            ev = self._session(r.get("conversation_id"))
+            self.result = r.get("response").strip() if isinstance(r.get("response"), str) else ""
+            self.ok = r.get("status") == "SUCCESS"
+            u = r.get("usage") if isinstance(r.get("usage"), dict) else {}
+            cached = _int(u.get("cache_read_tokens"))
+            ev.append({"type": "usage", "input_tokens": _int(u.get("input_tokens")) + cached,
+                       "output_tokens": _int(u.get("output_tokens")) + _int(u.get("thinking_tokens")),
+                       "cached_tokens": cached, "cost_usd": None})
+            if not self.ok:
+                ev.append({"type": "error", "message": str(r.get("error") or r.get("status") or "error")})
+            return ev
+        s = o.get("step_update") if isinstance(o.get("step_update"), dict) else None
+        if e != "step_update" or not s:
+            return []
+        ev = self._session(s.get("conversation_id"))
+        key, kind, state = s.get("step_index"), s.get("step_type"), s.get("state")
+        if kind == "agent_response":
+            if isinstance(s.get("text_delta"), str):
+                self.texts[key] = self.texts.get(key, "") + s["text_delta"]
+            if state == "DONE" and self.texts.get(key, "").strip():
+                ev.append({"type": "text", "text": self.texts.pop(key).strip()})
+        elif kind in ("tool", "subagent"):
+            name, inp = self.tool(s)
+            if key not in self.seen:
+                self.seen.add(key)
+                ev.append({"type": "tool", "name": name, "input": inp, "id": key})
+            if state in ("DONE", "ERROR"):
+                ev.append({"type": "tool_result", "name": name, "ok": state == "DONE", "id": key})
+        return ev
+
+
 class ScriptNormaliser(_Normaliser):
     """Pass-through: the script already prints normalised events. Its ``done`` is held for the final event."""
 
@@ -519,7 +650,7 @@ class ScriptNormaliser(_Normaliser):
 
 
 _NORMALISERS = {"claude": ClaudeNormaliser, "codex": CodexNormaliser, "kilo": KiloNormaliser,
-                "script": ScriptNormaliser}
+                "agy": AgyNormaliser, "script": ScriptNormaliser}
 
 
 def normaliser(runner: str, mcp_names=()) -> _Normaliser:
@@ -634,7 +765,11 @@ class Run:
         self._cleaned = True
         for p in self.command.cleanup:
             try:
-                os.remove(p)
+                if os.path.isdir(p):
+                    import shutil
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    os.remove(p)
             except OSError:
                 pass
 

@@ -1,4 +1,4 @@
-"""Studio crew: launch AI agent CLIs (Claude Code, Codex, Kilo) headless as TuneTrack roles.
+"""Studio crew: launch AI agent CLIs (Claude Code, Codex, Kilo, Antigravity) headless as TuneTrack roles.
 
 ``crew.detect`` stays the submodule (``crew.detect.detect()`` scans); ``crew.scan`` is the same function.
 """

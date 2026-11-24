@@ -102,11 +102,26 @@ const TTNeeds = (() => {
     const k = kindOf(a), opts = a.options.filter((o) => k !== "choose" || o.do !== "choose");
     const tk = a.take && takeOf(a.take), canAsk = (k === "sign" || k === "decide") && tk && tk.task;
     foot.innerHTML = `<textarea class="nyNote" rows="2" placeholder="${esc(PLACE[k] || "A note to go with your answer (optional)")}"></textarea>
-      <div class="nyKeys">${opts.map((o, i) => `<button class="key ${i === 0 && o.do !== "return" ? "go" : ""} ${o.do === "discard" ? "warn" : ""}" data-opt="${esc(o.id)}"
-          title="${esc(TIP[o.do] || "")}">${esc(o.label.toUpperCase())}</button>`).join("")}
-        ${canAsk ? `<label class="nyAsk2" title="The seat makes two versions next time, and you choose"><input type="checkbox" class="nyTwo"> two versions next time</label>` : ""}
+      <div class="nyKeys">${opts.map((o, i) => `<div class="nyA"><button class="key ${i === 0 && o.do !== "return" ? "go" : ""} ${o.do === "discard" ? "warn" : ""}" data-opt="${esc(o.id)}">${esc(o.label.toUpperCase())}</button>
+          <span>${esc(explain(a, o))}</span></div>`).join("")}</div>
+      <div class="nyKeys2">${canAsk ? `<label class="nyAsk2" title="The seat makes two versions next time, and you choose"><input type="checkbox" class="nyTwo"> if you send it back: two versions next time, and you pick one</label>` : ""}
         <span class="nyErr hidden"></span></div>`;
     foot.querySelectorAll("[data-opt]").forEach((b) => b.onclick = () => answer(a, a.options.find((o) => o.id === b.dataset.opt), foot));
+  }
+  // what each answer does, in a line under its key (these used to be tooltips only)
+  function explain(a, o) {
+    const tk = (a.take && takeOf(a.take)) || {}, seat = tk.seat && seatOf(tk.seat) ? title(tk.seat) : "the seat";
+    const prod = ST.board.seats.some((s) => s.seat === "producer" && s.occupant && s.occupant.kind === "agent");
+    switch (o.do) {
+      case "pass": return "The Producer's agent hears it, with your note and anything you changed, and decides.";
+      case "accept": return kindOf(a) === "sign" && prod ? "Merge it into the song now. The Producer does not hear it first." : "Merge it into the song now (one undo step).";
+      case "return": return o.confirm ? `Back to ${seat} with the Producer's reason and your note.` : `Back to ${seat} with your note. It carries on in the same take and hands in again.`;
+      case "discard": return "Throw this take away. The song stays as it is; its task stays open.";
+      case "ask": return "The Producer listens again, with your note, before deciding.";
+      case "plan_ok": return "The tasks go to their seats and start.";
+      case "plan_back": return "The Producer revises the plan with your note. Nothing starts yet.";
+      default: return TIP[o.do] || "";
+    }
   }
   const TIP = { pass: "Send it on to the Producer's agent, with your note", accept: "Merge it into the song now (one undo step)",
     return: "Back to the seat that made it, with your note; it carries on in the same take", discard: "Close it without merging (it stays on disk)",
@@ -140,19 +155,40 @@ const TTNeeds = (() => {
 
   // ---- a take: its work as its seat sees it, A/B, and room to change it ------------------------------------------
   function takeWork(body, a) {
-    const tk = takeOf(a.take) || {}, p = a.proposal;
+    const tk = takeOf(a.take) || {}, p = a.proposal, TK = a.take.toUpperCase();
+    const who = tk.seat && seatOf(tk.seat) ? title(tk.seat) : "", theirs = who ? `${who}'s` : "their";
+    const mine = ST.board.takes.find((t) => t.replaces === a.take && t.state === "open");
     body.innerHTML = `${p ? `<div class="nyVerdict v-${esc(p.decision)}"><span class="legend">THE PRODUCER SAYS</span>
         <b>${esc({ accept: "ACCEPT", return: "SEND IT BACK", discard: "DISCARD" }[p.decision] || p.decision)}</b>${p.reason ? `<p>${esc(p.reason)}</p>` : ""}</div>` : ""}
-      ${tk.summary ? `<div class="nySum"><span class="legend">${esc(tk.seat ? title(tk.seat) : "Their")} summary</span><p>${esc(tk.summary)}</p></div>` : ""}
-      <div class="nyBar">${abKeys(a.take)}<span class="spacer"></span>
-        <span class="vfd small nySrc">${esc(a.take.toUpperCase())} · ${tk.returns ? `CAME BACK ${tk.returns}× · ` : ""}<span class="amb nyN">…</span></span>
-        <button class="key" data-k="desk" title="Open this take on the Desk: arrangement, piano roll and mixer. Come back here to answer.">OPEN ON DESK</button></div>
+      ${tk.summary ? `<div class="nySum"><span class="legend">${esc(who || "Their")} summary</span><p>${esc(tk.summary)}</p></div>` : ""}
+      <div class="nyBar"><span class="legend">HEAR IT</span>${abKeys(a.take)}<span class="spacer"></span>
+        <span class="vfd small nySrc">${esc(TK)} · ${tk.returns ? `CAME BACK ${tk.returns}× · ` : ""}<span class="amb nyN">…</span></span></div>
+      ${who ? `<div class="nyHands"><span class="legend">OR GO HANDS-ON</span>
+        <button class="nyHand" data-k="desk"><b>EDIT ${esc(theirs.toUpperCase())} TAKE</b><span>Open ${esc(TK)} on the Desk and change what they made: notes, instruments, the mix. Then come back here, or press SIGN OFF on the Desk, to pass it on or accept it.</span></button>
+        <button class="nyHand" data-k="mine"><b>${mine ? `CONTINUE YOUR VERSION (${esc(mine.id.toUpperCase())})` : "START FROM THE ORIGINAL"}</b><span>Your own take of the song as it is, without ${esc(theirs)} work. ${esc(TK)} waits here until you hand yours over, then it is put away.</span></button></div>`
+        : `<div class="nyHands one"><button class="nyHand" data-k="desk"><b>OPEN ON THE DESK</b><span>See and change ${esc(TK)} in the arrangement, piano roll and mixer, then come back here to answer.</span></button></div>`}
+      <div class="nyYours hidden"><span class="legend">WHAT YOU CHANGED IN ${esc(TK)} SINCE IT WAS HANDED IN</span><ul class="changes"></ul></div>
+      <div class="legend nyWorkH">${esc(who ? who.toUpperCase() + "'S" : "THE")} WORK IN ${esc(TK)} · WHAT YOU CHANGE HERE GOES INTO THE TAKE</div>
       <div class="nyWork"><div class="empty">Reading ${esc(a.take)}…</div></div>
-      <details class="nyDiff"><summary>WHAT ${esc(a.take.toUpperCase())} CHANGED</summary><ul class="changes"><li>reading…</li></ul></details>`;
+      <details class="nyDiff"><summary>EVERYTHING ${esc(TK)} CHANGES IN THE SONG</summary><ul class="changes"><li>reading…</li></ul></details>`;
     body.querySelector('[data-k="desk"]').onclick = async () => { hush(); Sheet.close(true); await openTake(a.take); };
+    const mk = body.querySelector('[data-k="mine"]');
+    if (mk) mk.onclick = async () => {
+      mk.disabled = true;
+      try {
+        const r = await api("your_version", { item: a.id }, null);
+        hush(); Sheet.close(true); await openTake(r.take);
+        toast(r.continued ? `Back in ${r.take}, your version.` : `${r.take} is your version, cut from the song without ${a.take}. Hand it over from the Desk when it is ready.`, true);
+      } catch (e) { toast(e.message); mk.disabled = false; }
+    };
     N.B = { data: null, version: null, take: a.take, hidden: new Set(), err: null, busy: false, hold: 0, focus: null, seat: tk.seat };
     loadWork();
-    (N.reDiff = () => api("take_diff", { take: a.take }, null).then((d) => {
+    const yours = () => api("take_yours", { take: a.take }, null).then((y) => {
+      const box = document.contains(body) && body.querySelector(".nyYours"); if (!box) return;
+      box.classList.toggle("hidden", !y.changes.length);
+      box.querySelector("ul").innerHTML = y.changes.map((c) => { const i = c.indexOf(": "); return `<li><b>${esc(i > 0 ? c.slice(0, i) : c)}</b> ${esc(i > 0 ? c.slice(i + 2) : "")}</li>`; }).join("");
+    }).catch(() => {});
+    (N.reDiff = () => yours() && api("take_diff", { take: a.take }, null).then((d) => {
       if (!document.contains(body)) return;
       const ul = body.querySelector(".nyDiff ul"), out = new Set((d.outside_seat || []).map((x) => x.split(":")[0]));
       ul.innerHTML = d.changes.map((c) => `<li class="${out.has(c.where) ? "out" : ""}"><b>${esc(c.where)}</b> ${esc(c.what)}</li>`).join("") || "<li>No changes.</li>";

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import os
 from pathlib import Path
@@ -114,12 +115,46 @@ mcp = MCPServer("tunetrack", instructions=_instructions(), version="0.1.0")
 TOOLS: list[str] = []
 
 
+# "", "none" mean something to these (loop off, a sidechain disconnected, length auto): passed as written
+_EMPTY_MEANS = {"loop", "sidechain", "length", "replace", "result", "detail", "reason", "summary", "note", "text"}
+
+
+def _unquote(v):
+    """'"Pads"' -> 'Pads': agents sometimes quote a string argument twice (75 of 114 tool errors in The Drive)."""
+    if isinstance(v, str) and len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    if isinstance(v, list):
+        return [_unquote(x) for x in v]
+    return v
+
+
+def _tidy_args(fn, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
+    """String arguments as meant: one pair of surrounding quotes stripped, and "none"/"null" (or "" where "" means
+    nothing) passed for an optional argument read as no value."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return args, kwargs
+    names = list(params)
+    bound = {**{names[i]: a for i, a in enumerate(args) if i < len(names)}, **kwargs}
+    out = {}
+    for k, v in bound.items():
+        v = _unquote(v)
+        p = params.get(k)
+        if (isinstance(v, str) and p is not None and p.default is None
+                and k not in _EMPTY_MEANS and v.strip().lower() in ("none", "null", "")):
+            v = None
+        out[k] = v
+    return (), out
+
+
 def tool(fn):
     """Register a tool whose failures reach the model with their real message (the SDK hides other exceptions).
     What is registered answers in compact JSON (_wire); the name in this module still returns the dict."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
+            args, kwargs = _tidy_args(fn, args, kwargs)
             return fn(*args, **kwargs)
         except ToolError:
             raise
@@ -200,9 +235,10 @@ def project_new(name: str, tempo: float = 120, key: str = "C major", time_sig: s
                 brief: dict | None = None, folder: str | None = None, overwrite: bool = False,
                 eq_engine: str | None = None) -> dict:
     """Create a project and make it current. brief: free-form intent, e.g. {"genre": "orchestral fantasy",
-    "mood": "hopeful, nostalgic", "use": "main menu loop", "game": "...", "length": "2:30", "size": "full"}
-    (length: how long the cue runs, seconds or m:ss; size: small, medium or full, how big the cast is - both
-    starting points the form and track list are planned from). folder defaults to TuneTrack/projects.
+    "mood": "hopeful, nostalgic", "use": "main menu", "form": "loop", "game": "...", "length": "2:30",
+    "size": "full"} (form: "loop" or a full track that plays once with an ending; length: seconds, m:ss or
+    "about 4 minutes"; size: small, medium, full or symphonic, how big the cast is - starting points the form and
+    track list are planned from, never caps). Any genre is fine. folder defaults to TuneTrack/projects.
     eq_engine: what builtin:eq inserts run on - "builtin", "ssl" (SSL Native Channel Strip 2) or "nova" (TDR Nova);
     default from the library config (builtin unless set)."""
     return api.project_new(name, folder, tempo, key, time_sig, brief, overwrite, eq_engine)
@@ -234,7 +270,7 @@ def project_set(name: str | None = None, tempo: float | None = None, key: str | 
                 tempo_changes: list | None = None, eq_engine: str | None = None, project: str | None = None) -> dict:
     """Change project settings. loop: "1:1-17:1" (bar:beat range) or "off". length: end position "33:1",
     a length "32 bars", or "auto". tail: the most seconds a one-shot render may run past the end while releases and
-    reverb die away; it stops sooner once they are silent (to hold silence after the end, extend length instead).
+    reverb die away (default 30); it stops 1 s after everything is 80 dB under the peak and fades (to hold silence after the end, extend length instead).
     target_lufs: loudness the render is normalised to (default -16; -14..-18 typical for game music). ceiling_db: true-peak-ish limiter ceiling. tempo_changes: [["17:1", 90], ...].
     eq_engine: what every builtin:eq insert runs on, same settings - "builtin", "ssl" (SSL Native Channel Strip 2:
     console colour) or "nova" (TDR Nova: clean, wide ranges). Inserts added as "eq:ssl"/"eq:nova" keep theirs."""
@@ -337,7 +373,8 @@ def track_add(name: str, instrument: Any = None, kind: str = "midi", volume_db: 
     """Add a track. kind: midi | audio | bus. instrument (midi): "patch:<id>", "synth:<preset>", "sfz:<path>",
     "vst3:<plugin>" or {"type","name","patch","params"}. role: instrument family used for range checks
     (violin, cello, horn, bass, pad, drums ...). layer: adaptive-music layer name for render(layers=True).
-    fx: ["builtin:eq", "eq:ssl", "vst3:TDR Nova", "patch:<fx patch id>"]. output: "master" or a bus track."""
+    fx: ["builtin:eq", "eq:ssl", "vst3:TDR Nova", "patch:<fx patch id>"]. output: "master" or a bus track.
+    pan: -1 (left) .. 1 (right)."""
     return api.track_add(name, instrument, kind, project, volume_db, pan, role, layer, output, None, fx)
 
 
@@ -350,8 +387,8 @@ def track_update(track: str, name: str | None = None, instrument: Any = None, in
     """Change a track. sends: [{"to": "Reverb", "db": -10}] (replaces sends). instrument_params merge into the
     instrument (built-in synth params like {"cutoff": 900, "release": 1.2}, or VST3 params by name). Effects are
     not set here: fx_add, then fx_update. input (audio tracks): the interface input it records, from 1
-    ([1, 2] = a stereo pair, 0 = none). On a track with volume_db or pan automation, a new value moves the whole
-    curve by the change."""
+    ([1, 2] = a stereo pair, 0 = none). pan: -1 (left) .. 1 (right). On a track with volume_db or pan automation, a
+    new value moves the whole curve by the change."""
     return api.track_update(track, project, name, instrument, volume_db, pan, mute, solo, output, sends, role,
                             layer, None, instrument_params, input)
 
@@ -379,7 +416,8 @@ def fx_add(track: str, device: Any, index: int | None = None, sidechain: str | N
     sidechain: a MIDI/audio track whose own sound (pre-fader, ignoring its mute/solo) drives the effect's detector,
     e.g. a compressor on the bass keyed by "Kick" for ducking/pumping. Works with builtin:compressor and VST3s with a
     sidechain input (SSL Bus Compressor 2, Channel Strip 2, G3, LMC+); their external sidechain switch is turned on
-    for you (see "notes"). A muted ghost-kick track makes a clean key."""
+    for you (see "notes"). A muted ghost-kick track makes a clean key. Built-in units: reverb decay s, predelay ms;
+    delay time beats; mix 0..1."""
     return api.fx_add(track, device, project, index, sidechain)
 
 
@@ -388,7 +426,7 @@ def fx_update(track: str, index: int, params: dict | None = None, bypass: bool |
               replace: Any = None, sidechain: str | None = None, project: str | None = None) -> dict:
     """Change an effect's params (built-in: names from synths_list; VST3: param name -> 0..1 or display text like
     "-6 dB"), bypass it, replace the device, or set its sidechain key (a track name; "" disconnects it and turns
-    the plugin's external sidechain switch off)."""
+    the plugin's external sidechain switch off). Built-in units: reverb decay s, predelay ms; delay time beats; mix 0..1."""
     return api.fx_update(track, index, project, params, bypass, replace, sidechain)
 
 
@@ -477,7 +515,8 @@ def cc(track: str, controller: Any, start: Any, end: Any = None, from_value: flo
 def notes_read(track: str | None = None, start: Any = None, end: Any = None, format: str = "ttn",
                exact: bool = False, project: str | None = None) -> dict:
     """Read notes back as TTN per clip (format="ttn") or as [name, bar:beat, dur, vel] lists (format="list").
-    TTN snaps humanized timing to a 1/24-beat grid and velocity to steps of 4 unless exact=True."""
+    TTN snaps humanized timing to a 1/24-beat grid and velocity to steps of 4 unless exact=True. end "24" includes
+    bar 24; "24:1" stops before it."""
     return api.notes_read(track, start, end, project, format, exact)
 
 
@@ -688,8 +727,18 @@ def render(out: str | None = None, format: str = "wav", bits: int = 24, loop: st
     return _mix_pass(rep) if out is None else rep
 
 
-MIX_PASSES = 3  # briefs.MIX: two listening passes, three at most
+MIX_PASSES = 3  # briefs.MIX: two or three listening passes; a big cast gets more (_mix_passes)
 _passes = 0     # working renders by this process; a launched agent's server lives for one run
+
+
+def _mix_passes() -> int:
+    """Listening passes for this session's mix: three, plus one per ten tracks past ten (a 30-track
+    orchestra gets five)."""
+    try:
+        n = len(api.load(None).tracks)
+    except Exception:
+        return MIX_PASSES
+    return MIX_PASSES + max(0, (n - 1) // 10)
 
 
 def _mix_pass(rep: dict) -> dict:
@@ -700,7 +749,7 @@ def _mix_pass(rep: dict) -> dict:
     if not _launched() or studio.me() != "mix" or not isinstance(rep, dict):
         return rep
     _passes += 1
-    n = _passes
+    n, MIX_PASSES = _passes, _mix_passes()
     if n < MIX_PASSES:
         note = (f"Listening pass {n} of {MIX_PASSES}. Fix the two or three things a listener would notice first; "
                 f"leave the rest.")
@@ -723,7 +772,8 @@ def score(start: Any = None, end: Any = None, section: str | None = None, tracks
     with the chord on strong beats (not passing/neighbour notes that move on by step), parallel 5ths/8ves between
     bass and lead, voice crossings, parts that don't follow the chord track, leading tones and 7ths that don't
     resolve at V-I, +6/Neapolitan chords that skip V, leaps wider than an octave, a loop closing on V-I. Range: start/end or a marker section
-    (default the whole song, up to 32 bars). tracks: only these parts (drums are left out unless named)."""
+    (default the whole song, up to 32 bars; end "24" includes bar 24). tracks: only these parts (drums are left out
+    unless named)."""
     return api.score(start, end, section, tracks, check, project)
 
 
@@ -750,7 +800,8 @@ def listen(reference: str | None = None, probe: bool = True, section_bars: int |
     limit it to these): pitches that are silent or much quieter (out of range), slow attacks, instruments sounding
     transposed, and what each drum note really sounds like (kick/snare/hat/cymbal/click) vs its name.
     reference: path to a recording to compare loudness, loudness range, crest, band balance, brightness, width.
-    start/end ("13:1", "25:1") or a marker section: sections, bar_lufs and masking for those bars only. To look
+    start/end ("13:1", "25:1"; end "24" includes bar 24) or a marker section: sections, bar_lufs and masking for
+    those bars only. To look
     closely at a few bars, pass the range with section_bars=1 instead of asking for a block per bar of the song."""
     return api.listen(project, reference, probe, section_bars, tracks, start, end, section)
 
@@ -799,7 +850,7 @@ def seat_join(seat: str | None = None) -> dict:
 def seat_assign(seat: str, kind: str | None = None, runner: str | None = None, model: str | None = None,
                 effort: str | None = None, label: str | None = None, mode: str | None = None,
                 notes: str | None = None, session: str | None = None, audition_model: str | None = None) -> dict:
-    """Put someone in a seat or change how it works. kind: "agent" (with runner = claude | codex | kilo and a
+    """Put someone in a seat or change how it works. kind: "agent" (with runner = claude | codex | kilo | agy and a
     model), "human" (the user takes it), "external" (an outside app sits in), "none" (empty it).
     mode: "propose" (work in takes) or "direct". notes: standing instructions for whoever sits there.
     audition_model: cheaper model for audition-only runs ("" = off)."""

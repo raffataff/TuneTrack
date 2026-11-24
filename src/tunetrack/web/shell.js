@@ -74,74 +74,110 @@
   document.body.append(sPop);
   const setBtn = $s("#setBtn");
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  // The window is a piece of rack gear: a faceplate, a tab strip, and modules (rack.css .su) that each carry a
+  // legend with a lamp (lit when off the factory setting), a switch, fader or picker, and a readout of what it does.
+  const SECTIONS = [["appearance", "Appearance"], ["colours", "Seat colours"], ["layout", "Layout"], ["fonts", "Type"]];
+  const BG = [["aurora", "Aurora", "Soft colour and drifting stars"], ["grid", "Grid", "A lit digital floor"],
+    ["carbon", "Carbon", "Woven graphite, no glow"], ["none", "None", "Clean darkness"]];
+  const SEATS = { producer: "Producer", spotting: "Spotting", composer: "Composer", arranger: "Arranger", rhythm: "Rhythm",
+    sound: "Sound", tracking: "Tracking", mix: "Mix", review: "Review" };
+  const mod = (k, legend, inner, cls = "", lit = false) => `<section class="su ${cls}${lit ? " lit" : ""}" data-m="${k}"><h6><i class="led"></i>${legend}</h6>${inner}</section>`;
+  const seg = (k, cur, opts) => `<div class="seg">${opts.map(([v, t, tip]) => `<button data-${k}="${esc(v)}" class="${String(v) === String(cur) ? "on" : ""}"${tip ? ` title="${esc(tip)}"` : ""}>${t}</button>`).join("")}</div>`;
+  const read = (t) => `<p class="suRead">${t}</p>`;
+  const fader = (k, min, max, step, val, shown) => `<div class="stFader"><input type="range" data-n="${k}" min="${min}" max="${max}" step="${step}" value="${val}" aria-label="${k}"><output class="vfd">${shown}</output></div>`;
   const renderFonts = (list) => {
     const opts = (cur) => {
       const all = cur && !list.includes(cur) ? [cur, ...list] : list;
       return all.map((n) => `<option value="${esc(n)}"${n === cur ? " selected" : ""}>${esc(n)}</option>`).join("");
     };
-    sPop.querySelector(".setupPane").innerHTML = `<h3>Typography</h3><p>Choose installed fonts for each part of your studio.</p>
-      ${ROLES.map((r) => `<div class="stRole" data-k="${r.k}">
-        <label class="field">${r.name.toUpperCase()}<select title="${esc(r.what)}"><option value="">Default (${esc(r.def)})</option>${opts(F[r.k] || "")}</select></label>
-        <div class="stWhat">${esc(r.what)}</div>
-        <div class="stSample ${r.k === "screen" ? "vfd" : ""}" style="font-family: var(--${r.k})">${esc(r.sample)}</div>
-      </div>`).join("")}
-      <div class="stRole stLab">
-        <label class="field">LABEL SPACING<input type="range" data-n="legend_sp" min="0" max="0.25" step="0.01"></label>
-        <label class="field">LABEL WIDTH<input type="range" data-n="legend_st" min="70" max="120" step="1"></label>
-        <div class="stRow"><button class="key toggle" data-caps>CAPITALS</button><span class="spacer"></span><button class="key" data-reset title="Back to the built-in fonts and spacing">RESET</button></div>
-        <div class="stWhat">Width only changes fonts that come in narrow and wide cuts, like Bahnschrift. ${list.length} fonts found on this computer.${fonts ? "" : " Only the fonts Windows ships are listed: restart TuneTrack to see every font you have installed."}</div>
-      </div>`;
-    sPop.querySelectorAll(".stRole[data-k] select").forEach((s) => {
-      s.onchange = () => apply({ ...F, [s.closest(".stRole").dataset.k]: s.value || undefined }, true);
+    const sp = typeof F.legend_sp === "number" ? F.legend_sp : DEF.legend_sp, st = typeof F.legend_st === "number" ? F.legend_st : DEF.legend_st;
+    sPop.querySelector(".setupPane").innerHTML = `<div class="suDeck">
+      ${ROLES.map((r) => mod(r.k, r.name, `<select title="${esc(r.what)}"><option value="">Built in · ${esc(r.def)}</option>${opts(F[r.k] || "")}</select>
+        <div class="stSample ${r.k === "screen" ? "vfd" : ""}" style="font-family: var(--${r.k})">${esc(r.sample)}</div>${read(esc(r.what[0].toUpperCase() + r.what.slice(1)) + ".")}`, "", !!F[r.k])).join("")}
+      ${mod("labels", "Label lettering", `<div class="stLab">
+          <label><span>Spacing</span>${fader("legend_sp", 0, 0.25, 0.01, sp, sp.toFixed(2))}</label>
+          <label><span>Width</span>${fader("legend_st", 70, 120, 1, st, st + "%")}</label>
+          <label><span>Capitals</span>${seg("caps", F.caps !== false ? 1 : 0, [[1, "ON"], [0, "OFF"]])}</label></div>
+        ${read(`Width only changes fonts cut in narrow and wide versions, like Bahnschrift. ${list.length} fonts found on this computer.${fonts ? "" : " Only the fonts Windows ships are listed: restart TuneTrack to see every font you have installed."}`)}`,
+        "full", sp !== DEF.legend_sp || st !== DEF.legend_st || F.caps === false)}
+    </div>`;
+    const pane = sPop.querySelector(".setupPane");
+    pane.querySelectorAll(".su[data-m] select").forEach((s) => {
+      s.onchange = () => { const k = s.closest(".su").dataset.m; apply({ ...F, [k]: s.value || undefined }, true); s.closest(".su").classList.toggle("lit", !!s.value); };
     });
-    sPop.querySelectorAll("input[data-n]").forEach((i) => {
-      i.value = typeof F[i.dataset.n] === "number" ? F[i.dataset.n] : DEF[i.dataset.n];
-      i.oninput = () => apply({ ...F, [i.dataset.n]: +i.value }, true);
+    pane.querySelectorAll("input[data-n]").forEach((i) => {
+      i.oninput = () => { apply({ ...F, [i.dataset.n]: +i.value }, true); i.nextElementSibling.textContent = i.dataset.n === "legend_sp" ? (+i.value).toFixed(2) : i.value + "%"; litLabels(); };
+      i.ondblclick = () => { i.value = DEF[i.dataset.n]; i.oninput(); };
     });
-    const caps = sPop.querySelector("[data-caps]");
-    caps.classList.toggle("on", F.caps !== false);
-    caps.onclick = () => { apply({ ...F, caps: F.caps === false }, true); caps.classList.toggle("on", F.caps !== false); };
-    sPop.querySelector("[data-reset]").onclick = () => { apply({}, true); render(list); };
+    pane.querySelectorAll("[data-caps]").forEach((b) => b.onclick = () => {
+      apply({ ...F, caps: b.dataset.caps === "1" }, true); pane.querySelectorAll("[data-caps]").forEach((x) => x.classList.toggle("on", x === b)); litLabels();
+    });
+    const litLabels = () => pane.querySelector('[data-m="labels"]').classList.toggle("lit", (F.legend_sp ?? DEF.legend_sp) !== DEF.legend_sp || (F.legend_st ?? DEF.legend_st) !== DEF.legend_st || F.caps === false);
   };
   let section = "appearance";
   const render = (list) => {
-    const A = TTAppearance.get(), L = window.TTStudioLayout?.get() || {};
-    sPop.innerHTML = `<div class="setupHead"><div><strong>Studio setup</strong><p>Make this space your own.</p></div><button data-close aria-label="Close setup">×</button></div>
-      <nav class="setupTabs" aria-label="Setup sections">${[["appearance", "Appearance"], ["colours", "Seat colours"], ["layout", "Layout"], ["fonts", "Typography"]].map(([k, t]) => `<button data-section="${k}" class="${section === k ? "on" : ""}" aria-pressed="${section === k}">${t}</button>`).join("")}</nav>
-      <div class="setupPane"></div><div class="setupFoot"><span>Changes apply immediately · saved automatically</span><span class="spacer"></span><button data-default>Reset ${section === "colours" ? "colours" : section === "fonts" ? "fonts" : section}</button></div>`;
-    const pane = sPop.querySelector(".setupPane");
-    const select = (key, title, values, cur) => `<label class="setupControl">${title}<select data-option="${key}">${values.map(([v, t]) => `<option value="${v}"${v === cur ? " selected" : ""}>${t}</option>`).join("")}</select></label>`;
+    const A = TTAppearance.get(), L = window.TTStudioLayout?.get() || {}, D = TTAppearance.colours;
+    sPop.innerHTML = `<header class="setupHead"><i class="screw"></i><div><strong>Studio setup</strong><span>The room around the rack · changes apply at once and are kept</span></div><button class="key" data-close aria-label="Close setup" title="Close (Esc)">✕</button><i class="screw"></i></header>
+      <nav class="setupTabs tabsB" aria-label="Setup sections">${SECTIONS.map(([k, t]) => `<button data-section="${k}" class="${section === k ? "active" : ""}" aria-pressed="${section === k}">${t}</button>`).join("")}</nav>
+      <div class="setupPane"></div>
+      <footer class="setupFoot"><span class="stHint"></span><span class="spacer"></span><button class="key" data-default>RESET ${SECTIONS.find(([k]) => k === section)[1].toUpperCase()}</button></footer>`;
+    const pane = sPop.querySelector(".setupPane"), hint = sPop.querySelector(".stHint");
+    const setA = (v) => TTAppearance.set({ ...TTAppearance.get(), ...v });
     if (section === "appearance") {
-      pane.innerHTML = `<h3>Atmosphere & light</h3><p>A quiet glow behind the work. Tune the texture and movement to suit your session.</p><div class="setupGrid">
-        ${select("effect", "Background", [["aurora", "Aurora · soft colour & stars"], ["grid", "Grid · digital studio"], ["carbon", "Carbon · woven graphite"], ["none", "None · clean darkness"]], A.effect)}
-        ${select("wiring", "Task connections", [["digital", "Digital traces"], ["cables", "Curved cables"]], A.wiring)}
-        <label class="setupControl">Effect intensity <output id="effectLevel">${A.intensity}%</output><input aria-label="Effect intensity" data-intensity type="range" min="0" max="100" value="${A.intensity}"></label></div>
-        <label class="setupCheck"><input type="checkbox" data-motion ${A.motion ? "checked" : ""}>Animate atmosphere and activity</label><p>Your system’s reduced-motion preference is always respected.</p>`;
-      pane.querySelectorAll("[data-option]").forEach((el) => el.onchange = () => TTAppearance.set({ ...TTAppearance.get(), [el.dataset.option]: el.value }));
-      pane.querySelector("[data-intensity]").oninput = (e) => { TTAppearance.set({ ...TTAppearance.get(), intensity: +e.target.value }); pane.querySelector("output").textContent = e.target.value + "%"; };
-      pane.querySelector("[data-motion]").onchange = (e) => TTAppearance.set({ ...TTAppearance.get(), motion: e.target.checked });
+      hint.textContent = "Double-click a fader to put it back.";
+      pane.innerHTML = `<div class="suDeck three">
+        ${mod("effect", "Background", `<div class="stBgs" role="radiogroup">${BG.map(([k, t, d]) => `<button role="radio" data-effect="${k}" class="${A.effect === k ? "on" : ""}" aria-checked="${A.effect === k}"><i class="stBg bg-${k}"></i><b>${t}</b><span>${d}</span></button>`).join("")}</div>`, "full", A.effect !== "aurora")}
+        ${mod("intensity", "Glow", `${fader("intensity", 0, 100, 1, A.intensity, A.intensity + "%")}${read("How strongly the background shows behind the rack.")}`, "", A.intensity !== 55)}
+        ${mod("motion", "Motion", `${seg("motion", A.motion ? 1 : 0, [[1, "ANIMATE"], [0, "STILL"]])}${read("Drifting light, breathing lamps, the bench sliding open. Your system's reduced-motion setting always wins.")}`, "", !A.motion)}
+        ${mod("wiring", "Task links", `${seg("wiring", A.wiring, [["digital", "TRACES"], ["cables", "CABLES"]])}${read(A.wiring === "cables" ? "Curved patch cables from each task to its seat." : "Straight lit traces from each task to its seat.")}`, "", A.wiring !== "digital")}
+      </div>`;
+      pane.querySelectorAll("[data-effect]").forEach((b) => b.onclick = () => { setA({ effect: b.dataset.effect }); render(list); });
+      const f = pane.querySelector('[data-n="intensity"]');
+      f.oninput = () => { setA({ intensity: +f.value }); f.nextElementSibling.textContent = f.value + "%"; pane.querySelector('[data-m="intensity"]').classList.toggle("lit", +f.value !== 55); };
+      f.ondblclick = () => { f.value = 55; f.oninput(); };
+      pane.querySelectorAll("[data-motion]").forEach((b) => b.onclick = () => { setA({ motion: b.dataset.motion === "1" }); render(list); });
+      pane.querySelectorAll("[data-wiring]").forEach((b) => b.onclick = () => { setA({ wiring: b.dataset.wiring }); render(list); });
     } else if (section === "colours") {
-      pane.innerHTML = `<h3>A colour for every seat</h3><p>Follow each seat across the rack, displays and message log. Status rings keep their own state colours.</p><div class="setupColours">${Object.entries(A.colours).map(([id, colour]) => `<label class="setupColour"><input type="color" data-colour="${id}" value="${colour}" aria-label="${id} colour"><span>${id}</span></label>`).join("")}</div><label class="setupCheck"><input type="checkbox" data-logs ${A.logs ? "checked" : ""}>Use seat colours in message logs</label>`;
-      pane.querySelectorAll("[data-colour]").forEach((el) => el.oninput = () => { const v = TTAppearance.get(); v.colours[el.dataset.colour] = el.value; TTAppearance.set(v); });
-      pane.querySelector("[data-logs]").onchange = (e) => TTAppearance.set({ ...TTAppearance.get(), logs: e.target.checked });
+      hint.textContent = "Click a lamp to choose its colour. Status rings keep their own colours.";
+      pane.innerHTML = `<div class="suDeck">
+        ${mod("colours", "A colour for every seat", `<div class="stSeats">${Object.entries(A.colours).map(([id, c]) => `<div class="stSeat${c !== D[id] ? " moved" : ""}" style="--c:${c}">
+            <label class="stLamp" title="Choose ${esc(SEATS[id] || id)}'s colour"><input type="color" data-colour="${id}" value="${c}" aria-label="${esc(SEATS[id] || id)} colour"></label>
+            <b>${esc(SEATS[id] || id)}</b><output class="vfd">${c.toUpperCase()}</output>
+            <button class="mini" data-undo="${id}" title="Back to ${D[id].toUpperCase()}">↺</button></div>`).join("")}</div>`, "full", Object.entries(A.colours).some(([id, c]) => c !== D[id]))}
+        ${mod("logs", "Message logs", `${seg("logs", A.logs ? 1 : 0, [[1, "SEAT COLOURS"], [0, "PLAIN"]])}${read(A.logs ? "Each line in the monitor and the seat logs takes its seat's colour." : "Logs stay one colour.")}`, "full", !A.logs)}
+      </div>`;
+      pane.querySelectorAll("[data-colour]").forEach((el) => el.oninput = () => {
+        const v = TTAppearance.get(); v.colours[el.dataset.colour] = el.value; TTAppearance.set(v);
+        const row = el.closest(".stSeat"); row.style.setProperty("--c", el.value); row.querySelector("output").textContent = el.value.toUpperCase();
+        row.classList.toggle("moved", el.value !== D[el.dataset.colour]);
+        pane.querySelector('[data-m="colours"]').classList.toggle("lit", !!pane.querySelector(".stSeat.moved"));
+      });
+      pane.querySelectorAll("[data-undo]").forEach((b) => b.onclick = () => { const v = TTAppearance.get(); v.colours[b.dataset.undo] = D[b.dataset.undo]; TTAppearance.set(v); render(list); });
+      pane.querySelectorAll("[data-logs]").forEach((b) => b.onclick = () => { setA({ logs: b.dataset.logs === "1" }); render(list); });
     } else if (section === "layout") {
-      pane.innerHTML = `<h3>Arrange your workspace</h3><p>Drag a rack by its screws to reorder it. Drag the dividers to resize the monitor and bays.</p><div class="setupGrid">
-        ${select("side", "Monitor position", [["right", "Right of rack"], ["left", "Left of rack"]], L.side)}
-        ${select("bay", "Upper bay", [["needs", "Needs you"], ["monitor", "Monitor / talkback"]], L.bays?.[0])}</div>
-        <label class="setupCheck"><input type="checkbox" data-empty ${L.hideEmpty ? "checked" : ""}>Hide empty optional seats</label><button data-unfold>Unfold all seats</button>`;
-      pane.querySelectorAll("[data-option]").forEach((el) => el.onchange = () => TTStudioLayout.set(el.dataset.option === "bay" ? { bays: el.value === "needs" ? ["needs", "monitor"] : ["monitor", "needs"], bayH: null } : { side: el.value }));
-      pane.querySelector("[data-empty]").onchange = (e) => TTStudioLayout.set({ hideEmpty: e.target.checked });
-      pane.querySelector("[data-unfold]").onclick = () => TTStudioLayout.set({ fold: [] });
-    } else renderFonts(list);
+      const ids = (window.TTStudio?.ST?.board?.seats || []).map((s) => s.seat), folded = (L.fold || []).length;
+      hint.textContent = "Drag a unit by its screws to move it. Drag the dividers to size the bays.";
+      pane.innerHTML = `<div class="suDeck">
+        ${mod("side", "Monitor side", `${seg("side", L.side || "right", [["left", "LEFT"], ["right", "RIGHT"]])}${read(`Needs You and the monitor sit ${L.side === "left" ? "left" : "right"} of the rack.`)}`, "", L.side === "left")}
+        ${mod("bay", "Upper bay", `${seg("bay", (L.bays || ["needs"])[0], [["needs", "NEEDS YOU"], ["monitor", "MONITOR"]])}${read(`${(L.bays || ["needs"])[0] === "monitor" ? "The monitor and talkback" : "Needs You"} on top, the other below.`)}`, "", (L.bays || ["needs"])[0] === "monitor")}
+        ${mod("empty", "Empty optional seats", `${seg("empty", L.hideEmpty ? 1 : 0, [[0, "SHOW"], [1, "HIDE"]])}${read(L.hideEmpty ? "Optional seats with nobody in them and no work are hidden." : "Every seat has its unit in the rack.")}`, "", !!L.hideEmpty)}
+        ${mod("fold", "Folded units", `<div class="seg"><button data-fold="all">FOLD ALL</button><button data-fold="none">UNFOLD ALL</button></div>${read(folded ? `${folded} unit${folded === 1 ? "" : "s"} folded to a thin strip.` : "No units folded. Double-click a unit's name to fold it.")}`, "", folded > 0)}
+      </div>`;
+      pane.querySelectorAll("[data-side]").forEach((b) => b.onclick = () => { TTStudioLayout.set({ side: b.dataset.side }); render(list); });
+      pane.querySelectorAll("[data-bay]").forEach((b) => b.onclick = () => { TTStudioLayout.set({ bays: b.dataset.bay === "needs" ? ["needs", "monitor"] : ["monitor", "needs"], bayH: null }); render(list); });
+      pane.querySelectorAll("[data-empty]").forEach((b) => b.onclick = () => { TTStudioLayout.set({ hideEmpty: b.dataset.empty === "1" }); render(list); });
+      pane.querySelectorAll("[data-fold]").forEach((b) => b.onclick = () => { TTStudioLayout.set({ fold: b.dataset.fold === "all" ? ids : [] }); render(list); });
+    } else { hint.textContent = "Fonts installed on this computer. The built-in ones are always there to go back to."; renderFonts(list); }
     sPop.querySelectorAll("[data-section]").forEach((b) => b.onclick = () => { section = b.dataset.section; render(list); sPop.querySelector(`[data-section="${section}"]`).focus(); });
     sPop.querySelector("[data-close]").onclick = shut;
     sPop.querySelector("[data-default]").onclick = () => {
       if (section === "fonts") apply({}, true);
       else if (section === "layout") TTStudioLayout.reset();
-      else if (section === "colours") TTAppearance.set({ ...TTAppearance.get(), colours: TTAppearance.colours });
+      else if (section === "colours") TTAppearance.set({ ...TTAppearance.get(), colours: TTAppearance.colours, logs: true });
       else { const v = TTAppearance.get(); TTAppearance.reset(); TTAppearance.set({ ...TTAppearance.get(), colours: v.colours, logs: v.logs }); }
       render(list);
     };
+    if (!sPop.classList.contains("hidden")) sPlace();
   };
   const sPlace = () => {
     const r = setBtn.getBoundingClientRect(), h = sPop.offsetHeight;

@@ -228,6 +228,9 @@ def audio_track_input(p: Project, t: Track, n: int) -> np.ndarray:
     return buf
 
 
+TAIL_FLOOR_DB = -80.0  # a one-shot's sound has died away once the master stays this far under its peak
+TAIL_HOLD = 1.0  # seconds kept after it has, so nothing that lingers is cut
+TAIL_FADE = 0.5  # seconds faded out at the very end (all of it already under the floor): no click
 _STRETCH_PAD = 0.25  # seconds of source context either side of a tempo segment, dropped after stretching
 _STRETCH_XF = 0.01  # crossfade where two tempo segments meet
 
@@ -902,11 +905,13 @@ class Renderer:
         report["warnings"] += sidechain_switch_warnings(p)
         report["warnings"] += eqmap.warnings(p)
         specs = {}
+        missing: list[str] = []  # tracks with notes that are not in the mix: first in the warnings, and `missing`
         for t in audible + key_only:
             try:
                 s = self.track_spec(t)
             except Exception as e:  # noqa: BLE001 - one broken track shouldn't stop the mix
-                report["warnings"].append(f"track '{t.name}': {e}")
+                missing.append(f"track '{t.name}': {e}")
+                report.setdefault("missing", []).append(t.name)
                 continue
             if s is not None:
                 specs[t.id] = s
@@ -920,7 +925,8 @@ class Renderer:
             for t, audio, info, err in results:
                 if err:
                     self.failed.add(t.id)
-                    report["warnings"].append(f"track '{t.name}' failed to render: {err}")
+                    missing.append(f"track '{t.name}' failed to render: {err}")
+                    report.setdefault("missing", []).append(t.name)
                     continue
                 for w in info.get("warnings", []):
                     report["warnings"].append(f"track '{t.name}': {w}")
@@ -937,6 +943,7 @@ class Renderer:
             self.master, self.post = self.mix(pre, report)
         finally:
             self.close()
+            report["warnings"][:0] = [f"TRACK MISSING FROM THE MIX: {m}" for m in missing]
         report["render_seconds"] = round(time.time() - t0, 1)
         self.report = report
         return report
@@ -1113,19 +1120,30 @@ class Renderer:
             le = int(round(self.tm.sec(p.loop["end"]) * sr))
             mode = loop if loop in ("loop", "intro+loop") else ("intro+loop" if ls > 0 else "loop")
 
-        end_sample = None
+        end_sample, fade_n = None, int(0.05 * sr)
         if mode == "off":
-            # cut after the musical end once the master's tails have died away; stems use the same length
+            # Let every release, reverb and ambience ring out: cut TAIL_HOLD s after the last sample above
+            # TAIL_FLOOR_DB under the master's peak (the level normalisation will bring to the ceiling), then fade.
+            # p.tail is only the longest it may ring past the end. Stems use the same length.
             env = np.abs(self.master).max(axis=0)
-            nz = np.nonzero(env > 10 ** (-70 / 20))[0]
+            peak = float(env.max(initial=0.0))
+            nz = np.nonzero(env > peak * 10 ** (TAIL_FLOOR_DB / 20))[0] if peak > 0 else np.array([], int)
             music_end = int(round(self.tm.sec(p.end) * sr))
             hard_end = int(round((self.tm.sec(p.end) + p.tail) * sr))
-            end_sample = min(self.n, hard_end, max(music_end, (nz[-1] + 1) if len(nz) else 0) + int(0.05 * sr))
+            last = max(music_end, (nz[-1] + 1) if len(nz) else 0)
+            end_sample = min(self.n, hard_end, last + int(TAIL_HOLD * sr))
+            # the fade covers only what follows the last sound, never the music itself (50 ms at least)
+            fade_n = max(int(0.05 * sr), min(int(TAIL_FADE * sr), end_sample - last))
+            rep["tail_s"] = round(max(0, end_sample - music_end) / sr, 2)
+            if len(nz) and nz[-1] + 1 >= min(self.n, hard_end):
+                rep.setdefault("warnings", []).append(
+                    f"the tail was still sounding when the render hit its {p.tail:g} s limit: raise tail with "
+                    "project_set(tail=...) to let it ring out")
 
         def shape(sig: np.ndarray) -> np.ndarray:
             if mode == "off":
                 sig = sig[:, :end_sample].copy()
-                k = min(int(0.05 * sr), sig.shape[1])
+                k = min(fade_n, sig.shape[1])
                 sig[:, -k:] *= np.linspace(1, 0, k)[None, :]
                 return sig
             return loop_wrap(sig, ls, le, keep_intro=(mode == "intro+loop"))

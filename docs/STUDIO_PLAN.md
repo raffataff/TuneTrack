@@ -1233,6 +1233,33 @@ task, or a new Sound task that queued Mix tasks wait for (`take_accept` reports 
 raised to 14,000 for the Producer (owner OK'd). `tests/test_new_parts.py`. Not tried with a real crew yet.
 `test_signoff.py::test_a_plan_sent_back_is_revised_and_comes_back_as_one` is flaky (about 1 in 3 runs).
 
+**The Drive fixes** (2026-11-22, branch `the-drive-fixes`, not committed; plan in `docs/THE_DRIVE_FIXES.md`). The
+crew test's mix came out wrong through tool bugs, not the seats. Pan 1 < |x| <= 100 is read as percent, beyond
+raises; built-in effect/synth settings are checked by name and range when set (`synths.FX_RANGES`,
+`api._check_builtin`); `api.mix_problems` finds tracks a render would drop, and `take_submit`/`take_accept` refuse
+them; render puts "TRACK MISSING FROM THE MIX" first; an export of the session returns `delivery` (length vs brief,
+loop, parts present, L/R, tail, seam). Flow: `needs_you` only through `ask_human` (the floor requeues a stuck one);
+talkback reaches a stuck seat; the user's sign-off note goes with a return; `kickoff` stores `brief.request` and every
+task names it; `project_set` names each bad field and changes nothing; the user's accept of the last take gets a
+Producer "Final listen" task (two floor/signoff tests now expect that run). Tools: quoted strings and "none"/"null"
+are tidied in `mcp_server.tool`; a bare end bar is inclusive in score/notes_read/listen; a beat past the bar raises;
+run logs get a timestamp; a run silent 10 minutes shows QUIET; scorecard counts only ask_human asks and tool errors
+(floor logs `tool_errors` on the end event); seats lose `project_list`. `tests/test_drive_fixes.py`,
+`tests/test_drive_fixes_c.py`; 590 pass. Part D (repairing The Drive itself) waits for the owner.
+
+**Hands-on at a sign-off** (2026-11-23, same branch, uncommitted). The owner wanted to go hands-on with any signed-off
+seat's work and found the Needs You answers unclear ("A · SESSION", "B · TK3"). Now: A/B keys read "▶ THE SONG NOW" /
+"▶ WITH TKn" everywhere; each answer has a line under it saying what it does (`needs.js` `explain`); a take item has
+OR GO HANDS-ON: EDIT <SEAT>'S TAKE (the Desk opens their take; its take bar says WAITING ON YOUR SIGN-OFF and the go
+key is SIGN OFF…, back to that item, instead of HAND IN) or START FROM THE ORIGINAL (`signoff.your_version`: a take of
+the user's from the song as it is, `replaces` + `for_task` on its meta; CONTINUE picks it up again). WHAT YOU CHANGED
+SINCE IT WAS HANDED IN lists `signoff.take_yours`. Any take of the user's goes through the Desk's HAND OVER sheet
+(`signoff.hand_over`): TO THE PRODUCER (routed at once, even with the crew stopped; optional seats the Producer should
+have check it, said in the audition note; signed, so Co-Producer does not stop the user on their own take) or INTO
+THE SONG NOW. Handing over a version that replaces a seat's take takes over its task and discards theirs (its stop
+closes with it). `tests/test_hands_on.py`. Checked in the browser (`output/_preview/handson_check.py`, port 7389): both
+paths, the sheet, the tags. Not tried by the owner or with a real crew.
+
 Left:
 
 1. **The owner's look** at the redesign, and their font pick (SETUP). Run `tunetrack app --shortcut` again from
@@ -1327,7 +1354,7 @@ item 3); then stage 3.4 on the same branch: automation of any device setting, te
 figure (section 5, "Not verified"), a short live crew session on the engine backend, the schema trim (needs one
 live run per runner), a whole session with Claude in a seat.
 
-To measure a session's usage: each run's log is `<session>/studio/logs/<task>-<attempt>-<seat>.jsonl` (the agent
+To measure a session's usage: each run's log is `<session>/studio/logs/<task>-<attempt>-<seat>-<yyyymmdd-hhmmss>.jsonl` (the agent
 CLI's own event stream). For Codex, `turn.completed` carries `usage`, and each `item.completed` of type
 `mcp_tool_call` carries the tool, its arguments and its answer. Count calls and answer characters per tool and
 per seat, and input tokens per run: `uv run python output/_preview/usage.py <session folder>` (untracked, like

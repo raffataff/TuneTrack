@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="/web/sheet.css">
 <link rel="stylesheet" href="/web/needs.css">
 <link rel="stylesheet" href="/web/appearance.css">
+<link rel="stylesheet" href="/web/rack.css">
 <script>try { const c = JSON.parse(localStorage.getItem("tt.fontcss") || "{}"); for (const k in c) document.documentElement.style.setProperty(k, c[k]); } catch (e) { /* no storage */ }</script>
 </head>
 <body data-room="studio">
@@ -95,6 +96,7 @@
   </section>
   <aside id="side">
     <section id="needs" class="bay">
+      <div id="usageRead" class="vfd small" hidden></div>
       <h2><i class="lamp"></i>NEEDS YOU <span id="needsHead" class="count"></span></h2>
       <div id="needsList" class="bayBody"></div>
     </section>
@@ -166,9 +168,10 @@
       <button data-tab="report">Render report</button>
       <button data-tab="brief">Brief</button>
       <div class="spacer"></div>
-      <span id="rollInfo" class="muted"></span>
+      <span id="rollInfo" title="Click to add, drag to move, drag the edge to resize, double-click to delete, Ctrl+wheel to zoom."></span>
     </nav>
     <div id="panel-roll" class="panel active">
+      <canvas id="rollRuler" class="hidden" aria-hidden="true"></canvas>
       <div id="rollWrap"><canvas id="roll"></canvas></div>
       <canvas id="vel"></canvas>
     </div>

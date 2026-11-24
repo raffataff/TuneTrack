@@ -5,9 +5,9 @@ about: A console sound chip: two pulse voices, a triangle bass, noise drums. Eve
 ---
 
 ## producer
-- Four voices at most and only these: two pulse leads ([chip_pulse], [chip_square]), one [chip_triangle] bass,
+- The classic chip set is four voices: two pulse leads ([chip_pulse], [chip_square]), one [chip_triangle] bass,
   [chip_noise] drums. No pads, reverb buses or sampled instruments; nothing a chip could not play.
-- 120-180 bpm. A loop of 16-32 bars with a hook in the first two; B goes to the relative key or up a fourth.
+- 120-180 bpm. A game loop of 16-32 bars (longer when the brief asks) with a hook in the first two; B goes to the relative key or up a fourth.
 - Everything quantised: tell every seat that writes notes no humanising.
 
 ## composer

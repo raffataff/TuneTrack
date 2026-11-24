@@ -275,7 +275,7 @@ window.Tracking = (() => {
     const pk = p.data, n = pk.length, rate = p.rate, off = c.offset || 0, mid = top + h / 2, s0 = beatToSec(c.start);
     const flat = !(S.doc.tempo_changes || []).length, spb = 60 / (c.bpm || S.doc.tempo);
     const fileSec = (b) => off + (c.bpm || flat ? (b - c.start) * spb : beatToSec(b) - s0);
-    g.fillStyle = col + "cc";
+    g.fillStyle = col;
     let a = fileSec(c.start + (x0 - x) / S.zoom);
     for (let px = x0; px < x1; px++) {
       const b = fileSec(c.start + (px + 1 - x) / S.zoom), i0 = Math.max(0, Math.floor(a * rate)), i1 = Math.min(n, Math.max(i0 + 1, Math.ceil(b * rate)));

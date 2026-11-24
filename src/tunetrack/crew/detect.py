@@ -1,4 +1,4 @@
-"""Find the agent CLIs (Claude Code, Codex, Kilo) and the desktop apps that can host TuneTrack's MCP server.
+"""Find the agent CLIs (Claude Code, Codex, Kilo, Antigravity) and the desktop apps that can host TuneTrack's MCP server.
 
 ``detect()`` is read-only: it runs ``--version``/``models``/``auth status`` style commands with short timeouts,
 checks that auth files *exist* (never reads them) and reads Codex's model metadata cache. Results are cached
@@ -52,12 +52,15 @@ CLAUDE_MODELS = [
 ]
 CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]  # from `claude --help` (--effort)
 
-_NAMES = {"claude": "Claude Code", "codex": "Codex", "kilo": "Kilo"}
+RUNNER_IDS = ("claude", "codex", "kilo", "agy")
+_NAMES = {"claude": "Claude Code", "codex": "Codex", "kilo": "Kilo", "agy": "Antigravity"}
 _HINTS = {
     "claude": "Install Claude Code (https://claude.com/claude-code) so `claude` is on PATH, then run `claude auth login`.",
     "codex": "Install the Codex desktop app or the Codex CLI (`npm i -g @openai/codex`) and sign in once.",
     "kilo": "Install the Kilo Code VS Code extension (it bundles kilo.exe) or the Kilo CLI so `kilo` is on PATH.",
+    "agy": "Install the Antigravity CLI so `agy` is on PATH, then run `agy` once in a terminal and sign in.",
 }
+AGY_EFFORTS = ["low", "medium", "high", "xhigh", "max"]  # from `agy --help` (--effort), 1.5.15
 
 _exe_memo: dict[str, str | None] = {}
 
@@ -162,11 +165,16 @@ def _candidates(runner: str) -> list[str]:
         out += [os.path.join(appdata, "npm", "kilo.cmd"), str(home / ".local" / "bin" / exe)]
     elif runner == "codex":
         out += [os.path.join(appdata, "npm", "codex.cmd"), str(home / ".local" / "bin" / "codex.exe")]
+    elif runner == "agy":
+        local = os.environ.get("LOCALAPPDATA", str(home / "AppData" / "Local"))
+        exe = "agy.exe" if IS_WINDOWS else "agy"
+        out += [os.path.join(local, "agy", "bin", exe), str(home / ".local" / "bin" / exe)]
     return out
 
 
 def find_exe(runner: str) -> str | None:
-    """Absolute path of the runner's CLI ("claude" | "codex" | "kilo"), or None. PATH first, then known locations."""
+    """Absolute path of the runner's CLI ("claude" | "codex" | "kilo" | "agy"), or None. PATH first, then known
+    locations."""
     try:
         memo = _exe_memo.get(runner)
         if memo and os.path.isfile(memo):
@@ -360,6 +368,32 @@ def parse_kilo_verbose(text: str, cap: int | None = KILO_MODEL_CAP) -> list[dict
     return (free + paid)[:cap]
 
 
+def _tier_agy(model_id: str) -> str:
+    s = model_id.lower()
+    if "opus" in s or s.endswith("-high"):
+        return "top" if "opus" in s else "high"
+    if s.endswith("-low") or any(w in s for w in ("lite", "mini", "nano")):
+        return "fast"
+    return _tier_generic(model_id) if not s.endswith("-medium") else "mid"
+
+
+def parse_agy_models(text: str) -> list[dict]:
+    """`agy models` prints a "Fetching..." line, then one `id<TAB>Label` per model."""
+    seen, rows = set(), []
+    for ln in _clean(text):
+        parts = re.split(r"\t+|\s{2,}", ln, maxsplit=1)
+        mid = parts[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:\-]*", mid) or len(parts) < 2 or mid in seen:
+            continue
+        seen.add(mid)
+        label = parts[1].strip() or mid
+        rows.append({"id": mid, "label": label, "tier": _tier_agy(mid), "cost": "paid",
+                     "info": {"name": label, "about": "", "context": None, "output": None, "price": None,
+                              "can": ["tools"] + (["reasoning"] if "thinking" in label.lower() else []),
+                              "released": None, "trains": None}})
+    return rows
+
+
 def _kilo_auth() -> str:
     data = Path(os.environ.get("XDG_DATA_HOME") or (_home() / ".local" / "share")) / "kilo" / "auth.json"
     return "ok" if data.exists() else "unknown"
@@ -403,6 +437,19 @@ def _probe(runner: str) -> dict:
                 if not rec["models"]:
                     notes.append("`kilo models` listed no models")
             notes.append("effort maps to `kilo run --variant` (provider-specific: e.g. minimal, low, high, max)")
+        elif runner == "agy":
+            rec["efforts"] = list(AGY_EFFORTS)
+            rc, out, err = _run([exe, "models"])  # lists only when signed in
+            rec["models"] = parse_agy_models(out) if rc == 0 else []
+            if rec["models"]:
+                rec["auth"] = "ok"
+            elif rc is None:
+                notes.append(f"`agy models` failed: {err}")
+            else:
+                rec["auth"] = "missing"
+                notes.append("`agy models` listed nothing: run `agy` once in a terminal and sign in")
+            notes.append("models use your Antigravity plan quota; tool limits are set per run, your agy config "
+                         "is not changed")
     except Exception as e:  # noqa: BLE001
         notes.append(f"probe failed: {e}")
     return rec
@@ -468,7 +515,7 @@ def _cache_ok(data) -> bool:
 
 
 def detect(refresh: bool = False) -> dict:
-    """Runners (claude, codex, kilo) and apps, cached for 24 h in config.HOME/agents.json. Never raises."""
+    """Runners (claude, codex, kilo, agy) and apps, cached for 24 h in config.HOME/agents.json. Never raises."""
     path = _cache_path()
     if not refresh:
         try:
@@ -479,7 +526,7 @@ def detect(refresh: bool = False) -> dict:
             pass
     if refresh:
         _exe_memo.clear()
-    data = {"runners": [_probe(r) for r in ("claude", "codex", "kilo")], "apps": _apps(),
+    data = {"runners": [_probe(r) for r in RUNNER_IDS], "apps": _apps(),
             "scanned_at": int(time.time())}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

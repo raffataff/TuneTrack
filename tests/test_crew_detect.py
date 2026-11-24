@@ -72,7 +72,7 @@ def _runner(data, rid):
 def test_all_missing(sandbox, monkeypatch):
     monkeypatch.setattr(detect, "find_exe", lambda r: None)
     data = detect.detect(refresh=True)
-    assert [r["id"] for r in data["runners"]] == ["claude", "codex", "kilo"]
+    assert [r["id"] for r in data["runners"]] == ["claude", "codex", "kilo", "agy"]
     for r in data["runners"]:
         assert r["available"] is False and r["exe"] is None
         assert any("not found" in n for n in r["notes"])
@@ -176,10 +176,10 @@ def test_cache_used_then_expires(sandbox, monkeypatch):
     stale = dict(first, scanned_at=int(time.time()) - 25 * 3600)
     detect._cache_path().write_text(json.dumps(stale), encoding="utf-8")
     detect.detect()
-    assert calls == ["claude", "codex", "kilo"]                # older than 24 h: rescanned
+    assert calls == ["claude", "codex", "kilo", "agy"]         # older than 24 h: rescanned
     calls.clear()
     detect.detect(refresh=True)
-    assert calls == ["claude", "codex", "kilo"]
+    assert calls == ["claude", "codex", "kilo", "agy"]
 
 
 def test_cache_rescans_when_exe_vanished(sandbox, monkeypatch, tmp_path):
@@ -188,7 +188,7 @@ def test_cache_rescans_when_exe_vanished(sandbox, monkeypatch, tmp_path):
     detect._cache_path().parent.mkdir(parents=True, exist_ok=True)
     detect._cache_path().write_text(json.dumps(data), encoding="utf-8")
     monkeypatch.setattr(detect, "find_exe", lambda r: None)
-    assert len(detect.detect()["runners"]) == 3
+    assert len(detect.detect()["runners"]) == 4
 
 
 def test_parse_version():

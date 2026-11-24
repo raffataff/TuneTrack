@@ -25,5 +25,15 @@
   "silent": false,
   "brightness_hz": 156,
   "file": "C:\\Users\\Owner\\Documents\\TuneTrack\\library\\auditions\\groove-agent-se-groove-agent-se-acoustic-kit.wav"
+ },
+ "drum_map": {
+  "kick": 36,
+  "snare": 38,
+  "pedal_hat": 44,
+  "tom_low": 45,
+  "tom_mid": 48,
+  "tom_high": 50,
+  "closed_hat": 53,
+  "crash": 69
  }
 }

@@ -254,7 +254,7 @@ def masking(spectra: dict[str, Spectrum], buses: set[str], leads: set[str], fram
         if pr["share_of_time"] >= 0.35 and (lowband or a in leads or b in leads):
             warns.append(f"'{a}' and '{b}' fight for the {pr['band']} band {pr['share_of_time']:.0%} of the time "
                          f"(bars {pr['bars']}): {pr['hint']}")
-    return tracks, pairs[:8], warns
+    return tracks, pairs[:16], warns
 
 
 # ---- probe renders: what each pitch a track uses actually sounds like ---------------------------------------------
@@ -706,7 +706,7 @@ def report(p: Project, r, reference: str | None = None, probe: bool = True, sect
                                   for (bn, _lo, _hi), v in zip(analysis.BANDS, nb)}
             levels = {n: _db(float(sp.power[fr].sum()) / mp) for n, sp in spectra.items()}
             levels = {n: round(v, 1) for n, v in sorted(levels.items(), key=lambda kv: -kv[1]) if v >= -30}
-            entry["tracks_db"] = dict(list(levels.items())[:8])
+            entry["tracks_db"] = dict(list(levels.items())[:32])
             pres = {n: float(sp.oct[fr][:, 5:8].sum()) for n, sp in spectra.items() if n not in buses}
             if pres and max(pres.values()) > EPS:
                 entry["most_present"] = max(pres, key=pres.get)

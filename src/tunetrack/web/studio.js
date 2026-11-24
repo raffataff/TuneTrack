@@ -148,12 +148,34 @@ function renderHeader() {
   read.title = c.error || "Agent runs this session / the limit before the crew stops and asks you";
   $("#needsCount").textContent = n; $("#needsBtn").classList.toggle("hot", n > 0);
   $("#needsBtn").querySelector(".lamp").className = "lamp" + (n ? " red blink" : "");
-  $("#needsHead").textContent = n || "";
+  $("#needsHead").textContent = String(n).padStart(2, "0"); $("#needsHead").classList.toggle("hot", n > 0);
   const reps = ST.board ? (ST.board.reports || []).length : 0;
   $("#repBtn").textContent = reps ? `REPORTS ${reps}` : "REPORTS"; $("#repBtn").classList.toggle("on", reps > 0); $("#repBtn").disabled = !ST.board;
   $("#needs h2 .lamp").className = "lamp" + (n ? " red blink" : "");
   if (window.TTNeeds) { TTNeeds.renderInvolve(); TTNeeds.update(); }  // the INVOLVE key, and the sheet if it is open
 }
+// subscription limits each agent app last reported (5-hour and weekly windows); polled, since runs update them
+const USAGE_NAMES = { claude: ["CLAUDE", "CL"], codex: ["CODEX", "CX"] };
+async function renderUsage() {
+  let u; try { u = await api("crew_usage"); } catch { return; }
+  const el = $("#usageRead"), now = u.now || Date.now() / 1000, parts = [], tips = [];
+  const when = (t) => new Date(t * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+  const ago = (t) => { const m = Math.round((now - t) / 60); return m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; };
+  for (const [k, [name, short]] of Object.entries(USAGE_NAMES)) {
+    const r = u[k]; if (!r) continue;
+    const win = (w, label, cls) => {
+      if (!w) return "";
+      const reset = w.resets_at && w.resets_at < now, pct = Math.round(w.used_pct);
+      tips.push(`${name} ${label}: ${reset ? `was ${pct}%, window has reset since` : `${pct}% used, resets ${w.resets_at ? when(w.resets_at) : "?"}`}`);
+      return `<span class="${cls}"><i class="lbl">${label} </i><b class="${reset ? "dimv" : pct >= 90 ? "amb" : ""}">${reset ? "–" : pct + "%"}</b></span>`;
+    };
+    parts.push(`<span class="uName" data-short="${short}"><i class="lbl">${name}</i></span>${win(r["5h"], "5H", "")}${win(r.week, "WK", "wk")}`);
+    tips.push(`  (last reported ${ago(r.seen_at)})`);
+  }
+  el.hidden = !parts.length; el.innerHTML = parts.join('<span class="dimv">·</span>');
+  el.title = tips.join("\n") + "\nFigures come from each app's own output; they update when that app runs. Antigravity and Kilo don't report limits.";
+}
+renderUsage(); setInterval(renderUsage, 60000);
 $("#crewBtn").onclick = async () => {
   if (ST.crew && ST.crew.running) { await call("crew_stop", {}, "stopping the crew…"); return; }
   try { const v = await api("studio_view"); if (v.board) { ST.board = v.board; ST.crew = v.crew; } } catch { /* use what we have */ }
@@ -166,14 +188,19 @@ $("#crewBtn").onclick = async () => {
 $("#briefBtn").onclick = () => openBrief();
 function openBrief() {
   const prod = seatOf("producer"), agent = prod && prod.occupant && prod.occupant.kind === "agent";
+  const was = (S.doc && S.doc.brief) || {};
+  const curForm = FORMS.some(([v]) => v === was.form) ? was.form : "", curLen = was.length != null ? String(was.length) : "";
+  let formV = curForm;
   const box = modal(`<h2>Brief the Producer</h2>
     <p class="hint">Say what you want made: what it is for, mood, length, anything it must fit. The Producer plans it, hands out tasks to the seats that are filled, and auditions what comes back. Each agent run costs whatever that seat's model costs.</p>
     ${agent ? "" : `<p class="hint warn">${prod && prod.occupant ? "The Producer seat is not an agent, so this brief waits there as a task for whoever sits in it." : "Nobody is in the Producer seat. The brief will wait there until you seat an agent (SEAT on the Producer unit)."}</p>`}
-    <textarea id="brText" rows="6" placeholder="A calm main-menu loop for a small space game: 8 bars, D minor, about 90 BPM, loops seamlessly…"></textarea>
+    <textarea id="brText" rows="6" placeholder="A calm menu loop, a theme tune, a full song, or a 4-minute symphonic piece: say what it is for, mood, length…"></textarea>
+    <div class="formgrid" style="margin-top:10px"><span>Form</span>${formSeg("brForm", curForm)}<span>Length</span><input id="brLen" value="${esc(curLen)}" placeholder="e.g. 90 s, 2:30, about 4 minutes · blank: the Producer decides"></div>
     <div class="formgrid" style="margin-top:10px"><span>Style</span><select id="brStyle" title="A genre style sheet: each seat gets that genre's craft in its brief. Left on auto, the project's genre picks one, or the Producer does."><option value="">auto</option></select><span>At once</span><input id="brPar" type="number" min="1" max="6" value="3" title="Agents working at the same time">
-      <span>Run limit</span><input id="brMax" type="number" min="1" max="200" value="${(ST.crew && ST.crew.max_runs) || 40}" title="Agent runs before the crew stops and asks you"></div>
+      <span>Run limit</span><input id="brMax" type="number" min="1" max="500" value="${(ST.crew && ST.crew.max_runs) || 100}" title="Agent runs before the crew stops and asks you"></div>
     <div class="row"><button class="ghost" id="brPick" title="Propose a model per seat from how each did in earlier sessions; nothing changes until you apply it">Pick a crew from history…</button><span class="spacer"></span><button class="ghost" id="brCancel">Cancel</button><button class="key go" id="brGo">START THE SESSION</button></div>`);
   $("#brText").focus();
+  document.querySelectorAll("#brForm button").forEach((b) => b.onclick = () => { formV = b.dataset.v; document.querySelectorAll("#brForm button").forEach((x) => x.classList.toggle("on", x === b)); });
   const cur = (S.doc && S.doc.brief && S.doc.brief.style) || "";
   api("style_list", {}, null).then((list) => {
     $("#brStyle").innerHTML = `<option value="">auto</option>` + list.map((s) => `<option value="${esc(s.name)}" title="${esc(s.about)}"${s.name === cur ? " selected" : ""}>${esc(s.title)}</option>`).join("");
@@ -182,10 +209,15 @@ function openBrief() {
   $("#brPick").onclick = openCrewPick;
   $("#brGo").onclick = async () => {
     const brief = $("#brText").value.trim(); if (!brief) { toast("Say what you want made"); return; }
-    const style = $("#brStyle").value;
+    const style = $("#brStyle").value, len = $("#brLen").value.trim();
     closeModal();
-    if (style !== cur && S.doc) await api("project_set", { brief: { style: style || "none" } }, null).catch((e) => toast(e.message));
-    await call("crew_start", { brief, parallel: +$("#brPar").value || 3, max_runs: +$("#brMax").value || 40 }, "starting the crew…");
+    // only what changed goes to the brief; "" clears a form or length set before
+    const set = {};
+    if (style !== cur) set.style = style || "none";
+    if (formV !== curForm) set.form = formV;
+    if (len !== curLen) set.length = len;
+    if (Object.keys(set).length && S.doc) await api("project_set", { brief: set }, null).catch((e) => toast(e.message));
+    await call("crew_start", { brief, parallel: +$("#brPar").value || 3, max_runs: +$("#brMax").value || 100 }, "starting the crew…");
   };
 }
 $("#needsBtn").onclick = () => { if (window.TTNeeds) TTNeeds.open(); };
@@ -207,7 +239,7 @@ const SIGN_TIP = {
 };
 function seatState(s) {
   const run = ST.crew && ST.crew.active && ST.crew.active[s.seat], t = taskOf(s.task), kind = s.occupant && s.occupant.kind;
-  if (run) return ["working", "amber pulse", "WORKING"];
+  if (run) return run.quiet ? ["working", "amber blink", `QUIET ${Math.round((Date.now() / 1000 - run.quiet) / 60)} MIN`] : ["working", "amber pulse", "WORKING"];
   if (ST.board.needs_you.some((a) => a.from === s.seat && a.kind !== "blocker")) return ["needs", "amber blink", "WAITS ON YOU"];
   if (t && t.state === "needs_you") return ["needs", "red blink", "NEEDS YOU"];
   if (!s.occupant) return t ? ["needs", "red", "NO ONE SEATED"] : ["vacant", "", "VACANT"];
@@ -224,6 +256,86 @@ function seatState(s) {
   }
   return s.presence === "online" ? ["ready", "green", "ONLINE"] : ["ready", "green", "READY"];
 }
+// The round status dial: one or two short words that always fit; labels it doesn't say in full go on the screen.
+const DIAL = { working: "WORKING", needs: "NEEDS YOU", yours: "YOUR MOVE", hold: "ON HOLD", handed: "HANDED IN", queued: "WAITING", vacant: "VACANT" };
+const PLAIN = new Set(["WORKING", "YOU · WORKING", "NEEDS YOU", "WAITS ON YOU", "READY", "ONLINE", "VACANT", "ON HOLD", "TAKE HANDED IN", "YOUR MOVE", "QUEUED"]);
+function dialWord(state, label) {
+  if (state === "working" && label.startsWith("QUIET")) return "QUIET";
+  if (state === "ready") return label === "ONLINE" ? "ONLINE" : "READY";
+  return DIAL[state] || label.split(" ")[0];
+}
+// shrink the dial's words until the longest line fits inside the ring (display fonts differ in width)
+function fitDial(el) {
+  el.style.fontSize = "";
+  if (!el.clientWidth) { delete el.dataset.w; return; }  // not on screen (another room): fitted on the next render
+  for (let px = parseFloat(getComputedStyle(el).fontSize); el.scrollWidth > el.clientWidth + 0.5 && px > 6; px -= 0.5) el.style.fontSize = px - 0.5 + "px";
+}
+
+document.fonts?.ready.then(() => Object.values(ST.units || {}).forEach((u) => fitDial(u.querySelector(".state"))));
+
+// The EFFORT knob: how hard the seat's agent thinks on its next run (runner --effort / reasoning effort / --variant).
+// Drag up/down, scroll, or arrow keys; double-click returns it to the app's default. It never touches a run in flight.
+const knobs = {};  // seat -> { val, timer }: a turn waiting to be saved
+async function agentApps() {
+  if (!ST.agents) { try { ST.agents = await api("crew_detect"); } catch { return []; } }
+  return ST.agents.runners || [];
+}
+function effortSteps(occ) {
+  const r = ST.agents && (ST.agents.runners || []).find((x) => x.id === occ.runner), m = r && (r.models || []).find((x) => x.id === occ.model);
+  const e = (m && m.efforts && m.efforts.length ? m.efforts : r && r.efforts) || [];
+  return ["", ...e];
+}
+// where a level usually sits, for drawing the knob before the apps' own lists have loaded
+const EFFORT_GUESS = ["", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+function drawKnob(k, s) {
+  const occ = s.occupant || {}, agent = occ.kind === "agent", pend = knobs[s.seat];
+  const val = pend ? pend.val : agent ? occ.effort || "" : null;
+  let steps = agent && ST.agents ? effortSteps(occ) : EFFORT_GUESS;
+  if (agent && !steps.includes(val)) steps = EFFORT_GUESS.includes(val) ? EFFORT_GUESS : ["", val];
+  const i = Math.max(0, steps.indexOf(val)), n = steps.length;
+  // 0 = the app's default, at seven o'clock; the levels spread clockwise to five o'clock
+  k.style.setProperty("--a", (agent ? (n > 1 ? -135 + 270 * i / (n - 1) : -135) : -135) + "deg");
+  k.classList.toggle("off", !agent); k.classList.toggle("set", agent && !!val);
+  k.querySelector(".kv").textContent = !agent ? "—" : val ? val.toUpperCase() : "AUTO";
+  k.setAttribute("aria-valuetext", agent ? val || "default" : "no agent");
+  k.setAttribute("aria-disabled", String(!agent));
+  k.title = !agent ? "Effort: seat an AI agent here to set how hard it thinks"
+    : `Effort: ${val || "the app's default"}. Drag up or down, scroll, or use the arrow keys; double-click for the default. Applies from the seat's next run.`;
+}
+function effortKnob(k, seat) {
+  const nudge = async (d, to) => {
+    const s = seatOf(seat), occ = s && s.occupant; if (!occ || occ.kind !== "agent") return;
+    await agentApps();
+    const steps = effortSteps(occ), cur = knobs[seat] ? knobs[seat].val : occ.effort || "";
+    if (steps.length < 2) { toast(`${occ.runner} has no effort levels to choose from.`); return; }
+    const i = to !== undefined ? 0 : clampN(Math.max(0, steps.indexOf(cur)) + d, 0, steps.length - 1);
+    if (steps[i] === cur) return;
+    const p = knobs[seat] = knobs[seat] || {}; p.val = steps[i]; drawKnob(k, s);
+    clearTimeout(p.timer);
+    p.timer = setTimeout(async () => {
+      const v = p.val;
+      try { await call("seat_assign", { seat, effort: v }); toast(`${s.title} effort: ${v || "default"}. It applies from the seat's next run.`, true); }
+      catch { /* call() said why */ }
+      if (knobs[seat] === p && p.val === v) delete knobs[seat];
+      const now = seatOf(seat); if (now) drawKnob(k, now);
+    }, 500);
+  };
+  k.onpointerenter = k.onfocus = () => { if (!ST.agents) agentApps().then(() => { const s = seatOf(seat); if (s) drawKnob(k, s); }); };
+  k.onwheel = (e) => { const s = seatOf(seat); if (!s || !s.occupant || s.occupant.kind !== "agent") return; e.preventDefault(); nudge(e.deltaY < 0 ? 1 : -1); };
+  k.ondblclick = () => nudge(0, "");
+  k.onkeydown = (e) => {
+    const d = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 }[e.key];
+    if (d) { e.preventDefault(); nudge(d); } else if (e.key === "Home" || e.key === "Delete") { e.preventDefault(); nudge(0, ""); }
+  };
+  k.onpointerdown = (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault(); k.setPointerCapture(e.pointerId); k.classList.add("grab");
+    let y0 = e.clientY;
+    k.onpointermove = (m) => { const dy = y0 - m.clientY; if (Math.abs(dy) >= 16) { y0 = m.clientY; nudge(dy > 0 ? 1 : -1); } };
+    k.onpointerup = k.onpointercancel = () => { k.onpointermove = null; k.classList.remove("grab"); };
+  };
+}
+
 function buildUnits() {
   const box = $("#units"); box.innerHTML = ""; ST.units = {};
   for (const s of ordered(ST.board.seats)) {
@@ -232,18 +344,21 @@ function buildUnits() {
         <div class="ear"><i class="screw" style="--r:${(s.seat.length * 37) % 180}deg"></i><i class="screw" style="--r:${(s.seat.length * 71) % 180}deg"></i></div>
         <div class="ident" title="Double-click to fold or unfold"><div class="name">${esc(s.title)}</div><div class="room">${esc(s.room)}${s.optional ? " · optional" : ""}</div><button class="mini mmFold" data-k="fold"></button></div>
         <div class="lampcol"><i class="lamp"></i><span class="state"></span></div>
-        <div class="vfd screen" title="Open this seat"><div class="l1"><span class="occ"></span><span class="clk dimv"></span></div><div class="l2"></div><div class="l3"></div></div>
+        <div class="vfd screen" title="Open this seat"><div class="l1"><span class="occ"></span><span class="why"></span><span class="clk dimv"></span></div><div class="l2"></div><div class="l3"></div></div>
         <div class="meter" title="Activity: tool calls in the last half minute">${"<i></i>".repeat(12)}</div>
-        <div class="keys"><button class="key" data-k="seat" title="Choose who sits here">SEAT</button><button class="key toggle" data-k="hold" title="Hold this seat: stop its agent and start nothing new until released">HOLD</button><button class="key toggle sign" data-k="sign">SIGN OFF</button><button class="key toggle" data-k="open" title="Open this seat's workstation">OPEN</button></div>
+        <div class="knob" data-k="effort" tabindex="0" role="slider" aria-label="Effort"><div class="cap"><i></i></div><span class="kv"></span><span class="kl">EFFORT</span></div>
+        <div class="keys"><button class="key" data-k="seat" title="Choose who sits here"><i class="led"></i>SEAT</button><button class="key toggle" data-k="hold" title="Hold this seat: stop its agent and start nothing new until released"><i class="led"></i>HOLD</button><button class="key toggle sign" data-k="sign"><i class="led"></i>SIGN OFF</button><button class="key toggle" data-k="open" title="Open this seat's workstation"><i class="led"></i>OPEN</button></div>
         <div class="ear"><i class="screw" style="--r:${(s.seat.length * 53) % 180}deg"></i><i class="screw" style="--r:${(s.seat.length * 19) % 180}deg"></i></div>
       </div>
-      <div class="bench hidden"><div class="tabsB">${TABS.map((t) => `<button data-tab="${t}">${t === "bench" ? BENCH_NAME[VIEW[s.seat]] : t}</button>`).join("")}<span class="purpose"></span></div><div class="benchBody"></div></div>
+      <div class="bench shut" inert><div class="benchIn"><div class="tabsB">${TABS.map((t) => `<button data-tab="${t}">${t === "bench" ? BENCH_NAME[VIEW[s.seat]] : t}</button>`).join("")}<span class="purpose"></span></div><div class="benchBody"></div></div></div>
     </article>`);
     const q = (sel) => u.querySelector(sel);
     q('[data-k="seat"]').onclick = () => openSeatPicker(s.seat);
+    effortKnob(q(".knob"), s.seat);
     q('[data-k="hold"]').onclick = () => { const cur = seatOf(s.seat); call("seat_hold", { seat: s.seat, paused: !cur.paused }); };
     q('[data-k="sign"]').onclick = async () => { const cur = seatOf(s.seat), r = await call("seat_signoff", { seat: s.seat, on_: !cur.signoff }); if (r && r.note) toast(r.note, true); };
-    const toggle = () => { ST.open = ST.open === s.seat ? null : s.seat; store.set("open", ST.open || ""); renderUnits(); if (ST.open) u.scrollIntoView({ block: "nearest", behavior: "smooth" }); };
+    // the bench slides out of the unit (rack.css): scroll it into view once it has opened
+    const toggle = () => { ST.open = ST.open === s.seat ? null : s.seat; store.set("open", ST.open || ""); renderUnits(); if (ST.open) setTimeout(() => u.scrollIntoView({ block: "nearest", behavior: "smooth" }), 440); };
     q('[data-k="open"]').onclick = toggle; q(".screen").onclick = toggle;
     u.querySelectorAll(".tabsB button").forEach((b) => b.onclick = () => { ST.tab[s.seat] = b.dataset.tab; delete ST.benchSig[s.seat]; renderUnits(); });
     q(".benchBody").addEventListener("focusout", () => setTimeout(() => { if (!focusedIn(u)) renderBench(s.seat); }, 0));
@@ -259,17 +374,34 @@ function renderUnits() {
   for (const s of ST.board.seats) {
     const u = ST.units[s.seat], q = (sel) => u.querySelector(sel), [state, lamp, label] = seatState(s), t = taskOf(s.task), a = seatAct(s.seat);
     u.dataset.state = state; u.classList.toggle("vacant", !s.occupant); u.classList.toggle("open", ST.open === s.seat);
-    q(".lamp").className = "lamp " + lamp; q(".state").textContent = ({ handed: "HANDED IN", queued: "WAITING", needs: "NEEDS YOU", yours: "YOUR MOVE" })[state] || label; q(".state").title = label; q(".lampcol").setAttribute("aria-label", label); q(".lampcol").title = label;
+    // the dial says the state in a word or two; whatever more the label says goes on the screen's top line
+    const word = dialWord(state, label), st = q(".state");
+    q(".lamp").className = "lamp " + lamp; q(".lampcol").setAttribute("aria-label", label); q(".lampcol").title = label;
+    if (st.dataset.w !== word) { st.dataset.w = word; st.innerHTML = word.split(" ").map(esc).join("<br>"); fitDial(st); }
+    const why = PLAIN.has(label) ? "" : label;
+    q(".why").textContent = why; q(".why").title = why;
     q(".occ").innerHTML = s.occupant ? esc((s.label || s.occupant.kind).toUpperCase()) : `<span class="dimv">— VACANT —</span>`;
     q(".l2").innerHTML = t ? `<span class="amb">${esc(t.id)}</span> ${esc(t.title)}${s.open_tasks > 1 ? ` <span class="dimv">+${s.open_tasks - 1}</span>` : ""}` : `<span class="dimv">no open tasks</span>`;
-    q(".l3").textContent = s.occupant ? (a.last || "·") : s.purpose;
+    // bottom line: what the seat last did (its first sentence), else what the seat is for in a few words;
+    // the whole of either is in the bench's log and on the tabs strip
+    const busy = s.occupant && a.last, l3 = busy ? a.last.split(/(?<=[.!?])\s/)[0] : s.purpose.split(/:|\. |, then /)[0];
+    if (q(".l3").textContent !== l3) q(".l3").textContent = l3;
+    q(".l3").title = busy ? a.last : s.purpose; q(".l3").classList.toggle("idle", !busy);
+    drawKnob(q(".knob"), s);
+    q('[data-k="seat"]').classList.toggle("lit", !!s.occupant);
     q('[data-k="hold"]').classList.toggle("on", s.paused); q('[data-k="hold"]').disabled = !s.occupant || s.occupant.kind !== "agent";
     const sk = q('[data-k="sign"]'), mine = s.occupant && s.occupant.kind === "human";
     sk.classList.toggle("on", !!s.signoff); sk.disabled = mine;
     sk.title = mine ? "You sit here: your own work needs no sign-off" : SIGN_TIP[s.seat] || SIGN_TIP.take;
     q('[data-k="open"]').classList.toggle("on", ST.open === s.seat);
     const bt = q('.tabsB [data-tab="bench"]'); if (bt.textContent !== benchName(s)) bt.textContent = benchName(s);
-    q(".bench").classList.toggle("hidden", ST.open !== s.seat);
+    const bench = q(".bench"), shut = ST.open !== s.seat;
+    if (bench.classList.contains("shut") !== shut) {
+      if (shut) holdRack();
+      bench.classList.remove("opened"); bench.classList.toggle("shut", shut); bench.inert = shut; clearTimeout(bench.slid);
+      // once it has slid fully open (rack.css, .42s; at once with motion off), let its pop-overs out of the clip
+      if (!shut) bench.slid = setTimeout(() => { if (!bench.classList.contains("shut")) bench.classList.add("opened"); }, parseFloat(getComputedStyle(bench).transitionDuration) ? 440 : 0);
+    }
     const fold = L.fold.includes(s.seat), f = q('[data-k="fold"]');
     u.classList.toggle("folded", fold); f.textContent = fold ? "+" : "–"; f.title = fold ? "Unfold this unit" : "Fold this unit to a 1U strip";
     u.classList.toggle("hidden", L.hideEmpty && s.optional && !s.occupant && !s.open_tasks && !t && ST.open !== s.seat);
@@ -277,6 +409,26 @@ function renderUnits() {
   }
   tickUnits();
   window.TTLinks?.draw(ST.board);  // the task cables follow the units (crewlinks.js)
+  // the EFFORT knobs need each app's levels: look them up once (crew_detect is cached and quick)
+  if (!ST.agents && !ST.agentsAsked && ST.board.seats.some((s) => s.occupant && s.occupant.kind === "agent")) {
+    ST.agentsAsked = true;
+    agentApps().then(() => ST.board && ST.board.seats.forEach((s) => ST.units[s.seat] && drawKnob(ST.units[s.seat].querySelector(".knob"), s)));
+  }
+}
+// A bench closing shrinks the rack. Scrolled to the bottom, the browser would pull the whole rack down with it while
+// the bench folds (the face slides away from under the pointer). So the rack keeps its height until the bench has
+// shut, then lets the spare room go.
+let rackHeld = null;
+function holdRack() {
+  const box = $("#units"); if (!box || !parseFloat(getComputedStyle(box.querySelector(".bench") || box).transitionDuration)) return;
+  clearTimeout(rackHeld);
+  box.style.transition = "none"; box.style.minHeight = box.offsetHeight + "px";
+  rackHeld = setTimeout(() => {
+    const held = box.style.minHeight; box.style.minHeight = ""; const fit = box.offsetHeight;
+    box.style.minHeight = held; void box.offsetHeight;
+    box.style.transition = "min-height .32s cubic-bezier(.4, 0, .2, 1)"; box.style.minHeight = fit + "px";
+    rackHeld = setTimeout(() => { box.style.transition = box.style.minHeight = ""; rackHeld = null; }, 340);
+  }, 440);
 }
 // a task cable clicked: open the seat doing that task, on its tasks
 if (window.TTLinks) window.TTLinks.onOpen = (seat) => {
@@ -424,7 +576,7 @@ api("ui_prefs", {}, null).then((p) => { setLayout(p && p.studio_layout); relayou
 const TAG = { queued: "", working: "stale", submitted: "cy", needs_you: "bad", done: "ok", failed: "bad", cancelled: "" };
 function takeSig(t) { return t.state === "open" ? "open:" + Date.now() : `${t.id}:${t.state}:${t.submitted || 0}:${t.returned || 0}`; }
 function abKeys(take) {
-  return `<span class="ab" title="Render and play. Switching between A and B keeps your place."><button class="key" data-ab="session">A · SESSION</button><button class="key" data-ab="${esc(take)}">B · ${esc(take.toUpperCase())}</button></span>`;
+  return `<span class="ab" title="Hear the song as it is, then with this take's work in it. Switching keeps your place."><button class="key" data-ab="session" title="The song as it is now, without this take">▶ THE SONG NOW</button><button class="key" data-ab="${esc(take)}" title="The song with ${esc(take)}'s changes in it">▶ WITH ${esc(take.toUpperCase())}</button></span>`;
 }
 function wireAb(root) {
   root.querySelectorAll("[data-ab]").forEach((b) => { b.onclick = () => audition(b.dataset.ab === "session" ? null : b.dataset.ab); });
@@ -449,7 +601,7 @@ function renderBench(seat, force = false) {
   const sig = JSON.stringify(tab === "bench" ? [tab, B.version, B.err, [...B.hidden], body.clientWidth, (ST.crew && ST.crew.active && ST.crew.active[seat] || {}).take, s.seat === "producer" ? ST.board.tasks.map((t) => [t.id, t.state, t.depends]) : 0,
       reviewing(s) ? [ST.board.tasks.filter((t) => t.seat === "review").map((t) => [t.id, t.state, t.waiting_for]), ST.board.seats.map((x) => !!x.occupant), ST.board.takes.map((k) => k.id + k.state)] : s.seat === "review" ? [s.occupant, (ST.board.reports || []).length] : 0]
     : tab === "tasks" ? [tab, tasks, s.occupant, takes.map((t) => [t.id, t.state, t.reason])] : tab === "takes" ? [tab, takes, Object.fromEntries(takes.map((t) => [t.id, ST.diffs[t.id]]))]
-    : tab === "log" ? [tab, a.lines.length] : [tab, s.occupant, s.mode, s.notes, s.paused]);
+    : tab === "log" ? [tab, a.lines.length] : [tab, s.occupant, s.mode, s.notes, s.paused, s.signoff, s.options]);
   if (!force && ST.benchSig[seat] === sig) return;
   if (!force && (focusedIn(body) || B.hold)) return;  // don't pull a form out from under someone typing (focusout redraws) or a fader out of a hand
   ST.benchSig[seat] = sig;
@@ -788,28 +940,72 @@ function benchTakes(body, s, takes) {
   });
 }
 function logHtml(lines) { return lines.map((l) => `<div class="${l.cls}" data-seat="${esc(l.seat || "")}"><time>${clock(l.at)}</time>${l.html}</div>`).join(""); }
+// newest at the top; someone scrolled down reading stays on the same lines as new ones arrive above
 function benchLog(body, a) {
-  const stick = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-  body.innerHTML = a.lines.length ? `<div class="log">${logHtml(a.lines.slice(-200))}</div>` : `<div class="empty">Nothing has happened in this seat yet.</div>`;
-  if (stick) body.scrollTop = body.scrollHeight;
+  const top = body.scrollTop, was = body.scrollHeight;
+  body.innerHTML = a.lines.length ? `<div class="log">${logHtml(a.lines.slice(-200).reverse())}</div>` : `<div class="empty">Nothing has happened in this seat yet.</div>`;
+  body.scrollTop = top > 40 ? top + body.scrollHeight - was : 0;
 }
+// Setup: the seat's settings as a row of modules, each a legend, a switch and a readout of what the setting does.
+// Switches apply at once (like the keys on the unit's face); the notes are stored with their own key.
+const SU_WORKS = { propose: "Works in takes: nothing is heard until you or the Producer accept it.", direct: "Edits the session itself: changes are live at once." };
 function benchSetup(body, s) {
-  body.innerHTML = `<div class="formgrid">
-      <span>In the seat</span><div class="row"><b>${s.occupant ? esc(s.label || s.occupant.kind) : "nobody"}</b>${s.occupant && s.occupant.audition_model ? `<span class="tag" title="Audition-only runs use this model; planning and the final listen use the one in the seat">auditions on ${esc(s.occupant.audition_model)}</span>` : ""}<button class="key" data-do="pick">CHANGE…</button></div>
-      <span>Works</span><select data-f="mode"><option value="propose" ${s.mode === "propose" ? "selected" : ""}>in takes: nothing is heard until you or the Producer accept it</option><option value="direct" ${s.mode === "direct" ? "selected" : ""}>directly on the session: changes are live at once</option></select>
-      <span>${s.seat === "producer" ? "Co-Producer" : "Sign off"}</span><select data-f="signoff"><option value="">off: ${s.seat === "producer" ? "its decisions and plans go ahead" : s.seat === "review" ? "its fix tasks go ahead" : "its hand-ins go straight to the Producer"}</option><option value="1" ${s.signoff ? "selected" : ""}>on: ${esc(SIGN_TIP[s.seat] ? SIGN_TIP[s.seat].replace(/^[^:]*: /, "") : SIGN_TIP.take.replace(/^[^:]*: /, ""))}</option></select>
-      ${s.owns.length && !["producer", "review"].includes(s.seat) ? `<span>Versions</span><select data-f="options" title="How many takes the seat's agent hands in for each task, for you to choose from"><option value="0">one take per task</option><option value="2" ${s.options === 2 ? "selected" : ""}>two versions per task: you choose</option><option value="3" ${s.options === 3 ? "selected" : ""}>three versions per task: you choose</option></select>` : ""}
-      <span>Standing notes</span><textarea data-f="notes" rows="3" placeholder="Instructions this seat always gets, e.g. “no brass”, “keep it under 8 voices”">${esc(s.notes || "")}</textarea>
-      <span>Department</span><div class="muted">${s.owns.length ? esc(s.owns.join(", ")) : "changes nothing: listens and reports"} · suggested model tier: ${esc(s.tier)}</div>
-    </div><div class="row end" style="margin-top:10px"><button class="key go" data-do="save">SAVE</button></div>`;
-  body.querySelector('[data-do="pick"]').onclick = () => openSeatPicker(s.seat);
-  body.querySelector('[data-do="save"]').onclick = async () => {
-    const opt = body.querySelector('[data-f="options"]');
-    const r = await call("seat_assign", { seat: s.seat, mode: body.querySelector('[data-f="mode"]').value, notes: body.querySelector('[data-f="notes"]').value,
-      signoff: !!body.querySelector('[data-f="signoff"]').value, ...(opt ? { options: +opt.value } : {}) });
-    if (r && r.note) toast(r.note, true);
-    toast("Saved. It applies from the seat's next run.", true); renderBench(s.seat, true);
+  const seat = s.seat, isProd = seat === "producer", o = s.occupant, mine = o && o.kind === "human";
+  const versions = s.owns.length && !["producer", "review"].includes(seat);
+  const P = { mode: s.mode, sign: !!s.signoff, options: s.options || 0 };
+  let saved = s.notes || "";
+  const signOff = isProd ? "Its decisions and plans go ahead without you." : seat === "review" ? "Its fix tasks go ahead without you." : "Its hand-ins go straight to the Producer.";
+  const signOn = (SIGN_TIP[seat] || SIGN_TIP.take).replace(/^[^:]*: /, "").replace(/^./, (c) => c.toUpperCase()) + ".";
+  const who = !o ? `<span class="dimv">— VACANT —</span>` : esc((s.label || o.kind).toUpperCase());
+  const facts = !o ? "Nobody sits here" : o.kind === "agent" ? [`effort ${o.effort || "auto"}`, o.audition_model ? `auditions on ${o.audition_model}` : ""].filter(Boolean).join(" · ")
+    : o.kind === "human" ? "You do this seat's work and hand it in" : "An outside app sits in over MCP";
+  const mod = (k, legend, inner, cls = "") => `<section class="su ${cls}" data-m="${k}"><h6><i class="led"></i>${legend}</h6>${inner}</section>`;
+  const seg = (k, opts) => `<div class="seg">${opts.map(([v, t, tip]) => `<button data-${k}="${v}"${tip ? ` title="${esc(tip)}"` : ""}>${t}</button>`).join("")}</div>`;
+  body.innerHTML = `<div class="suDeck">
+    ${mod("who", "In the seat", `<div class="vfd suScreen"><div class="suWho">${who}</div><div class="dimv">${esc(facts)}</div></div>
+      <div class="suFoot"><span class="tag">tier ${esc(s.tier)}</span><button class="key" data-do="pick">CHANGE…</button></div>`, "wide")}
+    ${mod("mode", "Works", `${seg("mode", [["propose", "IN TAKES"], ["direct", "ON THE SESSION"]])}<p class="suRead"></p>`)}
+    ${mod("sign", isProd ? "Co-Producer" : "Sign-off", `${seg("sign", [["", isProd ? "OFF" : "STRAIGHT ON"], ["1", isProd ? "MY OK FIRST" : "STOPS AT ME"]])}<p class="suRead"></p>`, mine ? "off" : "")}
+    ${versions ? mod("options", "Versions", `${seg("opt", [["0", "ONE", "One take per task"], ["2", "TWO", "Two versions of each task for you to choose from"], ["3", "THREE", "Three versions of each task for you to choose from"]])}<p class="suRead"></p>`) : ""}
+    ${mod("dept", "Department", `<div class="suOwns">${s.owns.length ? s.owns.map((x) => `<span class="tag cy">${esc(x)}</span>`).join("") : `<span class="tag">changes nothing</span>`}</div>
+      <p class="suRead">${s.owns.length ? "What this seat may change in a take." : "It listens and reports."}</p>`)}
+    ${mod("notes", "Standing notes", `<textarea data-f="notes" rows="3" spellcheck="true" placeholder="Instructions this seat always gets, e.g. “no brass”, “keep it under 8 voices”">${esc(s.notes || "")}</textarea>
+      <div class="suFoot"><span class="suHint">Every run in this seat reads these. Ctrl+Enter stores them.</span><button class="key" data-do="revert">REVERT</button><button class="key go" data-do="notes">STORE</button></div>`, "full")}
+  </div>`;
+  const q = (sel) => body.querySelector(sel), ta = q('[data-f="notes"]');
+  // the readouts and lit switches follow P, so a click shows at once (the bench doesn't redraw under focus)
+  const paint = () => {
+    body.querySelectorAll("[data-mode]").forEach((b) => b.classList.toggle("on", b.dataset.mode === P.mode));
+    body.querySelectorAll("[data-sign]").forEach((b) => b.classList.toggle("on", !!b.dataset.sign === P.sign));
+    body.querySelectorAll("[data-opt]").forEach((b) => b.classList.toggle("on", +b.dataset.opt === P.options));
+    q('[data-m="mode"] .suRead').textContent = SU_WORKS[P.mode] || "";
+    q('[data-m="mode"]').classList.toggle("lit", P.mode === "direct");
+    q('[data-m="sign"] .suRead').textContent = mine ? "You sit here: your own work needs no sign-off."
+      : P.sign && versions && P.mode === "direct" ? "Nothing to stop while it works on the session: set Works to IN TAKES." : P.sign ? signOn : signOff;
+    q('[data-m="sign"]').classList.toggle("lit", P.sign && !mine);
+    if (versions) { q('[data-m="options"] .suRead').textContent = P.options ? `${P.options === 2 ? "Two" : "Three"} versions of each task: you choose.` : "One take per task."; q('[data-m="options"]').classList.toggle("lit", !!P.options); }
+    const dirty = ta.value !== saved;
+    q('[data-do="notes"]').disabled = q('[data-do="revert"]').disabled = !dirty; q('[data-m="notes"]').classList.toggle("lit", dirty);
   };
+  const set = async (args, undo, said) => {
+    paint();
+    try { const r = await call(args.on_ !== undefined ? "seat_signoff" : "seat_assign", { seat, ...args }); toast(r && r.note || said, true); }
+    catch { undo(); paint(); }
+  };
+  body.querySelectorAll("[data-mode]").forEach((b) => b.onclick = () => { const was = P.mode; if (was === b.dataset.mode) return; P.mode = b.dataset.mode;
+    set({ mode: P.mode }, () => { P.mode = was; }, `${s.title}: ${P.mode === "direct" ? "works on the session" : "works in takes"} from its next run.`); });
+  body.querySelectorAll("[data-sign]").forEach((b) => b.onclick = () => { const v = !!b.dataset.sign; if (v === P.sign || mine) return; const was = P.mode; P.sign = v;
+    if (v && versions) P.mode = "propose";  // signoff.py: a seat signed off works in takes, so its hand-ins can stop
+    set({ on_: v }, () => { P.sign = !v; P.mode = was; }, `${s.title}: ${isProd ? "Co-Producer" : "sign-off"} ${v ? "on" : "off"}.`); });
+  body.querySelectorAll("[data-opt]").forEach((b) => b.onclick = () => { const was = P.options, v = +b.dataset.opt; if (v === was) return; P.options = v;
+    set({ options: v }, () => { P.options = was; }, `${s.title}: ${v ? `${v === 2 ? "two" : "three"} versions` : "one take"} per task from its next task.`); });
+  const store = async () => { try { await call("seat_assign", { seat, notes: ta.value }); saved = ta.value; toast(`${s.title}: notes stored. Its next run reads them.`, true); } catch { /* call toasts */ } paint(); };
+  q('[data-do="notes"]').onclick = store;
+  q('[data-do="revert"]').onclick = () => { ta.value = saved; paint(); };
+  ta.oninput = paint;
+  ta.onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!q('[data-do="notes"]').disabled) store(); } };
+  q('[data-do="pick"]').onclick = () => openSeatPicker(seat);
+  paint();
 }
 
 // ---------------------------------------------------------------- who sits in a seat
@@ -849,7 +1045,7 @@ async function openSeatPicker(seat, opts = {}) {
   const usd = (v) => v == null ? "?" : v === 0 ? "0" : v < 1 ? `${+v.toFixed(3)}` : `${+v.toFixed(2)}`;
   const priceCell = (m) => { const p = m.info && m.info.price;
     if (m.cost === "free" || (p && !p.in && !p.out)) return `<em class="tag ok">free</em>`;
-    return p ? `<span class="spNum">$${usd(p.in)} · $${usd(p.out)}</span>` : `<em class="tag" title="${m.cost === "paid" && P.rid === "codex" ? "Billed to your ChatGPT plan" : "No price reported"}">${esc(m.cost || "—")}</em>`; };
+    return p ? `<span class="spNum">$${usd(p.in)} · $${usd(p.out)}</span>` : `<em class="tag" title="${m.cost === "paid" && P.rid === "codex" ? "Billed to your ChatGPT plan" : m.cost === "paid" && P.rid === "agy" ? "Uses your Antigravity plan quota" : "No price reported"}">${esc(m.cost || "—")}</em>`; };
   function infoStrip(r, m) {
     if (!m) return "";
     const i = m.info || {}, p = i.price, bits = [];
@@ -858,6 +1054,7 @@ async function openSeatPicker(seat, opts = {}) {
     if (p && (p.in || p.out)) bits.push(`<span><b>$${usd(p.in)}</b> in · <b>$${usd(p.out)}</b> out${p.cache != null ? ` · $${usd(p.cache)} cached` : ""} per 1M tokens${r.id === "claude" ? " (API rates; a Claude plan sign-in uses plan usage)" : ""}</span>`);
     else if (m.cost === "free" || (p && !p.in && !p.out)) bits.push(`<span><b>Free</b></span>`);
     else if (r.id === "codex") bits.push(`<span>Billed to your ChatGPT plan</span>`);
+    else if (r.id === "agy") bits.push(`<span>Uses your Antigravity plan quota</span>`);
     if (m.efforts && m.efforts.length) bits.push(`<span>Effort: ${m.efforts.map(esc).join(", ")}</span>`);
     if (i.released) bits.push(`<span>Released ${esc(i.released)}</span>`);
     return `<div class="spInfo"><div class="spInfoTop"><b>${esc(i.name || m.label || m.id)}</b>
@@ -871,7 +1068,7 @@ async function openSeatPicker(seat, opts = {}) {
     const ag = el.querySelector(".spAgent"); ag.classList.toggle("hidden", P.who !== "agent");
     if (P.who === "agent") {
       el.querySelector(".spApps").innerHTML = `<h6>Apps</h6>` + (runners.length ? runners.map((r) => `<button data-rid="${esc(r.id)}" class="${r.id === P.rid ? "on" : ""} ${r.available ? "" : "dim"}">
-          <span>${esc(r.name)}</span>${status_(r)}</button>`).join("") : `<p class="muted">No agent apps found. Install Claude Code, Codex or Kilo, then RESCAN APPS.</p>`);
+          <span>${esc(r.name)}</span>${status_(r)}</button>`).join("") : `<p class="muted">No agent apps found. Install Claude Code, Codex, Kilo or Antigravity, then RESCAN APPS.</p>`);
       const r = runner(), ms = (r && r.available ? r.models : []).slice();
       // the model sitting here now, even when the app no longer lists it
       if (r && r.available && cur.kind === "agent" && cur.runner === r.id && !ms.some((m) => m.id === cur.model)) ms.unshift({ id: cur.model, label: `${cur.model} (seated now)` });
@@ -1048,10 +1245,10 @@ function renderNeeds() {
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
   const N = window.TTNeeds;
-  box.innerHTML = items.length ? items.map((a) => { const k = N ? N.kindOf(a) : "answer"; return `<button class="nyLine" data-id="${esc(a.id)}" title="Open it on the Needs You sheet">
+  box.innerHTML = items.length ? items.map((a) => { const k = N ? N.kindOf(a) : "answer"; return `<button class="nyLine k-${k}" data-id="${esc(a.id)}" title="Open it on the Needs You sheet">
       <span class="nyVerb k-${k}">${N ? N.VERB[k] : "ANSWER"}</span><b>${esc(a.title)}</b>
       <span class="nyFrom">${esc(a.from === "you" ? (a.kind === "blocker" ? "Floor" : "Studio") : title(a.from))} · ${esc(a.id)}</span></button>`; }).join("")
-    : `<div class="empty">Nothing is waiting on you.</div>`;
+    : `<div class="empty nyClear"><i class="lamp green"></i><span>ALL CLEAR</span><small>Nothing is waiting on you.</small></div>`;
   box.querySelectorAll(".nyLine").forEach((b) => b.onclick = () => N && N.open(b.dataset.id));
 }
 
@@ -1088,7 +1285,12 @@ $("#tbForm").onsubmit = async (e) => {
     await api("message_send", { to, text });
     $("#tbText").value = "";
     // An idle agent only reads its messages when it is started on something: WAKE gives it that something.
-    if (ST.wake && s && s.occupant && s.occupant.kind === "agent" && !s.open_tasks) {
+    // A seat whose open task cannot start now (needs you, or waits on an OK, another seat or a retry) gets one too.
+    const running = s && ST.crew && ST.crew.active && ST.crew.active[s.seat], t = s && taskOf(s.task);
+    const stuck = t && (t.state === "needs_you" || (t.state === "queued" && (t.held || t.waiting_for || t.not_before)));
+    const agent = ST.wake && s && s.occupant && s.occupant.kind === "agent";
+    if (agent && running) toast(`The ${s.title} is working: it reads your message on its next start.`, true);
+    else if (agent && (!s.open_tasks || stuck)) {
       await api("task_add", { seat: to, title: "Answer the user on talkback", detail: `The user said to you on talkback:\n\n${text}\n\nDo what it asks if it is in your department, or answer with message_send("you", ...). Then set this task done with a one-line result.` });
       if (!(ST.crew && (ST.crew.running || ST.crew.elsewhere))) toast(`The ${s.title} will answer when the crew is running (RUN).`, true);
     } else if (s && !s.occupant) toast(`Nobody is in the ${s.title} seat: the message waits for whoever sits there.`, true);

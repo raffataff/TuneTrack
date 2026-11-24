@@ -542,54 +542,85 @@ def project_set(project: str | None = None, name: str | None = None, tempo: floa
                 target_lufs: float | None = None, ceiling_db: float | None = None,
                 master_volume_db: float | None = None, tempo_changes: list | None = None,
                 eq_engine: str | None = None) -> dict:
+    bad: list[str] = []
+
+    def field(name, fn):
+        """Apply one setting; a bad value is named and the rest still checked (nothing is saved on any error)."""
+        try:
+            fn()
+        except (ValueError, KeyError, TypeError, IndexError) as e:
+            bad.append(f"{name}: {e}")
+
+    def set_loop(p):
+        if loop in ("off", "", False):
+            p.loop = None
+            return
+        if isinstance(loop, dict):
+            a, b = loop["start"], loop["end"]
+        else:
+            parts = re.split(r"\s*(?:-|to|\.\.)\s*", str(loop).strip(), maxsplit=1)
+            if len(parts) != 2 or not all(parts):
+                raise ValueError(f"{loop!r} is one position; a loop is a range from its first bar to the bar after "
+                                 f"its last, e.g. \"1:1-25:1\" for 24 bars")
+            a, b = parts
+        p.loop = {"start": p.pos(a), "end": p.pos(b)}
+        if p.loop["end"] <= p.loop["start"]:
+            raise ValueError("loop end must be after its start")
+
+    def set_length(p):
+        if length in ("auto", 0, ""):
+            p.length = None
+        elif isinstance(length, str) and ":" in length:
+            p.length = p.pos(length)  # an end position, e.g. "33:1"
+        else:
+            p.length = p.dur(length)
+
+    def set_brief(p):
+        b = dict(brief)
+        if "style" in b:  # a genre style sheet (skill/styles): a known name, or none
+            from . import styles
+            st = styles.check(b.pop("style"))
+            if st:
+                p.brief["style"] = st
+            else:
+                p.brief.pop("style", None)
+        for k in [k for k, v in b.items() if v is None or v == ""]:  # an emptied field clears what was set
+            b.pop(k)
+            p.brief.pop(k, None)
+        p.brief.update(b)
+
+    def put(p, attr, value):
+        setattr(p, attr, value)
+
     with _Edit(project) as p:
         if eq_engine is not None:
-            p.eq_engine = eqmap.engine_name(eq_engine)
+            field("eq_engine", lambda: put(p, "eq_engine", eqmap.engine_name(eq_engine)))
         if name:
             p.name = name
         if tempo:
-            p.tempo = float(tempo)
+            field("tempo", lambda: put(p, "tempo", float(tempo)))
         if key:
-            p.key = theory.Key(key).text
+            field("key", lambda: put(p, "key", theory.Key(key).text))
         if time_sig:
-            p.time_sig = [int(x) for x in str(time_sig).split("/")]
+            field("time_sig", lambda: put(p, "time_sig", [int(x) for x in str(time_sig).split("/")]))
         if brief:
-            if "style" in brief:  # a genre style sheet (skill/styles): a known name, or none
-                from . import styles
-                brief = dict(brief)
-                st = styles.check(brief.pop("style"))
-                if st:
-                    p.brief["style"] = st
-                else:
-                    p.brief.pop("style", None)
-            p.brief.update(brief)
+            field("brief", lambda: set_brief(p))
         if loop is not None:
-            if loop in ("off", "", False):
-                p.loop = None
-            elif isinstance(loop, dict):
-                p.loop = {"start": p.pos(loop["start"]), "end": p.pos(loop["end"])}
-            else:
-                a, b = re.split(r"\s*(?:-|to|\.\.)\s*", str(loop), maxsplit=1)
-                p.loop = {"start": p.pos(a), "end": p.pos(b)}
-            if p.loop and p.loop["end"] <= p.loop["start"]:
-                raise ValueError("loop end must be after its start")
+            field("loop", lambda: set_loop(p))
         if length is not None:
-            if length in ("auto", 0, ""):
-                p.length = None
-            elif isinstance(length, str) and ":" in length:
-                p.length = p.pos(length)  # an end position, e.g. "33:1"
-            else:
-                p.length = p.dur(length)
+            field("length", lambda: set_length(p))
         if tail is not None:
-            p.tail = float(tail)
+            field("tail", lambda: put(p, "tail", float(tail)))
         if target_lufs is not None:
-            p.master["target_lufs"] = float(target_lufs)
+            field("target_lufs", lambda: p.master.__setitem__("target_lufs", float(target_lufs)))
         if ceiling_db is not None:
-            p.master["ceiling_db"] = float(ceiling_db)
+            field("ceiling_db", lambda: p.master.__setitem__("ceiling_db", float(ceiling_db)))
         if master_volume_db is not None:
-            p.master["volume_db"] = float(master_volume_db)
+            field("master_volume_db", lambda: p.master.__setitem__("volume_db", float(master_volume_db)))
         if tempo_changes is not None:
-            p.tempo_changes = [[p.pos(a), float(b)] for a, b in tempo_changes]
+            field("tempo_changes", lambda: put(p, "tempo_changes", [[p.pos(a), float(b)] for a, b in tempo_changes]))
+        if bad:
+            raise ValueError("Nothing was changed. " + "; ".join(bad))
     info = project_info(project, clips=False)
     return {**info, **_eq_engine_notes(info["eq_engine"])} if eq_engine is not None else info
 
@@ -606,13 +637,23 @@ def markers(project: str | None = None, add: list | None = None, remove: list | 
     return {"markers": [{"at": p.fmt_pos(m["at"]), "name": m["name"]} for m in sorted(p.markers, key=lambda m: m["at"])]}
 
 
-def _span(p: Project, at=None, end=None, section: str | None = None) -> tuple[float, float | None]:
-    """A range from a marker section and/or at/end positions (at/end override the section's edges)."""
+def _end_bar(p: Project, end) -> float:
+    """A reading range's end: a bare bar number ("24"; a number is beats) runs through the end of that bar, the
+    way "bars 1-24" is meant; "24:1" stays exclusive."""
+    if isinstance(end, str) and re.fullmatch(r"\s*(?:bar\s*)?\d+\s*", end.lower()):
+        return p.pos(end) + p.beats_per_bar
+    return p.pos(end)
+
+
+def _span(p: Project, at=None, end=None, section: str | None = None,
+          through: bool = False) -> tuple[float, float | None]:
+    """A range from a marker section and/or at/end positions (at/end override the section's edges).
+    through: a bare bar number as end includes that bar (reading tools: score, listen)."""
     s, e = harm.section_range(p, section) if section else (0.0, None)
     if at is not None:
         s = p.pos(at)
     if end is not None:
-        e = p.pos(end)
+        e = _end_bar(p, end) if through else p.pos(end)
     if e is not None and e <= s + 1e-9:
         raise ValueError(f"the range ends ({p.fmt_pos(e)}) before it starts ({p.fmt_pos(s)})")
     return s, e
@@ -679,20 +720,38 @@ def redo(project: str | None = None) -> dict:
 
 # ---- tracks ------------------------------------------------------------------------------------------------------
 
+def _pan_value(v, notes: list | None = None) -> float:
+    """A pan on the -1 (left) .. 1 (right) scale. 1 < |v| <= 100 is read as percent (noted); beyond that raises."""
+    x = float(v)
+    if abs(x) <= 1.0:
+        return x
+    if abs(x) <= 100.0:
+        if notes is not None:
+            notes.append(f"pan {x:g} read as {x / 100:g} (pan is -1 left .. 1 right)")
+        return x / 100.0
+    raise ValueError(f"pan {x:g} is out of range: pan is -1 (left) .. 1 (right)")
+
+
 def track_add(name: str, instrument=None, kind: str = "midi", project: str | None = None, volume_db: float = 0.0,
               pan: float = 0.0, role: str | None = None, layer: str | None = None, output: str = "master",
               color: str | None = None, fx: list | None = None) -> dict:
+    notes: list[str] = []
+    pan = _pan_value(pan, notes)
     with _Edit(project) as p:
         if any(t.name.lower() == name.lower() for t in p.tracks):
             raise ValueError(f"A track named {name!r} already exists")
         t = Track(id=p.new_id("t"), name=name, kind=kind, instrument=parse_device(instrument) if kind == "midi" else None,
-                  volume_db=float(volume_db), pan=float(pan), role=role, layer=layer, color=color)
+                  volume_db=float(volume_db), pan=pan, role=role, layer=layer, color=color)
+        _check_builtin(t.instrument)
         if output != "master":
             t.output = p.track(output).id
         for f in fx or []:
-            t.fx.append(parse_device(f, instrument=False))
+            d = parse_device(f, instrument=False)
+            _check_builtin(d)
+            t.fx.append(d)
         p.tracks.append(t)
-    return {"track": t.id, "name": t.name, "instrument": t.instrument.label() if t.instrument else None}
+    return {"track": t.id, "name": t.name, "instrument": t.instrument.label() if t.instrument else None,
+            **({"notes": notes} if notes else {})}
 
 
 def track_update(track: str, project: str | None = None, name: str | None = None, instrument=None,
@@ -704,6 +763,9 @@ def track_update(track: str, project: str | None = None, name: str | None = None
     input (audio tracks): the interface input it records, from 1 (2, or [1, 2] for a stereo pair; 0 = none).
     volume_db / pan on a track whose fader is automated moves its whole curve by the change (answer: `moved`)."""
     moved = {}
+    notes: list[str] = []
+    if pan is not None:
+        pan = _pan_value(pan, notes)
     with _Edit(project) as p:
         t = p.track(track)
         # An automated fader plays its curve, not its level: a new level moves the curve by the difference, so
@@ -722,9 +784,11 @@ def track_update(track: str, project: str | None = None, name: str | None = None
             t.input = chans or None
         if instrument is not None:
             t.instrument = parse_device(instrument)
+            _check_builtin(t.instrument)
         if instrument_params:
             if not t.instrument:
                 raise ValueError("track has no instrument")
+            _check_builtin(t.instrument, instrument_params)
             t.instrument.params.update(instrument_params)
         for k, v in (("volume_db", volume_db), ("pan", pan), ("mute", mute), ("solo", solo), ("role", role),
                      ("layer", layer), ("color", color)):
@@ -741,7 +805,7 @@ def track_update(track: str, project: str | None = None, name: str | None = None
             t.output = to.id if to else "master"
         if sends is not None:
             t.sends = [{"to": p.track(s["to"]).id, "db": float(s.get("db", -12))} for s in sends]
-    return {"track": t.id, "name": t.name, **({"moved": moved} if moved else {})}
+    return {"track": t.id, "name": t.name, **({"moved": moved} if moved else {}), **({"notes": notes} if notes else {})}
 
 
 def track_remove(track: str, project: str | None = None) -> dict:
@@ -895,6 +959,7 @@ def fx_add(track: str, device, project: str | None = None, index: int | None = N
     """track = a track name/id or "master". device = 'builtin:reverb', 'vst3:TDR Nova', 'patch:<id>' or dict.
     sidechain = a track whose sound (pre-fader, its own instrument + inserts) feeds the effect's sidechain input."""
     dev = parse_device(device, instrument=False)
+    _check_builtin(dev)
     notes: list[str] = []
     if sidechain not in (None, "", "none"):
         _sidechain_device_check(dev)
@@ -909,6 +974,48 @@ def fx_add(track: str, device, project: str | None = None, index: int | None = N
         labels = [_fx_label(p, f) for f in chain]
     return {"track": track, "fx": labels, **({"params": dev.params} if dev.sidechain else {}),
             **({"notes": notes} if notes else {})}
+
+
+def _check_builtin(dev: Device | None, params: dict | None = None) -> dict:
+    """A built-in effect's or synth's settings checked by name and range when they're set (`params`, or the
+    device's own), so a bad one is an error now rather than a track dropped at render. Others pass through."""
+    params = dev.params if params is None and dev is not None else (params or {})
+    if dev is None or dev.type not in ("builtin", "synth"):
+        return dict(params)
+    if eqmap.is_eq(dev):
+        eqmap.settings(params)
+        return {k: float(v) for k, v in params.items()}
+    return synths.check_params(dev.type, dev.name, params)
+
+
+def mix_problems(project: str | None = None, p: Project | None = None) -> list[str]:
+    """Tracks a render would drop, found without rendering: an audible track whose instrument or effects can't be
+    built (a bad built-in setting, a missing SFZ or patch). Bus and master effects too: a bad one silences its bus."""
+    p = p or load(project)
+    playing = engine.soloed_sources(p)
+    out = []
+    for t in p.tracks:
+        if t.mute or (t.kind != "bus" and t.id not in playing):
+            continue
+        if t.kind == "midi" and not (t.instrument and any(c.notes for c in t.clips if not c.muted)):
+            continue
+        devs = [(d, False) for d in t.fx] + ([(t.instrument, True)] if t.kind == "midi" else [])
+        for d, inst in devs:
+            if d is None or d.bypass:
+                continue
+            try:
+                _check_builtin(d)
+                engine.resolve_device(d, p, inst)
+            except Exception as e:  # noqa: BLE001 - reported, not raised: the caller decides
+                out.append(f"track '{t.name}': {d.label()}: {e}")
+    for i, d in enumerate(p.master.get("fx", [])):
+        if isinstance(d, Device) and not d.bypass:
+            try:
+                _check_builtin(d)
+                engine.resolve_device(d, p, False)
+            except Exception as e:  # noqa: BLE001
+                out.append(f"master fx {i}: {d.label()}: {e}")
+    return out
 
 
 def _eq_notes(p: Project, dev: Device) -> list[str]:
@@ -928,7 +1035,8 @@ def fx_update(track: str, index: int, project: str | None = None, params: dict |
     A replaced device keeps the old one's sidechain key."""
     old = _fx_at(_fx_chain(load(project), track), track, index)
     new = parse_device(replace, instrument=False) if replace is not None else old
-    key = old.sidechain if sidechain is None else (sidechain or None)
+    _check_builtin(new, {**(new.params if replace is not None else {}), **(params or {})})
+    key = old.sidechain if sidechain is None else (None if str(sidechain).lower() in ("", "none") else sidechain)
     switch, notes = {}, []
     if key and (sidechain not in (None, "") or replace is not None):  # newly keyed, or a new device to key
         _sidechain_device_check(new)
@@ -1011,9 +1119,14 @@ def automation(track: str, param: str = "volume_db", points: list | None = None,
             dev, _label, numeric = _auto_target(p, track, device, param)
             lanes, who = dev.automation, {"track": track if track == "master" else p.track(track).name}
         lane = [] if clear else list(lanes.get(param, []))
+        notes: list[str] = []
         for pos, v in points or []:
             b = p.pos(pos)
-            if numeric or not isinstance(v, str):
+            if device is None and param == "pan":
+                v = _pan_value(v, notes)
+            elif device is not None and numeric:
+                v = _check_builtin(dev, {param: v})[param]
+            elif numeric or not isinstance(v, str):
                 v = float(v)
             lane = [pt for pt in lane if abs(pt[0] - b) > 1e-6] + [[b, v]]
         if lane:
@@ -1022,7 +1135,8 @@ def automation(track: str, param: str = "volume_db", points: list | None = None,
             lanes.pop(param, None)
         if device is not None:
             who["device"] = _fx_label(p, dev)
-    return {**who, param: [[p.fmt_pos(b), v] for b, v in lanes.get(param, [])]}
+    return {**who, param: [[p.fmt_pos(b), v] for b, v in lanes.get(param, [])],
+            **({"notes": sorted(set(notes))} if notes else {})}
 
 
 # ---- writing notes --------------------------------------------------------------------------------------------------
@@ -1170,7 +1284,7 @@ def notes_read(track: str | None = None, start=None, end=None, project: str | No
     """
     p = load(project)
     s = p.pos(start) if start is not None else None
-    e = p.pos(end) if end is not None else None
+    e = _end_bar(p, end) if end is not None else None
     flats = theory.Key(p.key).flats
     out = []
     for t in ([p.track(track)] if track else p.tracks):
@@ -1886,6 +2000,71 @@ def _takes_left_out(path: Path, rep: dict) -> None:
         f"discard {'each' if n != 1 else 'it'} first, or leave {'them' if n != 1 else 'it'} out on purpose.")
 
 
+def _brief_seconds(p: Project, v) -> tuple[float, float] | None:
+    """The length a brief asks for as a (shortest, longest) span in seconds: "about 2 minutes", "1:30", "60-90 s",
+    "32 bars", 90. A single value gets 15% either way. None when it says no length."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v) * 0.85, float(v) * 1.15
+    s = str(v or "").lower()
+    unit = {"min": 60.0, "sec": 1.0, "s": 1.0, "bar": p.tempo_map().sec(p.beats_per_bar)}
+    u = r"(min|sec|s\b|bar)"
+    m = re.search(r"(\d+):([0-5]\d)", s)
+    if m:
+        x = int(m.group(1)) * 60 + int(m.group(2))
+        return x * 0.85, x * 1.15
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|to|–)\s*(\d+(?:\.\d+)?)\s*" + u, s)
+    if m:
+        k = unit[m.group(3)]
+        return float(m.group(1)) * k * 0.95, float(m.group(2)) * k * 1.05
+    m = re.search(r"(\d+(?:\.\d+)?)\s*" + u, s)
+    if m:
+        x = float(m.group(1)) * unit[m.group(2)]
+        return x * 0.85, x * 1.15
+    return None
+
+
+def _delivery(p: Project, r, rep: dict) -> dict:
+    """Checks an export of the session against what was asked for: length, loop, every part present, left/right
+    balance, a one-shot's tail dying away, the loop seam. Warnings only: the caller decides."""
+    import numpy as np
+    out: list[str] = []
+    looped = any(str(f).endswith(".loop.json") for f in rep.get("files", []))
+    tm = p.tempo_map()
+    secs = tm.sec(p.loop["end"]) - tm.sec(p.loop["start"]) if p.loop and looped else tm.sec(p.end)
+    want = _brief_seconds(p, p.brief.get("length")) if p.brief.get("length") is not None else None
+    if want and not want[0] <= secs <= want[1]:
+        out.append(f"length {secs:.0f} s{' (the loop)' if looped else ''}; the brief asks for "
+                   f"{p.brief.get('length')!s}")
+    said = " ".join(str(v) for k, v in p.brief.items() if k != "style").lower()
+    if re.search(r"\bloop", said) and not re.search(r"\b(no|not a|don't|not) loop", said) and not looped:
+        out.append("the brief asks for a loop but this export is not looped: project_set(loop=\"1:1-<bar after the "
+                   "last>:1\") and render(loop=\"auto\")")
+    playing = engine.soloed_sources(p)
+    pre = getattr(r, "pre", {}) or {}
+    for t in p.tracks:
+        if t.kind == "midi" and not t.mute and t.id in playing and any(c.notes for c in t.clips if not c.muted):
+            a = pre.get(t.id)
+            if a is None or float(np.abs(a).max(initial=0)) < 1e-4:
+                out.append(f"'{t.name}' has notes but is not in the mix")
+    mix = getattr(r, "final", None)
+    if mix is not None and mix.ndim == 2 and mix.shape[0] == 2 and mix.shape[1]:
+        rms = [float(np.sqrt(np.mean(ch ** 2))) for ch in mix]
+        if max(rms) > 1e-5:
+            lr = max(-60.0, min(60.0, 20 * math.log10(max(rms[0], 1e-9) / max(rms[1], 1e-9))))
+            if abs(lr) > 3:
+                out.append(f"left is {abs(lr):.1f} dB {'louder' if lr > 0 else 'quieter'} than right: check the pans")
+        tail = mix[:, -int(0.5 * p.sample_rate):]
+        if not looped and tail.size:
+            t_db = 20 * math.log10(max(float(np.sqrt(np.mean(tail ** 2))), 1e-9))
+            if t_db > -60:
+                out.append(f"the last 0.5 s is still at {t_db:.0f} dB (should be under -60): the end is cut off; "
+                           "check reverb decay, or extend length/tail")
+    seam = rep.get("loop_seam") or {}
+    if looped and seam.get("warning"):
+        out.append("loop seam: " + seam["warning"])
+    return {"ok": not out, **({"warnings": out} if out else {}), "length_s": round(secs, 1)}
+
+
 def render(project: str | None = None, out: str | None = None, format: str = "wav", bits: int = 24,
            loop: str = "auto", normalize: bool = True, stems: bool = False, layers: bool = False,
            midi: bool = False) -> dict:
@@ -1902,12 +2081,16 @@ def render(project: str | None = None, out: str | None = None, format: str = "wa
             raise ValueError("this project has no picture to export with: set one with picture(file=...)")
         out, loop = str(p.path / "renders" / f"{film.stem}.wav"), "off"
     rep = engine.render_project(p, out, format, int(bits), loop, normalize, stems, layers, midi)
-    rep.pop("renderer", None)
+    r = rep.pop("renderer", None)
     if film:
         rep["files"] = [pic.mux(p, rep["files"][0], film)] + list(rep["files"])
     rep["seconds"] = round(time.time() - t0, 1)
     if out and session_root(p.path) == p.path:
         _takes_left_out(p.path, rep)
+        try:
+            rep["delivery"] = _delivery(p, r, rep)
+        except Exception as e:  # noqa: BLE001 - a check that breaks must not lose the export
+            rep["delivery"] = {"ok": False, "warnings": [f"delivery check failed: {e}"]}
     (p.path / "renders").mkdir(exist_ok=True)
     (p.path / "renders" / "last.json").write_text(json.dumps(rep, indent=1), encoding="utf-8")
     return rep
@@ -1946,7 +2129,7 @@ def score(start=None, end=None, section: str | None = None, tracks: list | None 
     bar:beat and a fix.
     Default range: the whole song, at most 32 bars. Drum tracks are left out unless named in `tracks`."""
     p = load(project)
-    s, e = _span(p, start, end, section)
+    s, e = _span(p, start, end, section, through=True)
     song_end = max(p.end, harm.track_end(p))
     if e is None:
         e = min(song_end, s + 32 * p.beats_per_bar)
@@ -1969,7 +2152,7 @@ def listen(project: str | None = None, reference: str | None = None, probe: bool
     p = load(project)
     span = None
     if start is not None or end is not None or section:
-        s, e = _span(p, start, end, section)
+        s, e = _span(p, start, end, section, through=True)
         span = (s, e if e is not None else max(p.end, p.beats_per_bar))
     t0 = time.time()
     r = engine.Renderer(p)

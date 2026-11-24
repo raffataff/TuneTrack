@@ -8,8 +8,8 @@ about: A real orchestra writing as if a composer had scored it: sections in thei
 - Sampled instruments only (patches or SFZ): strings, woodwinds, horns, harp, timpani. When status() shows none,
   ask the user before planning a synth in their place.
 - Plan the orchestration per section: who has the tune, who accompanies, what enters for B, where the tutti is.
-  One climax in the cue, not one per section.
-- 80-120 bpm for adventure, slower for wonder; a cue built from one theme, varied, not a string of new tunes.
+  A short cue has one climax, not one per section; a long piece builds several peaks toward one main climax.
+- 80-120 bpm for adventure, slower for wonder; a short cue is one theme, varied; a longer piece has two or more themes that develop, combine and return, not a string of unrelated tunes.
 
 ## composer
 - The theme first, as a single line, before any accompaniment: a motif someone could whistle, then grow it
